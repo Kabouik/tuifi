@@ -1,0 +1,4150 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+mctui - a TUI for Monochrome (Hi-Fi Tidal API)
+"""
+
+from __future__ import annotations
+
+import base64
+import curses
+import json
+import os
+import random
+import re
+import socket
+import subprocess
+import sys
+import threading
+import time
+import urllib.parse
+import urllib.request
+from dataclasses import dataclass
+from queue import Queue, Empty
+from typing import Any, Dict, List, Optional, Tuple
+
+APP_NAME = "monochrome-tui"
+DEFAULT_API = "https://api.monochrome.tf"
+
+# Global debug log path (set by --verbose)
+_DEBUG_LOG: Optional[str] = None
+
+def debug_log(msg: str) -> None:
+    if _DEBUG_LOG:
+        try:
+            with open(_DEBUG_LOG, "a", encoding="utf-8") as f:
+                f.write(f"[{time.strftime('%H:%M:%S')}] {msg}\n")
+        except Exception:
+            pass
+
+# --- config dir resolution ---
+def _resolve_config_dir() -> str:
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    if os.access(script_dir, os.W_OK):
+        return script_dir
+    xdg_cfg = os.path.join(os.path.expanduser("~"), ".config", "mctui")
+    if os.path.isdir(xdg_cfg):
+        return xdg_cfg
+    return os.path.join(os.path.expanduser("~"), ".local", "state", APP_NAME)
+
+STATE_DIR = _resolve_config_dir()
+QUEUE_FILE = os.path.join(STATE_DIR, "queue.json")
+LIKES_FILE = os.path.join(STATE_DIR, "likes.json")
+PLAYLISTS_FILE = os.path.join(STATE_DIR, "playlists.json")
+SETTINGS_FILE = os.path.join(STATE_DIR, "settings.json")
+
+DOWNLOADS_DIR = os.path.join(os.getcwd(), "downloads")
+QUALITY_ORDER = ["HI_RES_LOSSLESS", "LOSSLESS", "HIGH", "LOW"]
+
+TAB_QUEUE = 1
+TAB_SEARCH = 2
+TAB_RECOMMENDED = 3
+TAB_ARTIST = 4
+TAB_ALBUM = 5
+TAB_LIKED = 6
+TAB_PLAYLISTS = 7
+
+TAB_NAMES = {
+    TAB_QUEUE: "1 Queue",
+    TAB_SEARCH: "2 Search",
+    TAB_RECOMMENDED: "3 Recommended",
+    TAB_ARTIST: "4 Artist",
+    TAB_ALBUM: "5 Album",
+    TAB_LIKED: "6 Liked",
+    TAB_PLAYLISTS: "7 Playlists",
+}
+
+
+def mkdirp(path: str) -> None:
+    os.makedirs(path, exist_ok=True)
+
+
+def clamp(n: int, lo: int, hi: int) -> int:
+    return lo if n < lo else hi if n > hi else n
+
+
+def safe_filename(s: str) -> str:
+    s = (s or "").strip()
+    s = re.sub(r"[\/\\\0]+", "-", s)
+    s = re.sub(r"[\:\*\?\"\<\>\|]+", "", s)
+    s = re.sub(r"\s+", " ", s)
+    return s or "_"
+
+
+def year_norm(y: str) -> str:
+    y = (y or "").strip()
+    return y if (len(y) == 4 and y.isdigit()) else "????"
+
+
+def album_year_from_obj(obj: Any) -> str:
+    if not isinstance(obj, dict):
+        return "????"
+    for k in ("releaseDate", "streamStartDate", "date", "copyright"):
+        v = obj.get(k)
+        if isinstance(v, str):
+            m = re.search(r"(19\d{2}|20\d{2})", v)
+            if m:
+                return m.group(1)
+    for k in ("year", "releaseYear"):
+        v = obj.get(k)
+        if isinstance(v, (int, str)) and str(v).isdigit():
+            return str(v)
+    return "????"
+
+
+def http_get_bytes(url: str, timeout: float = 15.0) -> bytes:
+    req = urllib.request.Request(url, headers={"User-Agent": f"{APP_NAME}/1.0"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read()
+
+
+def http_get_json(url: str, timeout: float = 12.0) -> Dict[str, Any]:
+    req = urllib.request.Request(url, headers={"User-Agent": f"{APP_NAME}/1.0"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        data = r.read()
+    raw = data.decode("utf-8", "replace")
+    if not raw.strip():
+        raise RuntimeError("Empty HTTP response")
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as e:
+        hint = raw.strip()[:120].replace("\n", "\\n")
+        raise RuntimeError(f"Non-JSON HTTP response: {e} ; head={hint!r}") from e
+
+
+def http_stream_download(url: str, dst_path: str, progress_cb, timeout: float = 120.0) -> None:
+    req = urllib.request.Request(url, headers={"User-Agent": f"{APP_NAME}/1.0"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        total = None
+        try:
+            cl = r.headers.get("Content-Length")
+            if cl and cl.isdigit():
+                total = int(cl)
+        except Exception:
+            total = None
+        downloaded = 0
+        tmp = dst_path + ".part"
+        with open(tmp, "wb") as f:
+            while True:
+                chunk = r.read(64 * 1024)
+                if not chunk:
+                    break
+                f.write(chunk)
+                downloaded += len(chunk)
+                progress_cb(downloaded, total)
+        os.replace(tmp, dst_path)
+
+
+def fmt_time(sec: Optional[float]) -> str:
+    if sec is None:
+        return "--:--"
+    try:
+        sec = float(sec)
+    except Exception:
+        return "--:--"
+    sec = max(0, sec)
+    return f"{int(sec)//60:02d}:{int(sec)%60:02d}"
+
+
+def fmt_dur(sec: Optional[int]) -> str:
+    if sec is None or sec <= 0:
+        return ""
+    return f"{sec//60}:{sec%60:02d}"
+
+
+@dataclass
+class Track:
+    id: int
+    title: str
+    artist: str
+    album: str
+    year: str
+    track_no: int
+    duration: Optional[int] = None
+    artist_id: Optional[int] = None
+    album_id: Optional[int] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id, "title": self.title, "artist": self.artist,
+            "album": self.album, "year": self.year, "track_no": self.track_no,
+            "duration": self.duration, "artist_id": self.artist_id, "album_id": self.album_id,
+        }
+
+    @staticmethod
+    def from_dict(d: Dict[str, Any]) -> "Track":
+        def opt_int(x) -> Optional[int]:
+            try:
+                return int(x) if x is not None else None
+            except Exception:
+                return None
+        return Track(
+            id=int(d.get("id", 0)),
+            title=str(d.get("title", "") or ""),
+            artist=str(d.get("artist", "") or ""),
+            album=str(d.get("album", "") or ""),
+            year=str(d.get("year", "") or "????"),
+            track_no=int(d.get("track_no", 0) or 0),
+            duration=opt_int(d.get("duration")),
+            artist_id=opt_int(d.get("artist_id")),
+            album_id=opt_int(d.get("album_id")),
+        )
+
+
+@dataclass
+class Album:
+    id: int
+    title: str
+    artist: str
+    year: str
+
+
+class HiFiClient:
+    def __init__(self, base: str) -> None:
+        self.base = base.rstrip("/")
+
+    def _u(self, path: str, q: Dict[str, Any]) -> str:
+        return f"{self.base}{path}?{urllib.parse.urlencode(q)}"
+
+    def search_tracks(self, q: str, limit: int = 160) -> Dict[str, Any]:
+        return http_get_json(self._u("/search/", {"s": q, "limit": limit}))
+
+    def recommendations(self, track_id: int, limit: int = 50) -> Dict[str, Any]:
+        return http_get_json(self._u("/recommendations/", {"id": int(track_id), "limit": limit}))
+
+    def info(self, track_id: int) -> Dict[str, Any]:
+        return http_get_json(self._u("/info/", {"id": int(track_id)}))
+
+    def track(self, track_id: int, quality: str) -> Dict[str, Any]:
+        return http_get_json(self._u("/track/", {"id": int(track_id), "quality": quality}))
+
+    def lyrics(self, track_id: int) -> Dict[str, Any]:
+        return http_get_json(self._u("/lyrics/", {"id": int(track_id)}))
+
+    def album(self, album_id: int) -> Dict[str, Any]:
+        return http_get_json(self._u("/album/", {"id": int(album_id)}))
+
+    def artist(self, artist_id: int) -> Dict[str, Any]:
+        try:
+            return http_get_json(self._u("/artist/", {"id": int(artist_id)}))
+        except Exception:
+            return http_get_json(self._u("/artist/", {"f": int(artist_id)}))
+
+
+def load_json(path: str, default: Any) -> Any:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return default
+
+
+def save_json(path: str, obj: Any) -> None:
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+
+
+def load_queue() -> Tuple[List[Track], int]:
+    data = load_json(QUEUE_FILE, {})
+    if isinstance(data, dict) and data.get("version") == 2 and isinstance(data.get("items"), list):
+        items: List[Track] = []
+        for it in data["items"]:
+            if isinstance(it, dict):
+                try:
+                    t = Track.from_dict(it)
+                    if t.id > 0:
+                        items.append(t)
+                except Exception:
+                    pass
+        play_idx = int(data.get("idx", 0) or 0)
+        play_idx = clamp(play_idx, 0, max(0, len(items) - 1))
+        return items, play_idx
+    return [], 0
+
+
+def save_queue(items: List[Track], play_idx: int) -> None:
+    play_idx = clamp(play_idx, 0, max(0, len(items) - 1))
+    save_json(QUEUE_FILE, {"version": 2, "idx": play_idx, "items": [t.to_dict() for t in items]})
+
+
+def load_likes() -> Dict[str, List[int]]:
+    data = load_json(LIKES_FILE, {"tracks": [], "artists": [], "albums": []})
+    out = {"tracks": [], "artists": [], "albums": []}
+    if isinstance(data, dict):
+        for k in out:
+            v = data.get(k)
+            if isinstance(v, list):
+                out[k] = [int(x) for x in v if str(x).isdigit()]
+    return out
+
+
+def save_likes(likes: Dict[str, List[int]]) -> None:
+    save_json(LIKES_FILE, likes)
+
+
+def load_playlists() -> Dict[str, List[int]]:
+    data = load_json(PLAYLISTS_FILE, {})
+    out: Dict[str, List[int]] = {}
+    if isinstance(data, dict):
+        for k, v in data.items():
+            if isinstance(k, str) and isinstance(v, list):
+                out[k] = [int(x) for x in v if str(x).isdigit()]
+    return out
+
+
+def save_playlists(pl: Dict[str, List[int]]) -> None:
+    save_json(PLAYLISTS_FILE, pl)
+
+
+def load_settings() -> Dict[str, Any]:
+    s = load_json(SETTINGS_FILE, {})
+    if not isinstance(s, dict):
+        s = {}
+    s.setdefault("volume", 100)
+    s.setdefault("mute", False)
+    s.setdefault("color_mode", True)
+    s.setdefault("queue_overlay", False)
+    s.setdefault("show_toggles", True)
+    s.setdefault("show_track_album", True)
+    s.setdefault("show_track_year", True)
+    s.setdefault("show_track_duration", True)
+    s.setdefault("quality", QUALITY_ORDER[0])
+    s.setdefault("auto_recommend", False)
+    s.setdefault("show_numbers", False)
+    s.setdefault("initial_tab", TAB_SEARCH)
+    s.setdefault("initial_filter", "")
+    s.setdefault("tab_align", True)  # TSV tab-align mode
+    s.setdefault("tsv_max_col_width", 32)  # default max column width in TSV mode (0 = no limit)
+    # Per-field max widths (0 = use tsv_max_col_width default)
+    s.setdefault("tsv_max_artist_width", 0)
+    s.setdefault("tsv_max_title_width", 0)
+    s.setdefault("tsv_max_album_width", 0)
+    s.setdefault("tsv_max_year_width", 6)
+    s.setdefault("tsv_max_duration_width", 6)
+
+    # Color customization per-field
+    # Color pair assignments:
+    #  1 = playing/state indicator (green)
+    #  2 = paused indicator (yellow)
+    #  3 = error (red)
+    #  4 = chrome/UI (cyan)
+    #  5 = accent/priority (magenta)
+    #  6 = accent2 (magenta)
+    #  7 = artist name
+    #  8 = album name
+    #  9 = duration
+    # 10 = line numbers
+    # 11 = title
+    # 12 = year
+    # 13 = separator (- between artist/title)
+    # 14 = liked heart
+    # 15 = mark indicator (+)
+    s.setdefault("color_playing",   "cyan")
+    s.setdefault("color_paused",    "yellow")
+    s.setdefault("color_error",     "red")
+    s.setdefault("color_chrome",    "cyan")
+    s.setdefault("color_accent",    "magenta")
+    s.setdefault("color_artist",    "white")
+    s.setdefault("color_album",     "blue")
+    s.setdefault("color_year",      "blue")
+    s.setdefault("color_duration",  "black")
+    s.setdefault("color_numbers",   "black")
+    s.setdefault("color_title",     "white")
+    s.setdefault("color_separator", "white")
+    s.setdefault("color_liked",     "white")
+    s.setdefault("color_mark",      "cyan")
+    return s
+
+
+def save_settings(s: Dict[str, Any]) -> None:
+    save_json(SETTINGS_FILE, s)
+
+
+class MPV:
+    """mpv JSON IPC (control + state)."""
+    def __init__(self) -> None:
+        self.proc: Optional[subprocess.Popen] = None
+        self.sock_path: Optional[str] = None
+        self._req_id = 0
+        self._lock = threading.Lock()
+        self.time_pos: Optional[float] = None
+        self.duration: Optional[float] = None
+        self.pause: Optional[bool] = None
+        self.volume: Optional[float] = None
+        self.mute: Optional[bool] = None
+        self._mpv_stderr_path: Optional[str] = None
+        self._mpv_stderr_fh = None
+
+    def start(self, url: str, resume: bool = False) -> None:
+        self.stop()
+        self.sock_path = f"/tmp/{APP_NAME}-mpv-{os.getpid()}-{int(time.time()*1000)}.sock"
+        try:
+            if os.path.exists(self.sock_path):
+                os.unlink(self.sock_path)
+        except Exception:
+            pass
+        args = [
+            "mpv", "--no-video", "--force-window=no", "--really-quiet",
+            "--idle=no", f"--input-ipc-server={self.sock_path}",
+        ]
+        if not resume:
+            args.append("--no-resume-playback")
+
+        is_mpd = isinstance(url, str) and url.endswith(".mpd") and os.path.isfile(url)
+        if is_mpd:
+            # For local DASH .mpd files: disable ytdl (we handle it ourselves),
+            # allow all relevant extensions, and disable cache to avoid stalls.
+            args += [
+                "--demuxer-lavf-o=allowed_extensions=MPD,m4s,mp4,aac,flac,mp3,frag",
+                "--ytdl=no",
+                "--cache=no",
+            ]
+
+        args.append(url)
+
+        # In verbose mode, capture mpv stderr so we can diagnose playback failures
+        if _DEBUG_LOG:
+            self._mpv_stderr_path = f"/tmp/{APP_NAME}-mpv-err-{os.getpid()}.log"
+            try:
+                self._mpv_stderr_fh = open(self._mpv_stderr_path, "w")
+                stderr_target: Any = self._mpv_stderr_fh
+            except Exception:
+                self._mpv_stderr_fh = None
+                stderr_target = subprocess.DEVNULL
+        else:
+            self._mpv_stderr_path = None
+            self._mpv_stderr_fh = None
+            stderr_target = subprocess.DEVNULL
+
+        self.proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=stderr_target)
+        for _ in range(40):
+            if self.sock_path and os.path.exists(self.sock_path):
+                break
+            time.sleep(0.02)
+
+    def stop(self) -> None:
+        if self.proc:
+            try:
+                self.proc.terminate()
+                self.proc.wait(timeout=2.0)
+            except Exception:
+                pass
+            # Log mpv stderr before closing
+            if _DEBUG_LOG and self._mpv_stderr_fh:
+                try:
+                    self._mpv_stderr_fh.flush()
+                    self._mpv_stderr_fh.close()
+                    self._mpv_stderr_fh = None
+                    if self._mpv_stderr_path and os.path.exists(self._mpv_stderr_path):
+                        with open(self._mpv_stderr_path, "r", errors="replace") as ef:
+                            err_content = ef.read().strip()
+                        if err_content:
+                            debug_log(f"  mpv stderr: {err_content[:400]}")
+                except Exception:
+                    pass
+            self.proc = None
+        if self.sock_path:
+            try:
+                if os.path.exists(self.sock_path):
+                    os.unlink(self.sock_path)
+            except Exception:
+                pass
+        self.sock_path = None
+        with self._lock:
+            self.time_pos = self.duration = None
+            self.pause = self.volume = self.mute = None
+
+    def alive(self) -> bool:
+        return self.proc is not None and self.proc.poll() is None
+
+    def _rpc(self, payload: Dict[str, Any], timeout: float = 0.10) -> Optional[Dict[str, Any]]:
+        if not self.sock_path or not os.path.exists(self.sock_path):
+            return None
+        self._req_id += 1
+        payload = dict(payload)
+        payload["request_id"] = self._req_id
+        msg = (json.dumps(payload) + "\n").encode("utf-8")
+        try:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.settimeout(timeout)
+            s.connect(self.sock_path)
+            s.sendall(msg)
+            data = b""
+            while not data.endswith(b"\n"):
+                chunk = s.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+            s.close()
+            if not data:
+                return None
+            try:
+                return json.loads(data.decode("utf-8", "replace"))
+            except json.JSONDecodeError:
+                return None
+        except Exception:
+            return None
+
+    def cmd(self, *args: Any) -> None:
+        self._rpc({"command": list(args)})
+
+    def get(self, prop: str) -> Optional[Any]:
+        r = self._rpc({"command": ["get_property", prop]})
+        if isinstance(r, dict) and r.get("error") == "success":
+            return r.get("data")
+        return None
+
+    def poll_once(self) -> None:
+        if not self.alive():
+            with self._lock:
+                self.time_pos = self.duration = None
+                self.pause = self.volume = self.mute = None
+            return
+        tp = self.get("time-pos")
+        du = self.get("duration")
+        pa = self.get("pause")
+        vo = self.get("volume")
+        mu = self.get("mute")
+        with self._lock:
+            self.time_pos = tp if isinstance(tp, (int, float)) else None
+            self.duration = du if isinstance(du, (int, float)) else None
+            self.pause = bool(pa) if pa is not None else None
+            try:
+                self.volume = float(vo) if vo is not None else None
+            except Exception:
+                self.volume = None
+            self.mute = bool(mu) if mu is not None else None
+
+    def snapshot(self) -> Tuple[Optional[float], Optional[float], Optional[bool], Optional[float], Optional[bool]]:
+        with self._lock:
+            return (self.time_pos, self.duration, self.pause, self.volume, self.mute)
+
+
+class MPVPoller:
+    """Background poller so UI never blocks on IPC."""
+    def __init__(self, mp: MPV, on_tick) -> None:
+        self.mp = mp
+        self.on_tick = on_tick
+        self._stop = False
+        self._prev_snapshot: tuple = (None, None, None, None, None)
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop = True
+
+    def _run(self) -> None:
+        while not self._stop:
+            self.mp.poll_once()
+            snap = self.mp.snapshot()
+            if snap != self._prev_snapshot:
+                self._prev_snapshot = snap
+                try:
+                    self.on_tick()
+                except Exception:
+                    pass
+            time.sleep(0.33)
+
+
+class DownloadManager:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._queue: List[Track] = []
+        self._thread: Optional[threading.Thread] = None
+        self.active = False
+        self.progress_line = ""
+        self.error: Optional[str] = None
+        self._total = 0       # total tracks enqueued in current batch+queue
+        self._completed = 0   # tracks completed so far
+
+    def enqueue(self, tracks: List[Track], worker_fn) -> None:
+        if not tracks:
+            return
+        with self._lock:
+            if not self._queue and not self.active:
+                # Fresh batch: reset counters
+                self._total = len(tracks)
+                self._completed = 0
+            else:
+                self._total += len(tracks)
+            self._queue.extend(tracks)
+            if self._thread is None or not self._thread.is_alive():
+                self._thread = threading.Thread(target=self._run, args=(worker_fn,), daemon=True)
+                self._thread.start()
+
+    def _run(self, worker_fn) -> None:
+        self.active = True
+        self.error = None
+        while True:
+            with self._lock:
+                if not self._queue:
+                    break
+                t = self._queue.pop(0)
+                remaining = len(self._queue)
+                current = self._total - remaining  # 1-based index of this track
+                total = self._total
+            try:
+                worker_fn(t, remaining, current, total, self._set_progress)
+            except Exception as e:
+                self.error = str(e)
+            with self._lock:
+                self._completed += 1
+        self.active = False
+        self._set_progress("")
+
+    def _set_progress(self, s: str) -> None:
+        with self._lock:
+            self.progress_line = s
+
+
+class MetaFetcher:
+    def __init__(self, client: HiFiClient) -> None:
+        self.client = client
+        self.q: "Queue[int]" = Queue()
+        self.pending: set = set()
+        self.lock = threading.Lock()
+        self.year: Dict[int, str] = {}
+        self.album_id: Dict[int, int] = {}
+        self.artist_id: Dict[int, int] = {}
+        self.duration: Dict[int, int] = {}
+        self._stop = False
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop = True
+
+    def want(self, tid: int) -> None:
+        if tid <= 0:
+            return
+        with self.lock:
+            if tid in self.pending:
+                return
+            self.pending.add(tid)
+            self.q.put(tid)
+
+    def _run(self) -> None:
+        while not self._stop:
+            try:
+                tid = self.q.get(timeout=0.2)
+            except Empty:
+                continue
+            try:
+                info = self.client.info(tid)
+                data = info.get("data") if isinstance(info, dict) else None
+                if isinstance(data, dict):
+                    alb = data.get("album")
+                    if isinstance(alb, dict):
+                        y = album_year_from_obj(alb)
+                        if y != "????":
+                            self.year[tid] = y
+                        if str(alb.get("id", "")).isdigit():
+                            self.album_id[tid] = int(alb["id"])
+                    if tid not in self.year:
+                        y2 = album_year_from_obj(data)
+                        if y2 != "????":
+                            self.year[tid] = y2
+                    a = data.get("artist")
+                    if isinstance(a, dict) and str(a.get("id", "")).isdigit():
+                        self.artist_id[tid] = int(a["id"])
+                    dv = data.get("duration")
+                    if isinstance(dv, (int, float)) and dv > 0:
+                        self.duration[tid] = int(dv)
+            except Exception:
+                pass
+            finally:
+                with self.lock:
+                    self.pending.discard(tid)
+                self.q.task_done()
+
+
+class App:
+    def __init__(self, stdscr: "curses._CursesWindow", api_base: str, args: Dict[str, Any]) -> None:
+        self.stdscr = stdscr
+        self.api_base = api_base.rstrip("/")
+        self.client = HiFiClient(self.api_base)
+        self.meta = MetaFetcher(self.client)
+        self.mp = MPV()
+        self.mp_poller = MPVPoller(self.mp, self._on_mpv_tick)
+        self.dl = DownloadManager()
+
+        mkdirp(STATE_DIR)
+        mkdirp(DOWNLOADS_DIR)
+
+        self.settings = load_settings()
+
+        def pick(key, arg_key=None):
+            ak = arg_key or key
+            if ak in args and args[ak] is not None:
+                return args[ak]
+            return self.settings.get(key)
+
+        self.desired_volume = clamp(int(self.settings.get("volume", 70) or 70), 0, 130)
+        self.desired_mute = bool(self.settings.get("mute", False))
+        self.color_mode = bool(pick("color_mode"))
+        self.queue_overlay = bool(pick("queue_overlay"))
+        self.show_toggles = bool(pick("show_toggles"))
+        self.show_numbers = bool(pick("show_numbers"))
+        self.show_track_album = bool(self.settings.get("show_track_album", True))
+        self.show_track_year = bool(self.settings.get("show_track_year", True))
+        self.show_track_duration = bool(self.settings.get("show_track_duration", False))
+        self.tab_align = bool(pick("tab_align"))  # TSV tab-align mode
+        self.tsv_max_col_width = int(self.settings.get("tsv_max_col_width", 32) or 32)
+        # Per-field max widths; 0 means fall back to tsv_max_col_width
+        def _field_w(key: str) -> int:
+            v = int(self.settings.get(key, 0) or 0)
+            return v if v > 0 else self.tsv_max_col_width
+        self.tsv_field_widths = {
+            "artist":   _field_w("tsv_max_artist_width"),
+            "title":    _field_w("tsv_max_title_width"),
+            "album":    _field_w("tsv_max_album_width"),
+            "year":     _field_w("tsv_max_year_width"),
+            "duration": _field_w("tsv_max_duration_width"),
+        }
+
+        q0 = str(pick("quality") or QUALITY_ORDER[0])
+        self.quality_idx = QUALITY_ORDER.index(q0) if q0 in QUALITY_ORDER else 0
+        self.auto_recommend = bool(self.settings.get("auto_recommend", False))
+
+        self.likes = load_likes()
+        self.playlists = load_playlists()
+        self.queue_items, self.queue_play_idx = load_queue()
+        self.queue_cursor = 0
+        self.focus = "left"
+
+        self.tab = int(pick("initial_tab") or TAB_QUEUE)
+        self.tab = clamp(self.tab, TAB_QUEUE, TAB_PLAYLISTS)
+
+        self.search_q = ""
+        self.search_results: List[Track] = []
+        self.recommended_results: List[Track] = []
+        self.liked_cache: List[Track] = []
+        self.artist_albums: List[Album] = []
+        self.artist_tracks: List[Track] = []
+        self.album_header: Optional[Album] = None
+        self.album_tracks: List[Track] = []
+        self.playlist_names: List[str] = sorted(self.playlists.keys())
+        self.playlist_view_name: Optional[str] = None
+        self.playlist_view_tracks: List[Track] = []
+
+        self.left_idx = 0
+        self.left_scroll = 0
+
+        self.marked_left_idx: set = set()
+        self.marked_queue_idx: set = set()
+
+        self.priority_queue: List[int] = []
+
+        self.repeat_mode = 0
+        self.shuffle_on = False
+
+        self.current_track: Optional[Track] = None
+        self.last_error: Optional[str] = None
+
+        self.toast_msg = ""
+        self.toast_until = 0.0
+
+        self.show_help = False
+        self.help_scroll = 0
+
+        self.info_overlay = False
+        self.info_scroll = 0
+        self.info_track: Optional[Track] = None
+        self.info_album: Optional[Album] = None
+        self.info_payload: Optional[Dict[str, Any]] = None
+        self.info_loading = False
+        self._info_target_id: Optional[int] = None
+        self._info_target_album_id: Optional[int] = None
+        self._info_refresh_due = 0.0
+
+        self.lyrics_overlay = False
+        self.lyrics_scroll = 0
+        self.lyrics_lines: List[str] = []
+        self.lyrics_loading = False
+        self.lyrics_track_id: Optional[int] = None
+        self.lyrics_track: Optional["Track"] = None
+
+        self.filter_q: str = str(self.settings.get("initial_filter") or "")
+        self.filter_hits: List[int] = []
+        self.filter_pos: int = -1
+
+        self._need_redraw = True
+        self._redraw_status_only = False
+        self._loading = False
+        self._loading_key = ""
+        self._liked_refresh_due: float = 0.0
+
+        self._last_mpd_path: Optional[str] = None
+
+        self._init_curses()
+
+        if self.filter_q:
+            self._compute_filter_hits()
+
+    # --- mpv tick callback ---
+    def _on_mpv_tick(self) -> None:
+        snap = self.mp.snapshot()
+        vo, mu, pa = snap[3], snap[4], snap[2]
+        if vo is not None:
+            self.desired_volume = clamp(int(vo), 0, 130)
+        if mu is not None:
+            self.desired_mute = bool(mu)
+        # Full redraw when pause/alive state changes so queue ▶/⏸ symbols refresh
+        prev_pa = getattr(self, "_prev_mpv_pause", None)
+        prev_alive = getattr(self, "_prev_mpv_alive", None)
+        cur_alive = self.mp.alive()
+        if pa != prev_pa or cur_alive != prev_alive:
+            self._prev_mpv_pause = pa
+            self._prev_mpv_alive = cur_alive
+            self._redraw_status_only = False
+        else:
+            self._redraw_status_only = True
+        self._need_redraw = True
+
+    # ---------- curses/colors ----------
+    def _name_to_curses_color(self, name: str) -> int:
+        mapping = {
+            "black": curses.COLOR_BLACK, "red": curses.COLOR_RED,
+            "green": curses.COLOR_GREEN, "yellow": curses.COLOR_YELLOW,
+            "blue": curses.COLOR_BLUE, "magenta": curses.COLOR_MAGENTA,
+            "cyan": curses.COLOR_CYAN, "white": curses.COLOR_WHITE,
+        }
+        s = str(name).strip().lower()
+        if s in mapping:
+            return mapping[s]
+        try:
+            n = int(s)
+            if 0 <= n <= 255:
+                return n
+        except Exception:
+            pass
+        return curses.COLOR_WHITE
+
+    def _init_curses(self) -> None:
+        curses.curs_set(0)
+        self.stdscr.nodelay(True)
+        self.stdscr.keypad(True)
+        curses.noecho()
+        curses.cbreak()
+        if curses.has_colors():
+            curses.start_color()
+            curses.use_default_colors()
+            s = self.settings
+            curses.init_pair(1,  self._name_to_curses_color(s.get("color_playing",   "green")),   -1)
+            curses.init_pair(2,  self._name_to_curses_color(s.get("color_paused",    "yellow")),  -1)
+            curses.init_pair(3,  self._name_to_curses_color(s.get("color_error",     "red")),     -1)
+            curses.init_pair(4,  self._name_to_curses_color(s.get("color_chrome",    "cyan")),    -1)
+            curses.init_pair(5,  self._name_to_curses_color(s.get("color_accent",    "magenta")), -1)
+            curses.init_pair(6,  self._name_to_curses_color(s.get("color_accent",    "magenta")), -1)
+            curses.init_pair(7,  self._name_to_curses_color(s.get("color_artist",    "green")),   -1)
+            curses.init_pair(8,  self._name_to_curses_color(s.get("color_album",     "yellow")),  -1)
+            curses.init_pair(9,  self._name_to_curses_color(s.get("color_duration",  "white")),   -1)
+            curses.init_pair(10, self._name_to_curses_color(s.get("color_numbers",   "white")),   -1)
+            curses.init_pair(11, self._name_to_curses_color(s.get("color_title",     "white")),   -1)
+            curses.init_pair(12, self._name_to_curses_color(s.get("color_year",      "yellow")),  -1)
+            curses.init_pair(13, self._name_to_curses_color(s.get("color_separator", "white")),   -1)
+            curses.init_pair(14, self._name_to_curses_color(s.get("color_liked",     "white")),   -1)
+            curses.init_pair(15, self._name_to_curses_color(s.get("color_mark",      "cyan")),    -1)
+
+    def C(self, pair: int) -> int:
+        if self.color_mode and curses.has_colors():
+            return curses.color_pair(pair)
+        return 0
+
+    # ---------- misc ----------
+    def toast(self, msg: str, sec: float = 2.0) -> None:
+        self.toast_msg = msg
+        self.toast_until = time.time() + sec
+        self._need_redraw = True
+
+    def _set_loading(self, key: str) -> None:
+        self._loading = True
+        self._loading_key = key
+        self.last_error = None
+        self._need_redraw = True
+        self._redraw_status_only = False
+
+    def _clear_loading(self, key: str) -> None:
+        if self._loading_key == key:
+            self._loading = False
+            self._need_redraw = True
+            self._redraw_status_only = False
+
+    def is_liked(self, tid: int) -> bool:
+        return tid in self.likes.get("tracks", [])
+
+    def web_base(self) -> str:
+        u = urllib.parse.urlparse(self.api_base)
+        host = u.netloc
+        scheme = u.scheme or "https"
+        if host.startswith("api."):
+            host = host[4:]
+        return f"{scheme}://{host}"
+
+    def open_url(self, url: str) -> None:
+        try:
+            subprocess.Popen(["xdg-open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.toast("Opened")
+        except Exception:
+            self.toast("Open failed")
+
+    # ---------- parsing ----------
+    def _parse_track_obj(self, obj: Dict[str, Any]) -> Optional[Track]:
+        try:
+            tid = int(obj.get("id") or obj.get("trackId") or 0)
+            if tid <= 0:
+                return None
+            title = str(obj.get("title") or obj.get("name") or "").strip() or f"Track {tid}"
+
+            artist = "Unknown"
+            artist_id: Optional[int] = None
+            a = obj.get("artist")
+            if isinstance(a, dict):
+                artist = str(a.get("name") or artist).strip() or artist
+                if str(a.get("id", "")).isdigit():
+                    artist_id = int(a["id"])
+            if artist == "Unknown":
+                arts = obj.get("artists")
+                if isinstance(arts, list) and arts and isinstance(arts[0], dict):
+                    artist = str(arts[0].get("name") or artist).strip() or artist
+                    if str(arts[0].get("id", "")).isdigit():
+                        artist_id = int(arts[0]["id"])
+
+            album_obj = obj.get("album") or {}
+            album = str(album_obj.get("title") or album_obj.get("name") or obj.get("albumTitle") or "").strip() or "Unknown"
+            year = album_year_from_obj(album_obj) if isinstance(album_obj, dict) else "????"
+            if year == "????":
+                year = album_year_from_obj(obj)
+
+            track_no = int(obj.get("trackNumber") or obj.get("track_no") or obj.get("trackNo") or 0)
+            duration: Optional[int] = None
+            for k in ("duration", "durationSeconds", "trackDuration"):
+                v = obj.get(k)
+                if isinstance(v, (int, float)) and v > 0:
+                    duration = int(v)
+                    break
+
+            album_id: Optional[int] = None
+            if isinstance(album_obj, dict) and str(album_obj.get("id", "")).isdigit():
+                album_id = int(album_obj["id"])
+
+            return Track(id=tid, title=title, artist=artist, album=album, year=year,
+                         track_no=track_no, duration=duration, artist_id=artist_id, album_id=album_id)
+        except Exception:
+            return None
+
+    def _parse_album_obj(self, obj: Dict[str, Any]) -> Optional[Album]:
+        try:
+            aid = int(obj.get("id") or 0)
+            title = str(obj.get("title") or obj.get("name") or "").strip()
+            if not title:
+                return None
+            artist = "Unknown"
+            a = obj.get("artist")
+            if isinstance(a, dict):
+                artist = str(a.get("name") or artist).strip() or artist
+            return Album(id=aid, title=title, artist=artist, year=album_year_from_obj(obj))
+        except Exception:
+            return None
+
+    def _extract_tracks_from_search(self, payload: Dict[str, Any]) -> List[Track]:
+        tracks: List[Track] = []
+
+        def scan_list(lst):
+            for it in lst:
+                if isinstance(it, dict):
+                    x = it.get("item", it) if isinstance(it.get("item"), dict) else it
+                    if isinstance(x.get("track"), dict):
+                        x = x["track"]
+                    t = self._parse_track_obj(x)
+                    if t:
+                        tracks.append(t)
+
+        if isinstance(payload, dict):
+            data = payload.get("data")
+            if isinstance(data, dict) and isinstance(data.get("items"), list):
+                scan_list(data["items"])
+            elif isinstance(payload.get("items"), list):
+                scan_list(payload["items"])
+
+        seen = set()
+        out: List[Track] = []
+        for t in tracks:
+            if t.id not in seen:
+                seen.add(t.id)
+                out.append(t)
+        return out
+
+    def _looks_like_track_dict(self, d: Dict[str, Any]) -> bool:
+        if "id" not in d or not (("title" in d) or ("name" in d)):
+            return False
+        return any(k in d for k in ("trackNumber", "trackNo", "duration", "durationSeconds",
+                                    "trackDuration", "isrc", "artists", "artist"))
+
+    def _scan_for_track_dicts(self, root: Any, out: List[Dict[str, Any]], limit: int = 2500) -> None:
+        if len(out) >= limit:
+            return
+        if isinstance(root, dict):
+            if self._looks_like_track_dict(root):
+                out.append(root)
+                return
+            for v in root.values():
+                self._scan_for_track_dicts(v, out, limit)
+                if len(out) >= limit:
+                    return
+        elif isinstance(root, list):
+            for v in root:
+                self._scan_for_track_dicts(v, out, limit)
+                if len(out) >= limit:
+                    return
+
+    def _extract_tracks_from_album_payload(self, payload: Dict[str, Any]) -> List[Track]:
+        candidates: List[Any] = []
+
+        def get_path(root, path):
+            cur = root
+            for p in path:
+                if isinstance(cur, dict) and p in cur:
+                    cur = cur[p]
+                else:
+                    return None
+            return cur
+
+        for path in (("data", "tracks", "items"), ("data", "tracks"), ("data", "items"),
+                     ("tracks", "items"), ("tracks",), ("items",)):
+            cur = get_path(payload, path)
+            if isinstance(cur, list) and cur:
+                candidates = cur
+                break
+
+        tracks: List[Track] = []
+        if candidates:
+            for it in candidates:
+                if isinstance(it, dict):
+                    x = it.get("item", it) if isinstance(it.get("item"), dict) else it
+                    if isinstance(x.get("track"), dict):
+                        x = x["track"]
+                    t = self._parse_track_obj(x)
+                    if t:
+                        tracks.append(t)
+
+        if not tracks:
+            dicts: List[Dict[str, Any]] = []
+            self._scan_for_track_dicts(payload, dicts, limit=2500)
+            for d in dicts:
+                t = self._parse_track_obj(d)
+                if t:
+                    tracks.append(t)
+
+        seen = set()
+        out: List[Track] = []
+        for t in tracks:
+            if t.id not in seen:
+                seen.add(t.id)
+                out.append(t)
+        out.sort(key=lambda t: (t.track_no if t.track_no > 0 else 10_000, t.title.lower()))
+        return out
+
+    # ---------- metadata ----------
+    def _track_year(self, t: Track) -> str:
+        y = year_norm(t.year)
+        return y if y != "????" else self.meta.year.get(t.id, "????")
+
+    def _track_duration(self, t: Track) -> Optional[int]:
+        return t.duration or self.meta.duration.get(t.id)
+
+    # ---------- formatting ----------
+    def _make_track_parts(self, t: Track) -> Tuple[str, str, str, str]:
+        """Returns (artist, title, album_year_string, duration_string)."""
+        yv = self._track_year(t) if self.show_track_year else "????"
+        album_year = ""
+        if self.tab_align:
+            # In tab-align mode, return raw fields; assembly handled in draw
+            album_year = t.album if self.show_track_album else ""
+            year_part = yv if (self.show_track_year and yv != "????") else ""
+            dur = ""
+            if self.show_track_duration:
+                dv = self._track_duration(t)
+                if dv:
+                    dur = fmt_dur(dv)
+            # Pack album and year together so callers handle them separately
+            return (t.artist, t.title, album_year, dur, year_part)  # type: ignore[return-value]
+        else:
+            if self.show_track_album and t.album:
+                album_year = f"({t.album}, {yv})" if (self.show_track_year and yv != "????") else f"({t.album})"
+            elif self.show_track_year and yv != "????":
+                album_year = f"({yv})"
+            dur = ""
+            if self.show_track_duration:
+                dv = self._track_duration(t)
+                if dv:
+                    dur = f"[{fmt_dur(dv)}]"
+            return (t.artist, t.title, album_year, dur)  # type: ignore[return-value]
+
+    def fmt_track_line_bw(self, t: Track, width: int, liked: bool) -> str:
+        parts = self._make_track_parts(t)
+        a, title, album_year, dur = parts[0], parts[1], parts[2], parts[3]
+        head = "♥ " if liked else ""
+        if self.tab_align:
+            year_part = parts[4] if len(parts) > 4 else ""
+            bits = [f"{head}{a}", title]
+            if self.show_track_album:
+                bits.append(album_year)
+            if self.show_track_year and year_part:
+                bits.append(year_part)
+            if dur:
+                bits.append(dur)
+            s = "\t".join(bits)
+        else:
+            bits = [f"{head}{a} - {title}"]
+            if album_year:
+                bits.append(album_year)
+            if dur:
+                bits.append(dur)
+            s = " ".join(bits)
+        return s if len(s) <= width else (s[:max(0, width - 1)] + "…")
+
+    def fmt_track_status(self, t: Track, width: int) -> str:
+        yv = self._track_year(t)
+        s = f"{t.artist} - {t.title} • {t.album}" + (f" • {yv}" if yv != "????" else "")
+        return s if len(s) <= width else (s[:max(0, width - 1)] + "…")
+
+    # ---------- UI model ----------
+    def _queue_context(self) -> bool:
+        return self.tab == TAB_QUEUE or self.focus == "queue"
+
+    def _left_items(self) -> Tuple[str, List[Any]]:
+        if self._loading:
+            return ("loading", [])
+        if self.tab == TAB_QUEUE:
+            return ("queue_tab", self.queue_items)
+        if self.tab == TAB_SEARCH:
+            return ("tracks", self.search_results)
+        if self.tab == TAB_RECOMMENDED:
+            return ("tracks", self.recommended_results)
+        if self.tab == TAB_ARTIST:
+            items: List[Any] = []
+            if self.artist_albums:
+                items.append(("sep", "Albums"))
+                items.extend(self.artist_albums)
+            if self.artist_tracks:
+                items.append(("sep", "Tracks"))
+                items.extend(self.artist_tracks)
+            return ("artist_mixed", items)
+        if self.tab == TAB_ALBUM:
+            items = []
+            if self.album_header:
+                items.append(("album_title", self.album_header))
+            items.extend(self.album_tracks)
+            return ("album_mixed", items)
+        if self.tab == TAB_LIKED:
+            return ("tracks", self.liked_cache)
+        if self.tab == TAB_PLAYLISTS:
+            if self.playlist_view_name is None:
+                return ("playlists", self.playlist_names)
+            return ("tracks", self.playlist_view_tracks)
+        return ("none", [])
+
+    def _selected_left_item(self) -> Optional[Any]:
+        _typ, items = self._left_items()
+        if items and 0 <= self.left_idx < len(items):
+            return items[self.left_idx]
+        return None
+
+    def _selected_left_track(self) -> Optional[Track]:
+        it = self._selected_left_item()
+        return it if isinstance(it, Track) else None
+
+    def _selected_left_album(self) -> Optional[Album]:
+        if self.tab != TAB_ARTIST:
+            return None
+        it = self._selected_left_item()
+        return it if isinstance(it, Album) else None
+
+    def _selected_album_title_line(self) -> bool:
+        if self.tab != TAB_ALBUM:
+            return False
+        it = self._selected_left_item()
+        return isinstance(it, tuple) and len(it) == 2 and it[0] == "album_title"
+
+    def _queue_selected_track(self) -> Optional[Track]:
+        if not self.queue_items:
+            return None
+        self.queue_cursor = clamp(self.queue_cursor, 0, len(self.queue_items) - 1)
+        return self.queue_items[self.queue_cursor]
+
+    def _current_selection_track(self) -> Optional[Track]:
+        if self._queue_context():
+            return self._queue_selected_track()
+        return self._selected_left_track()
+
+    # ---------- prompts ----------
+    def prompt_text(self, title: str, initial: str = "") -> Optional[str]:
+        h, w = self.stdscr.getmaxyx()
+        box_w = clamp(max(34, len(title) + 8), 34, w - 6)
+        box_h = 3  # border_top + content_line + border_bottom
+        y0 = (h - box_h) // 2
+        x0 = (w - box_w) // 2
+        for yy in range(y0, y0 + box_h):
+            self.stdscr.addstr(yy, x0, " " * box_w)
+        win = self.stdscr.derwin(box_h, box_w, y0, x0)
+        win.keypad(True)   # MUST be set so KEY_LEFT/KEY_RIGHT aren't eaten as raw ESC sequences
+        win.box()
+        # Title label + colon left, input right of it on same row
+        label = title[:box_w - 4]
+        label_len = len(label) + 1  # +1 for space after label
+        s = initial
+        cur = len(s)
+        curses.curs_set(1)
+        win.nodelay(False)
+        inner_w = max(1, box_w - 4 - label_len)
+        input_x = 2 + label_len
+        while True:
+            view_start = max(0, cur - inner_w + 1) if cur >= inner_w else 0
+            display = s[view_start:view_start + inner_w]
+            win.addstr(1, 2, label, self.C(4))
+            win.addstr(1, 2 + len(label), " ")
+            win.addstr(1, input_x, " " * inner_w)
+            win.addstr(1, input_x, display)
+            win.move(1, input_x + min(cur - view_start, inner_w))
+            win.refresh()
+            ch = win.getch()
+            if ch == 27:
+                # Consume any pending escape sequence bytes (e.g. from un-keypad'd terminals)
+                win.nodelay(True)
+                while win.getch() != -1:
+                    pass
+                win.nodelay(False)
+                curses.curs_set(0)
+                self.stdscr.nodelay(True)
+                return None
+            if ch in (10, 13):
+                curses.curs_set(0)
+                self.stdscr.nodelay(True)
+                return s.strip()
+            if ch in (curses.KEY_BACKSPACE, 127, 8):
+                if cur > 0:
+                    s = s[:cur - 1] + s[cur:]
+                    cur -= 1
+            elif ch == curses.KEY_DC:
+                if cur < len(s):
+                    s = s[:cur] + s[cur + 1:]
+            elif ch in (curses.KEY_LEFT, 2):
+                cur = max(0, cur - 1)
+            elif ch in (curses.KEY_RIGHT, 6):
+                cur = min(len(s), cur + 1)
+            elif ch in (curses.KEY_HOME, 1):
+                cur = 0
+            elif ch in (curses.KEY_END, 5):
+                cur = len(s)
+            elif ch == 11:
+                s = s[:cur]
+            elif ch == 21:
+                s = ""
+                cur = 0
+            elif ch == 23:
+                i = cur
+                while i > 0 and s[i - 1] == " ":
+                    i -= 1
+                while i > 0 and s[i - 1] != " ":
+                    i -= 1
+                s = s[:i] + s[cur:]
+                cur = i
+            elif 32 <= ch <= 1114111:
+                try:
+                    c = chr(ch)
+                    s = s[:cur] + c + s[cur:]
+                    cur += 1
+                except Exception:
+                    pass
+
+    def prompt_yes_no(self, title: str) -> bool:
+        h, w = self.stdscr.getmaxyx()
+        box_w = clamp(max(30, len(title) + 8), 30, w - 6)
+        y0 = (h - 5) // 2
+        x0 = (w - box_w) // 2
+        for yy in range(y0, y0 + 5):
+            self.stdscr.addstr(yy, x0, " " * box_w)
+        win = self.stdscr.derwin(5, box_w, y0, x0)
+        win.box()
+        win.addstr(2, 2, title[:box_w - 4], self.C(4))
+        win.refresh()
+        while True:
+            ch = self.stdscr.getch()
+            if ch in (ord("y"), ord("Y")):
+                return True
+            if ch in (ord("n"), ord("N"), 27):
+                return False
+
+    def pick_playlist(self, title: str) -> Optional[str]:
+        names = sorted(self.playlists.keys())
+        if not names:
+            self.toast("No playlists")
+            return None
+        h, w = self.stdscr.getmaxyx()
+        box_w = min(w - 6, 56)
+        box_h = min(h - 6, max(10, min(18, len(names) + 4)))
+        y0 = (h - box_h) // 2
+        x0 = (w - box_w) // 2
+        idx = 0
+        self.stdscr.nodelay(False)
+        result: Optional[str] = None
+        try:
+            while True:
+                for yy in range(y0, y0 + box_h):
+                    self.stdscr.addstr(yy, x0, " " * box_w)
+                win = self.stdscr.derwin(box_h, box_w, y0, x0)
+                win.box()
+                win.addstr(0, 2, f" {title} ", self.C(4))
+                inner_h = box_h - 2
+                scroll = clamp(idx - inner_h // 2, 0, max(0, len(names) - inner_h))
+                for i in range(inner_h):
+                    j = scroll + i
+                    if j >= len(names):
+                        break
+                    attr = curses.A_REVERSE if j == idx else 0
+                    win.addstr(1 + i, 2, names[j][:box_w - 4].ljust(box_w - 4), attr)
+                win.refresh()
+                ch = self.stdscr.getch()
+                if ch == 27:
+                    result = None
+                    break
+                if ch in (10, 13):
+                    result = names[idx]
+                    break
+                if ch in (curses.KEY_DOWN, ord("j")):
+                    idx = clamp(idx + 1, 0, len(names) - 1)
+                if ch in (curses.KEY_UP, ord("k")):
+                    idx = clamp(idx - 1, 0, len(names) - 1)
+                if ch in (curses.KEY_HOME, ord("g")):
+                    idx = 0
+                if ch in (curses.KEY_END, ord("G")):
+                    idx = len(names) - 1
+        finally:
+            self.stdscr.nodelay(True)
+        # Force redraw to close the popup visually
+        self._need_redraw = True
+        self._redraw_status_only = False
+        return result
+
+    # ---------- mpv controls ----------
+    def _extract_url_from_dash_mpd(self, mpd_xml: str) -> Optional[str]:
+        """
+        Parse a TIDAL DASH MPD XML and attempt to return a single streamable URL.
+
+        TIDAL DASH MPDs come in two common shapes:
+
+        Shape A – SegmentBase with BaseURL (single-file):
+          <BaseURL>https://cdn.tidal.com/.../audio.flac</BaseURL>
+          <SegmentBase indexRange="..."><Initialization range="..."/></SegmentBase>
+          → We return the BaseURL as-is; mpv can play it directly.
+
+        Shape B – SegmentTemplate with timeline/Number (multi-segment):
+          <BaseURL>https://…/</BaseURL>
+          <SegmentTemplate media="$Number$.m4s" initialization="init.mp4" …>
+          → We can't easily stream this as a single URL; return None so the
+            caller falls back to writing the .mpd file.
+
+        Shape C – no BaseURL at all but SegmentTemplate has absolute media URLs.
+          → Return None; let mpv handle the file.
+        """
+        try:
+            import xml.etree.ElementTree as ET
+            # Strip namespace for easier parsing
+            xml_clean = re.sub(r'\s+xmlns[^"]*"[^"]*"', '', mpd_xml)
+            xml_clean = re.sub(r'\s+xmlns[^\']*\'[^\']*\'', '', xml_clean)
+            root = ET.fromstring(xml_clean)
+
+            def strip_ns(tag: str) -> str:
+                return tag.split("}")[-1] if "}" in tag else tag
+
+            # Collect all BaseURL elements
+            base_urls: List[str] = []
+            for el in root.iter():
+                if strip_ns(el.tag) == "BaseURL" and el.text and el.text.strip().startswith("http"):
+                    base_urls.append(el.text.strip())
+
+            debug_log(f"  DASH MPD BaseURLs found: {base_urls[:3]}")
+
+            # Find all Representation elements
+            for rep in root.iter():
+                if strip_ns(rep.tag) != "Representation":
+                    continue
+
+                # Look for SegmentBase (single-file mode)
+                seg_base = None
+                for child in rep:
+                    if strip_ns(child.tag) == "SegmentBase":
+                        seg_base = child
+                        break
+                # Also check parent AdaptationSet
+                for child in rep.iter():
+                    if strip_ns(child.tag) == "SegmentBase":
+                        seg_base = child
+                        break
+
+                # Find the BaseURL for this representation (check rep itself, then walk up via base_urls)
+                rep_base_url = None
+                for child in rep:
+                    if strip_ns(child.tag) == "BaseURL" and child.text and child.text.strip():
+                        rep_base_url = child.text.strip()
+                        break
+                if not rep_base_url and base_urls:
+                    rep_base_url = base_urls[0]
+
+                if seg_base is not None and rep_base_url and rep_base_url.startswith("http"):
+                    debug_log(f"  DASH: SegmentBase shape, BaseURL={rep_base_url[:80]}")
+                    return rep_base_url
+
+                # SegmentTemplate — can't reduce to one URL, give up
+                for child in rep.iter():
+                    if strip_ns(child.tag) == "SegmentTemplate":
+                        debug_log(f"  DASH: SegmentTemplate shape — will use .mpd file")
+                        return None
+
+            # If we found base URLs but no SegmentBase/Template, try returning the first one
+            if base_urls:
+                candidate = base_urls[0]
+                # Only return it if it looks like a full audio file URL (not a directory)
+                if re.search(r'\.(flac|m4a|mp4|aac|mp3|ogg)(\?|$)', candidate, re.I):
+                    debug_log(f"  DASH: returning bare BaseURL as audio file: {candidate[:80]}")
+                    return candidate
+
+        except Exception as e:
+            debug_log(f"  DASH MPD parse error: {e}")
+        return None
+
+    def _resolve_stream_url_for_quality(self, track_id: int, quality: str) -> str:
+        """Resolve stream URL for a specific quality level. Raises on failure."""
+        debug_log(f"_resolve_stream_url_for_quality: track_id={track_id} quality={quality}")
+        tr = self.client.track(track_id, quality)
+        debug_log(f"  /track response keys: {list(tr.keys()) if isinstance(tr, dict) else type(tr)}")
+        data = tr.get("data") if isinstance(tr, dict) else None
+        if not isinstance(data, dict):
+            debug_log(f"  ERROR: invalid /track response, data={str(data)[:200]!r}")
+            raise RuntimeError("invalid /track response")
+        manifest = data.get("manifest")
+        mime = str(data.get("manifestMimeType") or "")
+        debug_log(f"  manifestMimeType={mime!r} manifest_head={str(manifest)[:80] if manifest else None!r}")
+        if not isinstance(manifest, str) or not manifest:
+            debug_log(f"  ERROR: missing manifest")
+            raise RuntimeError("missing manifest")
+
+        # Direct URL
+        if manifest.startswith("http"):
+            debug_log(f"  manifest is direct URL: {manifest[:80]}")
+            return manifest
+
+        # Decode base64 payload
+        try:
+            raw = base64.b64decode(manifest.encode("utf-8"))
+        except Exception as e:
+            debug_log(f"  ERROR: base64 decode failed: {e}")
+            raise RuntimeError(f"manifest decode error: {e}")
+        raw_text = raw.decode("utf-8", "replace")
+        debug_log(f"  decoded payload head: {raw_text[:120]!r}")
+
+        # TIDAL BTS JSON
+        if "tidal.bts" in mime:
+            mj = json.loads(raw_text)
+            urls = mj.get("urls") or []
+            debug_log(f"  bts manifest decoded, {len(urls)} url(s): {urls[0][:80] if urls else 'none'}")
+            if not urls:
+                raise RuntimeError("manifest has no urls")
+            return str(urls[0])
+
+        # MPEG-DASH XML
+        if "dash" in mime.lower() or raw_text.lstrip().startswith("<?xml") or raw_text.lstrip().startswith("<MPD"):
+            debug_log(f"  DASH manifest — parsing MPD XML")
+            debug_log(f"  MPD content (first 800 chars): {raw_text[:800]!r}")
+
+            # Try to extract a direct streamable URL from the MPD before writing a file.
+            # TIDAL DASH MPDs typically have BaseURL elements with absolute https:// URLs
+            # followed by SegmentTemplate/SegmentList. We try to build the init+media URL.
+            direct_url = self._extract_url_from_dash_mpd(raw_text)
+            if direct_url:
+                debug_log(f"  DASH: extracted direct URL from MPD: {direct_url[:120]}")
+                return direct_url
+
+            # Fall back to writing a temp .mpd file for mpv.
+            # Inject a <BaseURL> if none is present and we can infer one.
+            mpd_path = f"/tmp/{APP_NAME}-{track_id}-{int(time.time()*1000)}.mpd"
+            with open(mpd_path, "w", encoding="utf-8") as f:
+                f.write(raw_text)
+            debug_log(f"  DASH .mpd path: {mpd_path}")
+            return mpd_path
+
+        # Generic JSON with urls[]
+        try:
+            mj = json.loads(raw_text)
+            urls = mj.get("urls") or []
+            debug_log(f"  json manifest decoded, {len(urls)} url(s): {urls[0][:80] if urls else 'none'}")
+            if urls:
+                return str(urls[0])
+        except json.JSONDecodeError:
+            pass
+
+        debug_log(f"  ERROR: could not extract stream url from manifest")
+        raise RuntimeError("could not extract stream url")
+
+    def _resolve_stream_url(self, track_id: int) -> Tuple[str, str]:
+        """Resolve stream URL with quality fallback. Returns (url, quality_used)."""
+        start_idx = self.quality_idx
+        # Try preferred quality, then fall back to lower qualities
+        for qi in range(start_idx, len(QUALITY_ORDER)):
+            quality = QUALITY_ORDER[qi]
+            try:
+                url = self._resolve_stream_url_for_quality(track_id, quality)
+                if qi != start_idx:
+                    debug_log(f"  Quality fallback: {QUALITY_ORDER[start_idx]} → {quality}")
+                    self.toast(f"Quality fallback: {quality}", sec=3.0)
+                return url, quality
+            except Exception as e:
+                err_str = str(e)
+                debug_log(f"  Quality {quality} failed: {err_str}")
+                # Only fall back if it looks like a quality/availability issue
+                if any(kw in err_str.lower() for kw in
+                       ("stream unavailable", "missing manifest", "invalid /track",
+                        "manifest has no urls", "could not extract", "manifest decode",
+                        "non-json", "empty http", "403", "404", "not available")):
+                    if qi + 1 < len(QUALITY_ORDER):
+                        debug_log(f"  Falling back from {quality} to {QUALITY_ORDER[qi+1]}")
+                        continue
+                raise
+        raise RuntimeError(f"No available quality for track {track_id}")
+
+    def _apply_mpv_prefs(self) -> None:
+        try:
+            self.mp.cmd("set_property", "volume", float(self.desired_volume))
+        except Exception:
+            pass
+        try:
+            self.mp.cmd("set_property", "mute", bool(self.desired_mute))
+        except Exception:
+            pass
+
+    def play_track(self, t: Track, resume: bool = False) -> None:
+        # Clean up any previous DASH temp file
+        if self._last_mpd_path:
+            try:
+                if os.path.exists(self._last_mpd_path):
+                    os.unlink(self._last_mpd_path)
+            except Exception:
+                pass
+            self._last_mpd_path = None
+        try:
+            url, quality_used = self._resolve_stream_url(t.id)
+            is_mpd = url.endswith(".mpd") and os.path.isfile(url)
+            if is_mpd:
+                self._last_mpd_path = url
+            else:
+                self._last_mpd_path = None
+            self.mp.start(url, resume=resume)
+            self._apply_mpv_prefs()
+            # Brief check: if mpv dies within 0.5s on a DASH file, it failed silently
+            if is_mpd:
+                time.sleep(0.5)
+                if not self.mp.alive():
+                    debug_log(f"play_track: mpv died immediately on DASH .mpd — likely segment fetch failure")
+                    # The stop() will have already dumped stderr; raise so caller can try fallback
+                    raise RuntimeError("mpv DASH playback failed (died immediately)")
+            self.current_track = t
+            self.last_error = None
+            self._need_redraw = True
+            self._redraw_status_only = False
+        except Exception as e:
+            err = str(e)
+            debug_log(f"play_track ERROR track_id={t.id}: {err}")
+            if "Expecting value" in err or "JSONDecodeError" in err:
+                err = "stream unavailable"
+            self.last_error = err
+            self.toast(f"Error: {err[:60]}")
+            self._need_redraw = True
+            self._redraw_status_only = False
+
+    def toggle_pause(self) -> None:
+        self.mp.cmd("cycle", "pause")
+
+    def mute_toggle(self) -> None:
+        self.mp.cmd("cycle", "mute")
+
+    def volume_add(self, delta: float) -> None:
+        self.mp.cmd("add", "volume", float(delta))
+
+    def seek_rel(self, sec: float) -> None:
+        self.mp.cmd("seek", float(sec), "relative")
+
+    def play_track_with_resume(self) -> None:
+        t = self._current_selection_track() if not self.current_track else self.current_track
+        if not t:
+            self.toast("No track")
+            return
+        self.play_track(t, resume=True)
+        self.toast("Resuming…")
+
+    # ---------- priority queue ----------
+    def _priority_index_of(self, queue_idx: int) -> int:
+        try:
+            return self.priority_queue.index(queue_idx) + 1
+        except ValueError:
+            return 0
+
+    def toggle_priority(self, queue_idx: int) -> None:
+        if queue_idx in self.priority_queue:
+            self.priority_queue.remove(queue_idx)
+            self.toast("Priority removed")
+        else:
+            self.priority_queue.append(queue_idx)
+            self.toast(f"Priority {len(self.priority_queue)}")
+        self._need_redraw = True
+        self._redraw_status_only = False
+
+    def clear_priority_queue(self) -> None:
+        n = len(self.priority_queue)
+        if not n:
+            self.toast("Priority queue empty")
+            return
+        if self.prompt_yes_no(f"Clear {n} priority track(s)? (y/n)"):
+            self.priority_queue.clear()
+            self.toast("Priority cleared")
+            self._need_redraw = True
+            self._redraw_status_only = False
+
+    def _remap_priority_after_delete(self, deleted_indices: List[int]) -> None:
+        deleted_set = set(deleted_indices)
+        new_pq = []
+        for pi in self.priority_queue:
+            if pi in deleted_set:
+                continue
+            shift = sum(1 for d in deleted_indices if d < pi)
+            new_pq.append(pi - shift)
+        self.priority_queue = new_pq
+
+    def _remap_priority_after_insert(self, insert_pos: int, count: int) -> None:
+        self.priority_queue = [pi + count if pi >= insert_pos else pi for pi in self.priority_queue]
+
+    # ---------- queue playback ----------
+    def play_queue_index(self, idx: int) -> None:
+        if not self.queue_items:
+            return
+        idx = clamp(idx, 0, len(self.queue_items) - 1)
+        prev_play_idx = self.queue_play_idx
+        self.queue_play_idx = idx
+        self.queue_cursor = idx
+        if idx in self.priority_queue:
+            self.priority_queue.remove(idx)
+        self.play_track(self.queue_items[idx])
+        if self.last_error and (self.current_track is None or self.current_track.id != self.queue_items[idx].id):
+            self.queue_play_idx = prev_play_idx
+        self._need_redraw = True
+        self._redraw_status_only = False
+
+    def next_track(self) -> None:
+        if not self.queue_items:
+            return
+        if self.priority_queue:
+            next_idx = self.priority_queue[0]
+            self.play_queue_index(next_idx)
+            return
+        if self.shuffle_on and len(self.queue_items) > 1:
+            self.queue_play_idx = random.randrange(0, len(self.queue_items))
+        else:
+            self.queue_play_idx += 1
+            if self.queue_play_idx >= len(self.queue_items):
+                if self.repeat_mode == 1:
+                    self.queue_play_idx = 0
+                else:
+                    self.queue_play_idx = len(self.queue_items) - 1
+                    return
+        self.play_queue_index(self.queue_play_idx)
+
+    def prev_track(self) -> None:
+        if not self.queue_items:
+            return
+        self.queue_play_idx -= 1
+        if self.queue_play_idx < 0:
+            self.queue_play_idx = len(self.queue_items) - 1 if self.repeat_mode == 1 else 0
+        self.play_queue_index(self.queue_play_idx)
+
+    # ---------- likes ----------
+    def _schedule_liked_refresh(self) -> None:
+        self._liked_refresh_due = time.time() + 1.0
+
+    def toggle_like_track_id(self, tid: int, silent: bool = False) -> None:
+        lst = self.likes.setdefault("tracks", [])
+        if tid in lst:
+            lst[:] = [x for x in lst if x != tid]
+            if not silent:
+                self.toast("Unliked")
+        else:
+            lst.append(tid)
+            if not silent:
+                self.toast("Liked")
+        save_likes(self.likes)
+        self._schedule_liked_refresh()
+
+    def like_selected(self) -> None:
+        # When marks are active, apply to all marked tracks
+        if self._queue_context():
+            marked = self._marked_tracks_from_queue()
+            if marked:
+                for t in marked:
+                    self.toggle_like_track_id(t.id, silent=True)
+                self.toast(f"Liked/unliked {len(marked)}")
+                return
+            t = self._queue_selected_track()
+        else:
+            marked = self._marked_tracks_from_left()
+            if marked:
+                for t in marked:
+                    self.toggle_like_track_id(t.id, silent=True)
+                self.toast(f"Liked/unliked {len(marked)}")
+                return
+            t = self._selected_left_track()
+        if t:
+            self.toggle_like_track_id(t.id)
+
+    def like_playing(self) -> None:
+        if self.current_track:
+            self.toggle_like_track_id(self.current_track.id)
+
+    # ---------- marking ----------
+    def mark_all_current_view(self) -> None:
+        if self._queue_context():
+            self.marked_queue_idx = set(range(len(self.queue_items)))
+        else:
+            typ, items = self._left_items()
+            self.marked_left_idx = {i for i, it in enumerate(items) if isinstance(it, Track)}
+        self.toast("Marked all")
+        self._need_redraw = True
+        self._redraw_status_only = False
+
+    def unmark_all_current_view(self) -> None:
+        if self._queue_context():
+            self.marked_queue_idx.clear()
+        else:
+            self.marked_left_idx.clear()
+        self.toast("Unmarked")
+        self._need_redraw = True
+        self._redraw_status_only = False
+
+    def toggle_mark_and_advance(self) -> None:
+        if self._queue_context():
+            if not self.queue_items:
+                return
+            i = clamp(self.queue_cursor, 0, len(self.queue_items) - 1)
+            if i in self.marked_queue_idx:
+                self.marked_queue_idx.remove(i)
+            else:
+                self.marked_queue_idx.add(i)
+            self.queue_cursor = clamp(self.queue_cursor + 1, 0, len(self.queue_items) - 1)
+        else:
+            typ, items = self._left_items()
+            if not items:
+                return
+            i = clamp(self.left_idx, 0, len(items) - 1)
+            if isinstance(items[i], Track):
+                if i in self.marked_left_idx:
+                    self.marked_left_idx.remove(i)
+                else:
+                    self.marked_left_idx.add(i)
+                self.left_idx = clamp(self.left_idx + 1, 0, len(items) - 1)
+        self._need_redraw = True
+        self._redraw_status_only = False
+
+    def _marked_tracks_from_left(self) -> List[Track]:
+        typ, items = self._left_items()
+        return [items[i] for i in sorted(self.marked_left_idx) if 0 <= i < len(items) and isinstance(items[i], Track)]
+
+    def _marked_tracks_from_queue(self) -> List[Track]:
+        return [self.queue_items[i] for i in sorted(self.marked_queue_idx) if 0 <= i < len(self.queue_items)]
+
+    # ---------- enqueue ----------
+    def _enqueue_tracks(self, tracks: List[Track], insert_after_playing: bool) -> None:
+        if not tracks:
+            return
+        if not insert_after_playing:
+            self.queue_items.extend(tracks)
+            if len(self.queue_items) == len(tracks):
+                self.queue_play_idx = 0
+                self.queue_cursor = 0
+            self.toast(f"Enqueued {len(tracks)}")
+        else:
+            if self.queue_items and 0 <= self.queue_play_idx < len(self.queue_items):
+                ins = self.queue_play_idx + 1
+                for i, t in enumerate(tracks):
+                    self.queue_items.insert(ins + i, t)
+                self._remap_priority_after_insert(ins, len(tracks))
+                if self.marked_queue_idx:
+                    self.marked_queue_idx = {mi + len(tracks) if mi >= ins else mi for mi in self.marked_queue_idx}
+                if self.queue_cursor >= ins:
+                    self.queue_cursor += len(tracks)
+                self.toast(f"Enqueued+ {len(tracks)}")
+            else:
+                self.queue_items.extend(tracks)
+                if len(self.queue_items) == len(tracks):
+                    self.queue_play_idx = 0
+                    self.queue_cursor = 0
+                self.toast(f"Enqueued+ {len(tracks)}")
+        self._need_redraw = True
+        self._redraw_status_only = False
+
+    def enqueue_album_async(self, album: Album, insert_after_playing: bool) -> None:
+        self.toast("Album…")
+        def worker() -> None:
+            try:
+                aid = self._resolve_album_id_for_album(album)
+                if not aid:
+                    self.toast("Album id?")
+                    return
+                tracks = self._fetch_album_tracks_by_album_id(aid)
+                self._enqueue_tracks(tracks, insert_after_playing)
+            except Exception:
+                self.toast("Error")
+        threading.Thread(target=worker, daemon=True).start()
+
+    def enqueue_key(self, insert_after_playing: bool) -> None:
+        if not self._queue_context():
+            if self.tab == TAB_ARTIST:
+                alb = self._selected_left_album()
+                if alb:
+                    self.enqueue_album_async(alb, insert_after_playing)
+                    return
+            if self.tab == TAB_ALBUM and self._selected_album_title_line() and self.album_header:
+                self.enqueue_album_async(self.album_header, insert_after_playing)
+                return
+            if self.tab == TAB_PLAYLISTS and self.playlist_view_name is None:
+                name = self.playlist_names[clamp(self.left_idx, 0, len(self.playlist_names) - 1)] if self.playlist_names else None
+                if name:
+                    self._enqueue_playlist_async(name, insert_after_playing)
+                    return
+            if self.tab == TAB_PLAYLISTS and self.playlist_view_name is not None and self.playlist_view_tracks:
+                self._enqueue_tracks(list(self.playlist_view_tracks), insert_after_playing)
+                return
+
+        if self._queue_context():
+            tracks = self._marked_tracks_from_queue() or ([self._queue_selected_track()] if self._queue_selected_track() else [])
+        else:
+            tracks = self._marked_tracks_from_left() or ([self._selected_left_track()] if self._selected_left_track() else [])
+            tracks = [t for t in tracks if t is not None]
+        self._enqueue_tracks(tracks, insert_after_playing)
+
+    # ---------- downloads ----------
+    def _guess_ext(self, url: str) -> str:
+        u = url.lower()
+        if ".flac" in u:
+            return "flac"
+        if ".m4a" in u or "mp4" in u:
+            return "m4a"
+        if ".mp3" in u:
+            return "mp3"
+        return "bin"
+
+    def _download_worker(self, t: Track, remaining: int, current: int, total: int, set_progress) -> None:
+        # Short label for status display
+        label = f"{t.artist[:16]} - {t.title[:16]}"
+        count_s = f"[{current}/{total}]"
+
+        url, _q = self._resolve_stream_url(t.id)
+        # DASH manifests are local temp files that can't be stream-downloaded directly;
+        # skip and inform the user (download at a lower quality setting to get a direct URL).
+        if url.endswith(".mpd") and os.path.isfile(url):
+            set_progress(f"DL skip(DASH) {count_s} {label}")
+            debug_log(f"_download_worker: skipping DASH track {t.id} ({t.title})")
+            return
+        ext = self._guess_ext(url)
+        yv = self._track_year(t)
+        artist_dir = safe_filename(t.artist)
+        album_dir = safe_filename(f"{t.artist} - {t.album} ({yv})" if yv != "????" else f"{t.artist} - {t.album}")
+        out_dir = os.path.join(DOWNLOADS_DIR, artist_dir, album_dir)
+        mkdirp(out_dir)
+        prefix = f"{t.track_no:02d}. " if t.track_no > 0 else "00. "
+        base_name = safe_filename(f"{prefix}{t.artist} - {t.title}")
+        out_path = os.path.join(out_dir, f"{base_name}.{ext}")
+
+        def cb(done: int, tot: Optional[int]) -> None:
+            if tot and tot > 0:
+                pct = int((done * 100) / tot)
+                mb = done / (1024 * 1024)
+                set_progress(f"DL {count_s} {pct}% {mb:.1f}MB {label}")
+            else:
+                mb = done / (1024 * 1024)
+                set_progress(f"DL {count_s} {mb:.1f}MB {label}")
+            self._need_redraw = True
+            self._redraw_status_only = True
+
+        set_progress(f"DL {count_s} resolving {label}")
+        http_stream_download(url, out_path, cb, timeout=120.0)
+        set_progress(f"DL {count_s} done {label}")
+
+        # Download cover art
+        cover_path = os.path.join(out_dir, "cover.jpg")
+        if not os.path.exists(cover_path):
+            try:
+                cover_url = self._fetch_cover_url_for_track(t)
+                if cover_url:
+                    set_progress(f"DL {count_s} cover {label}")
+                    cover_data = http_get_bytes(cover_url, timeout=20.0)
+                    with open(cover_path, "wb") as f:
+                        f.write(cover_data)
+            except Exception:
+                pass
+
+        # Download LRC lyrics
+        lrc_path = os.path.join(out_dir, f"{base_name}.lrc")
+        if not os.path.exists(lrc_path):
+            try:
+                set_progress(f"DL {count_s} lyrics {label}")
+                lyr_lines = []
+                try:
+                    lyr_payload = self.client.lyrics(t.id)
+                    lyr_lines = self._extract_lrc_from_payload(lyr_payload)
+                except Exception:
+                    pass
+                if not lyr_lines:
+                    try:
+                        info_payload = self.client.info(t.id)
+                        lyr_lines = self._extract_lrc_from_payload(info_payload)
+                    except Exception:
+                        pass
+                if lyr_lines:
+                    with open(lrc_path, "w", encoding="utf-8") as f:
+                        f.write("\n".join(lyr_lines))
+            except Exception:
+                pass
+
+    def _fetch_cover_url_for_track(self, t: Track) -> Optional[str]:
+        """Return a cover art URL for track t, or None if unavailable."""
+        try:
+            info = self.client.info(t.id)
+            data = info.get("data") if isinstance(info, dict) else None
+            if isinstance(data, dict):
+                alb = data.get("album")
+                if isinstance(alb, dict):
+                    for k in ("coverUrl", "imageUrl", "squareImageUrl"):
+                        v = alb.get(k)
+                        if isinstance(v, str) and v.startswith("http"):
+                            return v
+                    for k in ("cover", "coverArt", "squareImage", "image"):
+                        v = alb.get(k)
+                        if isinstance(v, str) and v:
+                            url = self._tidal_cover_uuid_to_url(v)
+                            if url:
+                                return url
+                for k in ("coverUrl", "imageUrl"):
+                    v = data.get(k)
+                    if isinstance(v, str) and v.startswith("http"):
+                        return v
+                for k in ("cover", "image"):
+                    v = data.get(k)
+                    if isinstance(v, str) and v:
+                        url = self._tidal_cover_uuid_to_url(v)
+                        if url:
+                            return url
+        except Exception as e:
+            debug_log(f"_fetch_cover_url_for_track error: {e}")
+        return None
+
+    def _tidal_cover_uuid_to_url(self, cover: str, size: int = 640) -> Optional[str]:
+        cover = cover.strip()
+        if not cover:
+            return None
+        if cover.startswith("http"):
+            return cover
+        parts = cover.split("-")
+        if len(parts) >= 4:
+            path = "/".join(parts)
+            return f"https://resources.tidal.com/images/{path}/{size}x{size}.jpg"
+        return None
+
+    def start_download_tracks(self, tracks: List[Track]) -> None:
+        if not tracks:
+            self.toast("Nothing to download")
+            return
+        self.toast(f"DL queued {len(tracks)}")
+        self.dl.enqueue(tracks, self._download_worker)
+
+    # ---------- album resolve/fetch ----------
+    def _resolve_album_id_for_album(self, album: Album) -> Optional[int]:
+        if album.id and album.id > 0:
+            return album.id
+        try:
+            payload = self.client.search_tracks(f"{album.artist} {album.title}", limit=180)
+            tracks = self._extract_tracks_from_search(payload)
+            al0 = album.title.strip().lower()
+            a0 = album.artist.strip().lower()
+            pick = next((t for t in tracks if t.album.strip().lower() == al0 and t.artist.strip().lower() == a0), None)
+            if pick is None and tracks:
+                pick = tracks[0]
+            if pick is None:
+                return None
+            info = self.client.info(pick.id)
+            data = info.get("data") if isinstance(info, dict) else None
+            if isinstance(data, dict):
+                alb = data.get("album")
+                if isinstance(alb, dict) and str(alb.get("id", "")).isdigit():
+                    return int(alb["id"])
+        except Exception:
+            return None
+        return None
+
+    def _fetch_album_tracks_by_album_id(self, album_id: int) -> List[Track]:
+        return self._extract_tracks_from_album_payload(self.client.album(int(album_id)))
+
+    def open_album_from_album_obj(self, album: Album) -> None:
+        self.switch_tab(TAB_ALBUM, refresh=False)
+        self.album_header = album
+        self.album_tracks = []
+        self.left_idx = 0
+        self.left_scroll = 0
+        key = f"album-open:{time.time()}"
+        self._set_loading(key)
+
+        def worker() -> None:
+            try:
+                aid = self._resolve_album_id_for_album(album)
+                if aid:
+                    tracks = self._fetch_album_tracks_by_album_id(aid)
+                    self.album_header = Album(id=aid, title=album.title, artist=album.artist, year=album.year)
+                else:
+                    payload = self.client.search_tracks(album.title, limit=280)
+                    al0 = album.title.strip().lower()
+                    tracks = sorted(
+                        [t for t in self._extract_tracks_from_search(payload) if t.album.strip().lower() == al0],
+                        key=lambda t: (t.track_no if t.track_no > 0 else 10_000, t.title.lower())
+                    )
+                if self._loading_key != key:
+                    return
+                self.album_tracks = tracks[:1500]
+                for t in self.album_tracks[:40]:
+                    if (self.show_track_year and year_norm(t.year) == "????") or (self.show_track_duration and not t.duration):
+                        self.meta.want(t.id)
+                self.toast(f"Album {len(self.album_tracks)}")
+            except Exception as e:
+                if self._loading_key == key:
+                    self.last_error = str(e)
+                    self.toast("Error")
+            finally:
+                self._clear_loading(key)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def open_album_from_track(self, t: Track) -> None:
+        self.open_album_from_album_obj(Album(id=t.album_id or self.meta.album_id.get(t.id, 0),
+                                            title=t.album, artist=t.artist, year=t.year))
+
+    # ---------- tab loaders ----------
+    def fetch_recommended_async(self, ctx: Optional[Track]) -> None:
+        if not ctx:
+            self.toast("No context")
+            return
+        self.recommended_results = []
+        key = f"rec:{ctx.id}:{time.time()}"
+        self._set_loading(key)
+
+        def worker() -> None:
+            try:
+                payload = self.client.recommendations(ctx.id, limit=50)
+                if self._loading_key != key:
+                    return
+                tracks: List[Track] = []
+                data = payload.get("data") if isinstance(payload, dict) else None
+                if isinstance(data, dict) and isinstance(data.get("items"), list):
+                    for it in data["items"]:
+                        if isinstance(it, dict) and isinstance(it.get("track"), dict):
+                            t = self._parse_track_obj(it["track"])
+                            if t:
+                                tracks.append(t)
+                self.recommended_results = tracks
+                self.toast("Recommended")
+            except Exception as e:
+                if self._loading_key == key:
+                    self.last_error = str(e)
+                    self.toast("Error")
+            finally:
+                self._clear_loading(key)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def fetch_liked_async(self) -> None:
+        self.liked_cache = []
+        ids = self.likes.get("tracks", [])[:260]
+        key = f"liked:{time.time()}"
+        self._set_loading(key)
+
+        def worker() -> None:
+            try:
+                if not ids:
+                    self.liked_cache = []
+                    self.toast("Liked")
+                    return
+                out_lock = threading.Lock()
+                out: List[Track] = []
+                q: Queue = Queue()
+                for tid in ids:
+                    q.put(tid)
+
+                def wkr() -> None:
+                    while True:
+                        if self._loading_key != key:
+                            return
+                        try:
+                            tid = q.get_nowait()
+                        except Exception:
+                            return
+                        try:
+                            info = self.client.info(tid)
+                            data = info.get("data") if isinstance(info, dict) else None
+                            if isinstance(data, dict):
+                                t = self._parse_track_obj(data)
+                                if t:
+                                    with out_lock:
+                                        out.append(t)
+                        except Exception:
+                            pass
+                        finally:
+                            q.task_done()
+
+                for _ in range(8):
+                    threading.Thread(target=wkr, daemon=True).start()
+                q.join()
+                if self._loading_key != key:
+                    return
+                out.sort(key=lambda t: ids.index(t.id) if t.id in ids else 10_000)
+                self.liked_cache = out
+                self.toast("Liked")
+            except Exception as e:
+                if self._loading_key == key:
+                    self.last_error = str(e)
+                    self.toast("Error")
+            finally:
+                self._clear_loading(key)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def fetch_artist_async(self, ctx: Optional[Track]) -> None:
+        if not ctx:
+            self.toast("No context")
+            return
+        self.artist_albums, self.artist_tracks = [], []
+        key = f"artist:{ctx.id}:{time.time()}"
+        self._set_loading(key)
+
+        def worker() -> None:
+            try:
+                aid = ctx.artist_id or self.meta.artist_id.get(ctx.id)
+                if not aid:
+                    info = self.client.info(ctx.id)
+                    data = info.get("data") if isinstance(info, dict) else None
+                    if isinstance(data, dict):
+                        a = data.get("artist")
+                        if isinstance(a, dict) and str(a.get("id", "")).isdigit():
+                            aid = int(a["id"])
+
+                albums: List[Album] = []
+                tracks: List[Track] = []
+
+                if aid:
+                    payload = self.client.artist(int(aid))
+                    if self._loading_key != key:
+                        return
+                    for path in (("albums", "items"), ("data", "albums", "items"), ("albums",), ("data", "albums")):
+                        cur: Any = payload
+                        ok = True
+                        for p in path:
+                            if isinstance(cur, dict) and p in cur:
+                                cur = cur[p]
+                            else:
+                                ok = False
+                                break
+                        if ok and isinstance(cur, list):
+                            for it in cur:
+                                if isinstance(it, dict):
+                                    x = it.get("item", it) if isinstance(it.get("item"), dict) else it
+                                    aobj = self._parse_album_obj(x)
+                                    if aobj:
+                                        albums.append(aobj)
+                            if albums:
+                                break
+
+                    dicts: List[Dict[str, Any]] = []
+                    self._scan_for_track_dicts(payload, dicts, limit=1200)
+                    for d in dicts:
+                        t = self._parse_track_obj(d)
+                        if t:
+                            tracks.append(t)
+
+                if not tracks:
+                    payload = self.client.search_tracks(ctx.artist, limit=300)
+                    if self._loading_key != key:
+                        return
+                    a0 = ctx.artist.strip().lower()
+                    tracks = [t for t in self._extract_tracks_from_search(payload) if t.artist.strip().lower() == a0]
+
+                if not albums:
+                    best: Dict[Tuple, Album] = {}
+                    for t in tracks:
+                        k2 = (t.artist.strip().lower(), t.album.strip().lower())
+                        if k2 not in best:
+                            best[k2] = Album(id=t.album_id or 0, title=t.album, artist=t.artist, year=t.year)
+                        else:
+                            cur = best[k2]
+                            if cur.id == 0 and t.album_id:
+                                cur.id = t.album_id
+                            if year_norm(cur.year) == "????" and year_norm(t.year) != "????":
+                                cur.year = t.year
+                    albums = sorted(best.values(), key=lambda a: (-(int(a.year) if year_norm(a.year) != "????" else 0), a.title.lower()))
+
+                self.artist_albums = albums[:500]
+                self.artist_tracks = tracks[:600]
+                self.toast("Artist")
+            except Exception as e:
+                if self._loading_key == key:
+                    self.last_error = str(e)
+                    self.toast("Error")
+            finally:
+                self._clear_loading(key)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    # ---------- info overlay ----------
+    def _request_info_refresh(self, t: Track) -> None:
+        self._info_target_id = t.id
+        self._info_refresh_due = time.time() + 0.12
+        self.info_track = t
+        self.info_album = None
+        self.info_loading = True
+        self._need_redraw = True
+        self._redraw_status_only = False
+
+    def _do_info_fetch_if_due(self) -> None:
+        if not self.info_overlay or not self._info_target_id:
+            return
+        if time.time() < self._info_refresh_due:
+            return
+        tid = self._info_target_id
+        self._info_target_id = None
+        self.info_payload = None
+        self.info_loading = True
+
+        def worker() -> None:
+            try:
+                payload = self.client.info(tid)
+                self.info_payload = payload if isinstance(payload, dict) else {"raw": payload}
+            except Exception as e:
+                self.info_payload = {"error": str(e)}
+            self.info_loading = False
+            self._need_redraw = True
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def toggle_info_selected(self) -> None:
+        if self.info_overlay:
+            self.info_overlay = False
+            self._need_redraw = True
+            return
+        if self.tab == TAB_ALBUM and self._selected_album_title_line() and self.album_header:
+            self.open_info_album(self.album_header)
+            return
+        if self.tab == TAB_ARTIST:
+            alb = self._selected_left_album()
+            if alb:
+                self.open_info_album(alb)
+                return
+        t = self._current_selection_track()
+        if not t:
+            return
+        self.info_overlay = True
+        self.info_scroll = 0
+        self._request_info_refresh(t)
+        self._need_redraw = True
+
+    def toggle_info_playing(self) -> None:
+        if self.info_overlay:
+            self.info_overlay = False
+            self._need_redraw = True
+            return
+        t = self.current_track
+        if not t:
+            return
+        self.info_overlay = True
+        self.info_scroll = 0
+        self._request_info_refresh(t)
+        self._need_redraw = True
+
+    def open_info_album(self, album: Album) -> None:
+        self.info_overlay = True
+        self.info_scroll = 0
+        self.info_track = None
+        self.info_album = album
+        self.info_payload = None
+        self.info_loading = True
+        self._info_target_id = None
+        self._need_redraw = True
+        self._redraw_status_only = False
+
+        def worker() -> None:
+            try:
+                aid = self._resolve_album_id_for_album(album)
+                if aid:
+                    payload = self.client.album(int(aid))
+                    self.info_payload = payload if isinstance(payload, dict) else {"raw": payload}
+                else:
+                    self.info_payload = {"error": "Album id not found"}
+            except Exception as e:
+                self.info_payload = {"error": str(e)}
+            self.info_loading = False
+            self._need_redraw = True
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _extract_lrc_from_payload(self, payload: Any) -> List[str]:
+        if not isinstance(payload, dict):
+            return []
+
+        def _looks_like_lyrics(s: str) -> bool:
+            s = s.strip()
+            if not s or len(s) < 30:
+                return False
+            if "\n" not in s and len(s) < 200:
+                return False
+            if s.startswith("{") or s.startswith("[{") or s.startswith("http"):
+                return False
+            return True
+
+        def _find_raw(obj: Any, depth: int = 0) -> str:
+            if depth > 10:
+                return ""
+            if isinstance(obj, str):
+                return obj.strip() if _looks_like_lyrics(obj) else ""
+            if isinstance(obj, dict):
+                for k in ("subtitles", "lyrics", "lyric"):
+                    v = obj.get(k)
+                    if isinstance(v, str) and _looks_like_lyrics(v):
+                        return v.strip()
+                    if isinstance(v, (dict, list)):
+                        r = _find_raw(v, depth + 1)
+                        if r:
+                            return r
+                for k, v in obj.items():
+                    kl = k.lower()
+                    if kl in ("lyrics", "lyric", "subtitles", "subtitle", "lyricstext",
+                               "lyricssubtitles", "tracklyrics"):
+                        r = _find_raw(v, depth + 1)
+                        if r:
+                            return r
+                for v in obj.values():
+                    if isinstance(v, (dict, list)):
+                        r = _find_raw(v, depth + 1)
+                        if r:
+                            return r
+            if isinstance(obj, list):
+                for item in obj:
+                    r = _find_raw(item, depth + 1)
+                    if r:
+                        return r
+            return ""
+
+        text = _find_raw(payload)
+        if not text:
+            return []
+        return text.splitlines()
+
+    def _extract_lyrics_from_payload(self, payload: Any) -> List[str]:
+        if not isinstance(payload, dict):
+            return []
+
+        def _looks_like_lyrics(s: str) -> bool:
+            s = s.strip()
+            if not s:
+                return False
+            if len(s) < 30:
+                return False
+            if "\n" not in s and len(s) < 200:
+                return False
+            if s.startswith("{") or s.startswith("[{") or s.startswith("http"):
+                return False
+            if len(s) > 50 and "/" in s[:20]:
+                return False
+            return True
+
+        def _find_text(obj: Any, depth: int = 0) -> str:
+            if depth > 10:
+                return ""
+            if isinstance(obj, str):
+                if _looks_like_lyrics(obj):
+                    return obj.strip()
+                return ""
+            if isinstance(obj, dict):
+                for k in ("subtitles", "lyrics", "lyric"):
+                    v = obj.get(k)
+                    if isinstance(v, str) and _looks_like_lyrics(v):
+                        return v.strip()
+                    if isinstance(v, (dict, list)):
+                        r = _find_text(v, depth + 1)
+                        if r:
+                            return r
+                for k, v in obj.items():
+                    kl = k.lower()
+                    if kl in ("lyrics", "lyric", "subtitles", "subtitle", "lyricstext",
+                               "lyricssubtitles", "tracklyrics"):
+                        r = _find_text(v, depth + 1)
+                        if r:
+                            return r
+                for v in obj.values():
+                    if isinstance(v, (dict, list)):
+                        r = _find_text(v, depth + 1)
+                        if r:
+                            return r
+            if isinstance(obj, list):
+                for item in obj:
+                    r = _find_text(item, depth + 1)
+                    if r:
+                        return r
+            return ""
+
+        text = _find_text(payload)
+        if not text:
+            debug_log(f"_extract_lyrics: no lyrics text found in payload keys={list(payload.keys())[:10]}")
+            return []
+        debug_log(f"_extract_lyrics: found {len(text)} chars, first 60: {text[:60]!r}")
+        lines = text.splitlines()
+        cleaned: List[str] = []
+        lrc_re = re.compile(r"^\[\d+:\d+\.\d+\](.*)$")
+        has_lrc = any(lrc_re.match(l) for l in lines[:5] if l.strip())
+        for l in lines:
+            if has_lrc:
+                m = lrc_re.match(l)
+                if m:
+                    cleaned.append(m.group(1).strip())
+                    continue
+            cleaned.append(l)
+        return cleaned
+
+    def toggle_lyrics(self, target: Optional["Track"] = None) -> None:
+        if self.lyrics_overlay:
+            self.lyrics_overlay = False
+            self._need_redraw = True
+            return
+        t = target or self.current_track or self._current_selection_track()
+        if not t:
+            self.toast("No track")
+            return
+        self.lyrics_overlay = True
+        self.lyrics_scroll = 0
+        self.lyrics_track = t
+        self._need_redraw = True
+        self._redraw_status_only = False
+        if self.lyrics_track_id == t.id and self.lyrics_lines:
+            return
+        self.lyrics_track_id = t.id
+        self.lyrics_lines = []
+        self.lyrics_loading = True
+
+        def worker() -> None:
+            lines: List[str] = []
+            try:
+                try:
+                    lyr_payload = self.client.lyrics(t.id)
+                    lines = self._extract_lyrics_from_payload(lyr_payload)
+                except Exception:
+                    pass
+                if not lines:
+                    info_payload = self.client.info(t.id)
+                    lines = self._extract_lyrics_from_payload(info_payload)
+                if not lines:
+                    lines = ["No lyrics available for this track."]
+                self.lyrics_lines = lines
+            except Exception as e:
+                self.lyrics_lines = [f"Error fetching lyrics: {e}"]
+            self.lyrics_loading = False
+            self._need_redraw = True
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    # ---------- search ----------
+    def do_search_prompt_anywhere(self) -> None:
+        self.playlist_view_name = None
+        self.switch_tab(TAB_SEARCH, refresh=False)
+        q = self.prompt_text("Search:", self.search_q)
+        if q is None:
+            return
+        self.search_q = q
+        self.search_results = []
+        self.left_idx = 0
+        self.left_scroll = 0
+        self.last_error = None
+        try:
+            payload = self.client.search_tracks(self.search_q, limit=260)
+            self.search_results = self._extract_tracks_from_search(payload)
+            self.toast(f"{len(self.search_results)} results")
+        except Exception as e:
+            self.last_error = str(e)
+            self.toast("Error")
+        self._need_redraw = True
+        self._redraw_status_only = False
+
+    # ---------- filter/find ----------
+    def _compute_filter_hits(self) -> None:
+        q = self.filter_q.strip().lower()
+        self.filter_hits = []
+        self.filter_pos = -1
+        if not q:
+            return
+        typ, items = self._left_items()
+        for i, it in enumerate(items):
+            if isinstance(it, Track):
+                # Search artist, title, album, year, and duration
+                dv = self._track_duration(it)
+                dur_s = fmt_dur(dv) if dv else ""
+                yv = self._track_year(it) if it.year else ""
+                haystack = f"{it.artist} {it.title} {it.album} {yv} {dur_s}".lower()
+                if q in haystack:
+                    self.filter_hits.append(i)
+            elif isinstance(it, Album):
+                if q in f"{it.artist} {it.title}".lower():
+                    self.filter_hits.append(i)
+            elif isinstance(it, str):
+                if q in it.lower():
+                    self.filter_hits.append(i)
+        if self.filter_hits:
+            self.filter_pos = 0
+
+    def filter_prompt(self) -> None:
+        q = self.prompt_text("Filter:", self.filter_q)
+        if q is None:
+            return
+        self.filter_q = q
+        self._compute_filter_hits()
+        if not self.filter_hits:
+            self.toast("No match")
+            return
+        cur = self.left_idx
+        j = next((k for k, idx in enumerate(self.filter_hits) if idx >= cur), 0)
+        self.filter_pos = j
+        self.left_idx = self.filter_hits[self.filter_pos]
+        self.toast(f"{self.filter_pos+1}/{len(self.filter_hits)}")
+
+    def filter_next(self, delta: int) -> None:
+        if not self.filter_hits:
+            return
+        # Wrap around both ends
+        self.filter_pos = (self.filter_pos + delta) % len(self.filter_hits)
+        self.left_idx = self.filter_hits[self.filter_pos]
+        self.toast(f"{self.filter_pos+1}/{len(self.filter_hits)}")
+
+    # ---------- playlists ----------
+    def playlists_create(self) -> None:
+        name = self.prompt_text("New playlist name:", "")
+        if not name:
+            return
+        if name in self.playlists:
+            self.toast("Exists")
+            return
+        self.playlists[name] = []
+        save_playlists(self.playlists)
+        self.playlist_names = sorted(self.playlists.keys())
+        self.toast("Created")
+        self._need_redraw = True
+        self._redraw_status_only = False
+
+    def playlists_delete_current(self) -> None:
+        if self.playlist_view_name is None:
+            if not self.playlist_names:
+                return
+            name = self.playlist_names[clamp(self.left_idx, 0, len(self.playlist_names)-1)]
+        else:
+            name = self.playlist_view_name
+        if not name:
+            return
+        if not self.prompt_yes_no(f"Delete '{name}'? (y/n)"):
+            return
+        self.playlists.pop(name, None)
+        save_playlists(self.playlists)
+        self.playlist_view_name = None
+        self.playlist_view_tracks = []
+        self.playlist_names = sorted(self.playlists.keys())
+        self.left_idx = 0
+        self.left_scroll = 0
+        self.toast("Deleted")
+
+    def playlists_open_selected(self) -> None:
+        if not self.playlist_names:
+            return
+        name = self.playlist_names[clamp(self.left_idx, 0, len(self.playlist_names)-1)]
+        self.playlist_view_name = name
+        self.playlist_view_tracks = []
+        self.left_idx = 0
+        self.left_scroll = 0
+        self.fetch_playlist_tracks_async(name)
+
+    def fetch_playlist_tracks_async(self, name: str) -> None:
+        ids = self.playlists.get(name, [])[:1500]
+        key = f"pl:{name}:{time.time()}"
+        self._set_loading(key)
+
+        def worker() -> None:
+            try:
+                out_lock = threading.Lock()
+                out: List[Track] = []
+                q: Queue = Queue()
+                for tid in ids:
+                    q.put(tid)
+
+                def wkr() -> None:
+                    while True:
+                        if self._loading_key != key:
+                            return
+                        try:
+                            tid = q.get_nowait()
+                        except Exception:
+                            return
+                        try:
+                            info = self.client.info(tid)
+                            data = info.get("data") if isinstance(info, dict) else None
+                            if isinstance(data, dict):
+                                t = self._parse_track_obj(data)
+                                if t:
+                                    with out_lock:
+                                        out.append(t)
+                        except Exception:
+                            pass
+                        finally:
+                            q.task_done()
+
+                for _ in range(8):
+                    threading.Thread(target=wkr, daemon=True).start()
+                q.join()
+                if self._loading_key != key:
+                    return
+                out.sort(key=lambda t: ids.index(t.id) if t.id in ids else 10_000)
+                self.playlist_view_tracks = out
+                self.toast("Playlist")
+            except Exception as e:
+                if self._loading_key == key:
+                    self.last_error = str(e)
+                    self.toast("Error")
+            finally:
+                self._clear_loading(key)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _enqueue_playlist_async(self, name: str, insert_after_playing: bool) -> None:
+        self.toast(f"Loading {name}…")
+        ids = self.playlists.get(name, [])[:1500]
+
+        def worker() -> None:
+            try:
+                out_lock = threading.Lock()
+                out: List[Track] = []
+                q: Queue = Queue()
+                for tid in ids:
+                    q.put(tid)
+
+                def wkr() -> None:
+                    while True:
+                        try:
+                            tid = q.get_nowait()
+                        except Exception:
+                            return
+                        try:
+                            info = self.client.info(tid)
+                            data = info.get("data") if isinstance(info, dict) else None
+                            if isinstance(data, dict):
+                                t = self._parse_track_obj(data)
+                                if t:
+                                    with out_lock:
+                                        out.append(t)
+                        except Exception:
+                            pass
+                        finally:
+                            q.task_done()
+
+                for _ in range(8):
+                    threading.Thread(target=wkr, daemon=True).start()
+                q.join()
+                out.sort(key=lambda t: ids.index(t.id) if t.id in ids else 10_000)
+                self._enqueue_tracks(out, insert_after_playing)
+            except Exception as e:
+                self.toast(f"Error: {e}")
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def playlists_add_tracks(self, tids: List[int]) -> None:
+        if not tids:
+            self.toast("No tracks")
+            return
+        name = self.pick_playlist("Add to playlist")
+        if not name:
+            return
+        self.playlists.setdefault(name, []).extend([int(x) for x in tids if int(x) > 0])
+        save_playlists(self.playlists)
+        self.toast(f"Added {len(tids)}")
+        # Force redraw to close popup
+        self._need_redraw = True
+        self._redraw_status_only = False
+        if self.tab == TAB_PLAYLISTS and self.playlist_view_name == name:
+            self.fetch_playlist_tracks_async(name)
+
+    def playlists_add_from_context(self) -> None:
+        if self._queue_context():
+            tracks = self._marked_tracks_from_queue() or ([self._queue_selected_track()] if self._queue_selected_track() else [])
+        else:
+            tracks = self._marked_tracks_from_left() or ([self._selected_left_track()] if self._selected_left_track() else [])
+        self.playlists_add_tracks([t.id for t in tracks if t])
+
+    # ---------- drawing ----------
+    def _status_color_pair(self, paused: Optional[bool], alive: bool) -> int:
+        if not self.color_mode or not curses.has_colors():
+            return 0
+        if self.last_error:
+            return curses.color_pair(3)
+        if paused:
+            return curses.color_pair(2)
+        if alive:
+            return curses.color_pair(1)
+        return curses.color_pair(4)
+
+    def _draw_tabs(self, y: int, x: int, w: int) -> None:
+        order = (1, 2, 3, 4, 5, 6, 7)
+        s = "  ".join([TAB_NAMES[i] for i in order])[:max(0, w - 1)]
+        self.stdscr.addstr(y, x, s, self.C(4))
+        cur = TAB_NAMES.get(self.tab, "")
+        idx = s.find(cur)
+        if idx >= 0:
+            self.stdscr.addstr(y + 1, x + idx, "─" * min(len(cur), max(0, w - idx - 1)), self.C(5) or curses.A_BOLD)
+
+    def _draw_line_no(self, y: int, x: int, idx1: int, width: int) -> int:
+        if not self.show_numbers or width < 5:
+            return 0
+        s = f"{idx1:>4} "
+        self.stdscr.addstr(y, x, s[:width], self.C(10))
+        return len(s)
+
+    def _draw_track_line_colored(self, y: int, x: int, w: int, t: Track, selected: bool,
+                                  marked: bool, priority_pos: int = 0,
+                                  force_no_tsv: bool = False, simple_format: bool = False) -> None:
+        """Draw a track line in color mode with per-field color pairs.
+
+        force_no_tsv: render in normal (non-TSV) mode even if tab_align is on.
+        simple_format: render as 'artist - title [dur]' (for queue overlay).
+        """
+        base_attr = curses.A_REVERSE if selected else 0
+        liked = self.is_liked(t.id)
+        use_tsv = self.tab_align and not force_no_tsv and not simple_format
+
+        # Priority/mark prefix: [mark][priority_digits][trailing_space_if_3+digits]
+        # For 1-2 digit priorities: fixed 3 chars total (mark + up to 2 digits, no trailing space).
+        # For 3+ digit priorities: 1 + len(digits) + 1 chars (needs trailing space to separate).
+        prio_str = str(priority_pos) if priority_pos > 0 else ""
+        n_digits = len(prio_str)
+        pref_w = 3 if n_digits <= 2 else (1 + n_digits + 1)
+        if w <= pref_w:
+            return
+        # Fill the full prefix area with base_attr first (clears stale chars)
+        self.stdscr.addstr(y, x, " " * pref_w, base_attr)
+        if marked:
+            self.stdscr.addstr(y, x, "+", base_attr | self.C(15))
+        if priority_pos > 0:
+            # digits go at x+1, truncated to fit within pref_w-1
+            self.stdscr.addstr(y, x + 1, prio_str[:pref_w - 1], base_attr | self.C(5))
+        x += pref_w
+        w -= pref_w
+
+        # Liked heart — reserve space unconditionally in TSV mode so columns align
+        heart_w = 2  # "♥ "
+        if liked:
+            self.stdscr.addstr(y, x, ("♥ ")[:max(0, w)], base_attr | self.C(14))
+        elif use_tsv:
+            # Reserve the space so columns stay aligned even without heart
+            self.stdscr.addstr(y, x, "  "[:max(0, w)], base_attr)
+        if liked or use_tsv:
+            x += heart_w
+            w -= heart_w
+            if w <= 0:
+                return
+        # In non-TSV non-simple mode, don't reserve space if not liked
+
+        if simple_format:
+            # Queue overlay: artist - title [dur]
+            artist = t.artist
+            title = t.title
+            dv = self._track_duration(t)
+            dur = f" [{fmt_dur(dv)}]" if dv else ""
+            segs: List[Tuple[str, int]] = [
+                (artist, 7), (" - ", 13), (title, 11),
+            ]
+            if dur:
+                segs.append((dur, 9))
+            rem = max(0, w - 1)
+            cx = x
+            for text, pair in segs:
+                if rem <= 0 or not text:
+                    continue
+                text = text[:rem]
+                self.stdscr.addstr(y, cx, text, base_attr | (self.C(pair) if pair else 0))
+                cx += len(text)
+                rem -= len(text)
+            if rem > 0:
+                self.stdscr.addstr(y, cx, " " * rem, base_attr)
+            return
+
+        parts = self._make_track_parts(t)
+        artist, title, album_or_combined, dur = parts[0], parts[1], parts[2], parts[3]
+
+        if use_tsv:
+            year_part = parts[4] if len(parts) > 4 else ""
+            # fields: (text, color_pair, field_key)
+            field_defs: List[Tuple[str, int, str]] = [(artist, 7, "artist"), (title, 11, "title")]
+            if self.show_track_album and album_or_combined:
+                field_defs.append((album_or_combined, 8, "album"))
+            if self.show_track_year and year_part:
+                field_defs.append((year_part, 12, "year"))
+            if dur:
+                field_defs.append((dur, 9, "duration"))
+            n_fields = len(field_defs)
+            if n_fields == 0:
+                return
+            cx = x
+            rem = w
+            for fi, (text, pair, fkey) in enumerate(field_defs):
+                if rem <= 0:
+                    break
+                is_last = (fi == n_fields - 1)
+                if is_last:
+                    fw = rem
+                    display = text[:fw].ljust(fw)[:fw]
+                else:
+                    mcw = self.tsv_field_widths.get(fkey, self.tsv_max_col_width)
+                    if mcw <= 0:
+                        mcw = w
+                    fw = min(mcw, rem)
+                    # Always leave at least 1 char gap after truncated field
+                    if len(text) >= fw:
+                        # truncate to fw-1 and put separator in last char
+                        display = (text[:fw - 1] + "…") if fw > 1 else "…"
+                        display = display[:fw - 1].ljust(fw - 1) + " "
+                    else:
+                        display = text.ljust(fw - 1)[:fw - 1] + " "
+                self.stdscr.addstr(y, cx, display, base_attr | self.C(pair))
+                cx += fw
+                rem -= fw
+        else:
+            # Normal mode: artist - title (album, year) [dur]
+            segs = [
+                (artist, 7),
+                (" - ", 13),
+                (title, 11),
+            ]
+            if album_or_combined:
+                segs += [(" ", 0), (album_or_combined, 8)]
+            if dur:
+                segs += [(" ", 0), (dur, 9)]
+            rem = max(0, w - 1)
+            cx = x
+            for text, pair in segs:
+                if rem <= 0 or not text:
+                    continue
+                text = text[:rem]
+                self.stdscr.addstr(y, cx, text, base_attr | (self.C(pair) if pair else 0))
+                cx += len(text)
+                rem -= len(text)
+            if rem > 0:
+                self.stdscr.addstr(y, cx, " " * rem, base_attr)
+
+    def _draw_track_line(self, y: int, x: int, w: int, t: Track, selected: bool,
+                         marked: bool, idx1: Optional[int], priority_pos: int = 0,
+                         force_no_tsv: bool = False, simple_format: bool = False) -> None:
+        base_attr = curses.A_REVERSE if selected else 0
+
+        offs = self._draw_line_no(y, x, idx1 or 0, w) if idx1 is not None else 0
+        x += offs
+        w -= offs
+        if w <= 0:
+            return
+
+        if self.color_mode:
+            self._draw_track_line_colored(y, x, w, t, selected, marked, priority_pos,
+                                           force_no_tsv=force_no_tsv, simple_format=simple_format)
+        else:
+            liked = self.is_liked(t.id)
+            use_tsv = self.tab_align and not force_no_tsv and not simple_format
+            # Priority/mark prefix: fixed 3 chars for 1-2 digit priorities; expands for 3+ digits
+            prio_str = str(priority_pos) if priority_pos > 0 else ""
+            n_digits = len(prio_str)
+            pref_w = 3 if n_digits <= 2 else (1 + n_digits + 1)
+            if priority_pos > 0 and marked:
+                pref = ("+" + prio_str).ljust(pref_w)
+            elif priority_pos > 0:
+                pref = (" " + prio_str).ljust(pref_w)
+            elif marked:
+                pref = "+  "
+            else:
+                pref = "   "
+            pref = pref[:pref_w].ljust(pref_w)
+            self.stdscr.addstr(y, x, pref[:max(0, w - 1)], base_attr)
+            x += pref_w
+            w -= pref_w
+            if w <= 0:
+                return
+            if simple_format:
+                # Queue overlay: artist - title [dur]
+                dv = self._track_duration(t)
+                dur_s = f" [{fmt_dur(dv)}]" if dv else ""
+                head = "♥ " if liked else ""
+                line = f"{head}{t.artist} - {t.title}{dur_s}"
+                self.stdscr.addstr(y, x, line.ljust(max(0, w - 1))[:max(0, w - 1)], base_attr)
+                return
+            if use_tsv:
+                # In TSV BW mode reserve heart space for alignment
+                if liked:
+                    self.stdscr.addstr(y, x, "♥ "[:max(0, w - 1)], base_attr)
+                else:
+                    self.stdscr.addstr(y, x, "  "[:max(0, w - 1)], base_attr)
+                x += 2
+                w -= 2
+                if w <= 0:
+                    return
+                # Render TSV columns using make_track_parts
+                parts = self._make_track_parts(t)
+                artist, title = parts[0], parts[1]
+                album_or_combined = parts[2]
+                dur = parts[3]
+                year_part = parts[4] if len(parts) > 4 else ""
+                field_defs_bw = [(artist, "artist"), (title, "title")]
+                if self.show_track_album and album_or_combined:
+                    field_defs_bw.append((album_or_combined, "album"))
+                if self.show_track_year and year_part:
+                    field_defs_bw.append((year_part, "year"))
+                if dur:
+                    field_defs_bw.append((dur, "duration"))
+                n_fields = len(field_defs_bw)
+                cx = x
+                rem = w
+                for fi, (text, fkey) in enumerate(field_defs_bw):
+                    if rem <= 0:
+                        break
+                    is_last = (fi == n_fields - 1)
+                    if is_last:
+                        fw = rem
+                        display = text[:fw].ljust(fw)[:fw]
+                    else:
+                        mcw = self.tsv_field_widths.get(fkey, self.tsv_max_col_width)
+                        if mcw <= 0:
+                            mcw = w
+                        fw = min(mcw, rem)
+                        if len(text) >= fw:
+                            display = (text[:fw - 1] + "…") if fw > 1 else "…"
+                            display = display[:fw - 1].ljust(fw - 1) + " "
+                        else:
+                            display = text.ljust(fw - 1)[:fw - 1] + " "
+                    self.stdscr.addstr(y, cx, display, base_attr)
+                    cx += fw
+                    rem -= fw
+            else:
+                head = "♥ " if liked else ""
+                line = self.fmt_track_line_bw(t, w - 1, liked=liked)
+                self.stdscr.addstr(y, x, line.ljust(max(0, w - 1))[:max(0, w - 1)], base_attr)
+
+    def _draw_left(self, y: int, x: int, h: int, w: int) -> None:
+        typ, items = self._left_items()
+        if h <= 0 or w <= 0:
+            return
+        if self._loading:
+            self.stdscr.addstr(y, x, "Loading…", self.C(4))
+            return
+
+        n = len(items)
+        if typ == "queue_tab":
+            self.queue_cursor = clamp(self.queue_cursor, 0, max(0, n - 1))
+            active_idx = self.queue_cursor
+        else:
+            self.left_idx = clamp(self.left_idx, 0, max(0, n - 1))
+            active_idx = self.left_idx
+        if active_idx < self.left_scroll:
+            self.left_scroll = active_idx
+        if active_idx >= self.left_scroll + h:
+            self.left_scroll = active_idx - h + 1
+        self.left_scroll = clamp(self.left_scroll, 0, max(0, n - h))
+
+        if self.show_track_year or self.show_track_duration:
+            for i in range(self.left_scroll, min(n, self.left_scroll + min(h, 14))):
+                it = items[i]
+                if isinstance(it, Track):
+                    if (self.show_track_year and year_norm(it.year) == "????") or (self.show_track_duration and not it.duration):
+                        self.meta.want(it.id)
+
+        pq_set = {qi: pos+1 for pos, qi in enumerate(self.priority_queue)}
+
+        # Show hint for empty tabs
+        if typ == "tracks" and n == 0 and self.tab == TAB_SEARCH:
+            hint = " Press / to search"
+            self.stdscr.addstr(y, x, hint[:max(0, w - 1)].ljust(max(0, w - 1)), self.C(10))
+            return
+        if typ == "tracks" and n == 0 and self.tab == TAB_RECOMMENDED:
+            hint = " An active track is required to get recommendations"
+            self.stdscr.addstr(y, x, hint[:max(0, w - 1)].ljust(max(0, w - 1)), self.C(10))
+            return
+
+        for row in range(h):
+            i = self.left_scroll + row
+            yy = y + row
+            if i >= n:
+                break
+            it = items[i]
+            if typ == "queue_tab":
+                selected = (i == self.queue_cursor)
+            else:
+                selected = (not self._queue_context() and i == self.left_idx)
+
+            if typ in ("queue_tab", "tracks") and isinstance(it, Track):
+                marked = (i in (self.marked_queue_idx if typ == "queue_tab" else self.marked_left_idx))
+                ppos = pq_set.get(i, 0) if typ == "queue_tab" else 0
+                if typ == "queue_tab":
+                    alive2 = self.mp.alive()
+                    _, _, pa2, _, _ = self.mp.snapshot()
+                    ct = self.current_track
+                    playing = alive2 and ct is not None and ct.id == it.id and i == self.queue_play_idx
+                    base_attr2 = curses.A_REVERSE if selected else 0
+                    if playing and not pa2:
+                        self.stdscr.addstr(yy, x, " ", base_attr2)
+                        self.stdscr.addstr(yy, x + 1, "▶", base_attr2 | self.C(1))
+                    elif playing and pa2:
+                        self.stdscr.addstr(yy, x, " ", base_attr2)
+                        self.stdscr.addstr(yy, x + 1, "⏸", base_attr2 | self.C(2))
+                    else:
+                        self.stdscr.addstr(yy, x, "  ", base_attr2)
+                    self._draw_track_line(yy, x + 2, max(0, w - 2), it, selected=selected,
+                                         marked=marked, idx1=i + 1, priority_pos=ppos)
+                else:
+                    self._draw_track_line(yy, x, w, it, selected=selected, marked=marked, idx1=i + 1, priority_pos=ppos)
+                continue
+
+            if typ == "artist_mixed":
+                if isinstance(it, tuple) and it[0] == "sep":
+                    line = f"── {it[1]} ──"
+                    offs = self._draw_line_no(yy, x, i + 1, w) if self.show_numbers else 0
+                    self.stdscr.addstr(yy, x + offs, line[:max(0, w - offs - 1)].ljust(max(0, w - offs - 1)),
+                                       self.C(4))
+                    continue
+                if isinstance(it, Album):
+                    yv = year_norm(it.year)
+                    ys = f", {yv}" if (self.show_track_year and yv != "????") else ""
+                    line = f"   {it.title}{ys}"
+                    offs = self._draw_line_no(yy, x, i + 1, w) if self.show_numbers else 0
+                    self.stdscr.addstr(yy, x + offs, line[:max(0, w - offs - 1)].ljust(max(0, w - offs - 1)),
+                                       (curses.A_REVERSE if selected else 0) | self.C(8))
+                    continue
+                if isinstance(it, Track):
+                    marked = (i in self.marked_left_idx)
+                    self._draw_track_line(yy, x, w, it, selected=selected, marked=marked, idx1=i + 1)
+                    continue
+
+            if typ == "album_mixed":
+                if isinstance(it, tuple) and it[0] == "album_title" and isinstance(it[1], Album):
+                    a = it[1]
+                    yv = year_norm(a.year)
+                    ys = f", {yv}" if (self.show_track_year and yv != "????") else ""
+                    line = f"  {a.artist} — {a.title}{ys}"
+                    offs = self._draw_line_no(yy, x, i + 1, w) if self.show_numbers else 0
+                    self.stdscr.addstr(yy, x + offs, line[:max(0, w - offs - 1)].ljust(max(0, w - offs - 1)),
+                                       (curses.A_REVERSE if selected else 0) | self.C(8))
+                    continue
+                if isinstance(it, Track):
+                    marked = (i in self.marked_left_idx)
+                    self._draw_track_line(yy, x, w, it, selected=selected, marked=marked, idx1=i + 1)
+                    continue
+
+            if typ == "playlists":
+                offs = self._draw_line_no(yy, x, i + 1, w) if self.show_numbers else 0
+                count = len(self.playlists.get(str(it), []))
+                display = f"{it}  ({count})" if count else str(it)
+                self.stdscr.addstr(yy, x + offs, display[:max(0, w - offs - 1)].ljust(max(0, w - offs - 1)),
+                                   curses.A_REVERSE if selected else 0)
+                continue
+
+            offs = self._draw_line_no(yy, x, i + 1, w) if self.show_numbers else 0
+            self.stdscr.addstr(yy, x + offs, str(it)[:max(0, w - offs - 1)].ljust(max(0, w - offs - 1)),
+                               curses.A_REVERSE if selected else 0)
+
+    def _queue_title(self) -> str:
+        if not self.queue_items:
+            return " Queue 0/0"
+        pq_info = f" [+{len(self.priority_queue)}]" if self.priority_queue else ""
+        return f" Queue {clamp(self.queue_play_idx + 1, 1, len(self.queue_items))}/{len(self.queue_items)}{pq_info}"
+
+    def _draw_queue(self, y: int, x: int, h: int, w: int) -> None:
+        """Draw the queue overlay panel. Always shows artist - title [dur], never TSV."""
+        if h <= 1 or w <= 0:
+            return
+        total_h = h
+        scr_h, scr_w = self.stdscr.getmaxyx()
+        if x > 0 and x < scr_w:
+            for yy in range(y, y + total_h):
+                try:
+                    self.stdscr.addch(yy, x, "│", self.C(4))
+                except Exception:
+                    pass
+        x += 1
+        w -= 1
+        if w <= 0:
+            return
+        self.stdscr.addstr(y, x, self._queue_title()[:max(0, w - 1)].ljust(max(0, w - 1)), self.C(4))
+        y += 1
+        h -= 1
+        if not self.queue_items:
+            return
+
+        self.queue_cursor = clamp(self.queue_cursor, 0, len(self.queue_items) - 1)
+        q_scroll = max(0, self.queue_cursor - h + 1) if self.queue_cursor >= h else 0
+
+        # Always fetch duration for overlay display
+        for i in range(q_scroll, min(len(self.queue_items), q_scroll + min(h, 14))):
+            t = self.queue_items[i]
+            if not t.duration:
+                self.meta.want(t.id)
+
+        tp, du, pa, vo, mu = self.mp.snapshot()
+        alive = self.mp.alive()
+        pq_set = {qi: pos+1 for pos, qi in enumerate(self.priority_queue)}
+
+        for row in range(h):
+            i = q_scroll + row
+            yy = y + row
+            if i >= len(self.queue_items):
+                break
+            t = self.queue_items[i]
+            selected = (self._queue_context() and i == self.queue_cursor)
+            base_attr = curses.A_REVERSE if selected else 0
+            ct = self.current_track
+            playing = alive and ct is not None and ct.id == t.id and i == self.queue_play_idx
+            if playing and not pa:
+                pfx_sym = "▶"
+                pfx_color = self.C(1)
+            elif playing and pa:
+                pfx_sym = "⏸"
+                pfx_color = self.C(2)
+            else:
+                pfx_sym = ""
+                pfx_color = 0
+
+            offs = self._draw_line_no(yy, x, i + 1, w) if self.show_numbers else 0
+            px = x + offs
+            pw = w - offs
+            if pw <= 0:
+                continue
+            # Draw space then colored play/pause symbol (or two spaces if not playing)
+            self.stdscr.addstr(yy, px, " ", base_attr)
+            if pw > 1:
+                sym = pfx_sym if pfx_sym else " "
+                self.stdscr.addstr(yy, px + 1, sym, base_attr | pfx_color)
+            # Track content starts right after the 2-char play indicator
+            marked = (i in self.marked_queue_idx)
+            ppos = pq_set.get(i, 0)
+            self._draw_track_line(yy, px + 2, max(0, pw - 2), t, selected=selected,
+                                  marked=marked, idx1=None, priority_pos=ppos,
+                                  force_no_tsv=True, simple_format=True)
+
+    def _draw_status(self, y: int, x: int, w: int) -> None:
+        tp, du, pa, vo, mu = self.mp.snapshot()
+        alive = self.mp.alive()
+
+        if self.show_toggles:
+            rep = ["REP:off", "REP:all", "REP:one"][self.repeat_mode]
+            vol = f"VOL:{int(vo) if vo is not None else self.desired_volume}"
+            mut = "MUTE:on" if (mu if mu is not None else self.desired_mute) else "MUTE:off"
+            tab_a = "TAB:on" if self.tab_align else "TAB:off"
+            pq = f"PQ:{len(self.priority_queue)}" if self.priority_queue else ""
+            parts = [rep, "SHUF:on" if self.shuffle_on else "SHUF:off",
+                     "AUTO:on" if self.auto_recommend else "AUTO:off",
+                     f"Q:{QUALITY_ORDER[self.quality_idx]}", vol, mut, tab_a]
+            if pq:
+                parts.append(pq)
+            if self.filter_q:
+                parts.append(f"FILT:{self.filter_q}")
+            line1 = " " + " ".join(parts)
+            self.stdscr.addstr(y, x, line1[:max(0, w - 1)].ljust(max(0, w - 1)), curses.A_DIM if self.color_mode else 0)
+        else:
+            self.stdscr.addstr(y, x, " " * max(0, w - 1))
+
+        state = "⏹"
+        if alive:
+            state = "⏸" if pa else "▶"
+        left = f" {state} {fmt_time(tp)}/{fmt_time(du)} "
+        song = self.fmt_track_status(self.current_track, 10_000) if self.current_track else ""
+        if self.last_error:
+            song = f"ERROR: {self.last_error}"
+        line2 = (left + song)[:max(0, w - 1)].ljust(max(0, w - 1))
+
+        right = ""
+        if time.time() < self.toast_until and self.toast_msg:
+            right = self.toast_msg
+        else:
+            right = self.dl.progress_line or ("DLERR" if self.dl.error else "")
+        if right:
+            right = right[:max(0, w - 2)]
+            tpos = max(0, (w - 1) - len(right))
+            line2 = line2[:tpos] + right + line2[tpos + len(right):]
+
+        self.stdscr.addstr(y + 1, x, line2, self._status_color_pair(pa, alive))
+
+    def _draw_overlay_box(self, title: str, lines: List[str], scroll: int, box_w: int, box_h: int) -> None:
+        h, w = self.stdscr.getmaxyx()
+        box_w = min(w - 6, box_w)
+        box_h = min(h - 6, box_h)
+        y0 = (h - box_h) // 2
+        x0 = (w - box_w) // 2
+        for yy in range(y0, y0 + box_h):
+            self.stdscr.addstr(yy, x0, " " * box_w)
+        win = self.stdscr.derwin(box_h, box_w, y0, x0)
+        win.box()
+        win.addstr(0, 2, f" {title} ", self.C(4))
+        inner_h = box_h - 2
+        start = clamp(scroll, 0, max(0, len(lines) - inner_h))
+        for i in range(inner_h):
+            idx = start + i
+            if idx >= len(lines):
+                break
+            win.addstr(1 + i, 2, lines[idx][:box_w - 4])
+        win.refresh()
+
+    def _draw_help(self) -> None:
+        lines = [
+            "",
+            " TABS:",
+            " 1 Queue   2 Search   3 Recommended   4 Artist",
+            " 5 Album   6 Liked    7 Playlists",
+            "",
+            " PLAYBACK:                            PLAYLISTS (7):",
+            " p         pause/resume               n     new",
+            " m         mute                       d     delete",
+            " -/+       volume                     Enter open",
+            " ←/→       seek 5s                    Bkspc back to playlists",
+            " Shift ←/→ seek 30s                   e/E   enqueue to end/after current",
+            " ,/<       prev track                 a     add selection to playlist",
+            " ./>       next track                 x     remove selected from playlist",
+            " t         resume selected from last known position",
+            "",
+            " ACTIONS:",
+            " Enter     play",
+            " e/E       enqueue to end/after current",
+            " b         play next (set priority N)",
+            " B         clear priorities",
+            " 4/5       show tracks from artist/album of selected track",
+            " D         download selected/marked/album/playlist",
+            " Space     mark/unmark selected and advance",
+            " U/u       mark/unmark all",
+            " l         like/unlike selected or marked",
+            " L         like/unlike playing",
+            " g/G       move cursor to top/bottom",
+            " j/k/↓/↑  move cursor down/up",
+            " J/K       move track or marked tracks down/up",
+            " x         remove track from queue",
+            " X         clear queue",
+            " z         jump to currently playing",
+            " i/I       show selected/playing info",
+            " v/V       show lyrics of selected/playing",
+            " o/O       open selected/playing in browser",
+            "",
+            " GENERAL:",
+            " /         search",
+            " f         filter current view",
+            " (/)       prev/next filter hit",
+            " Esc       close search/filter prompt",
+            " Q         quit",
+            "",
+            " VIEW:",
+            " q         mini-queue overlay",
+            " c         color/bw",
+            " w/y/d/N   album/year/duration/line number fields",
+            " S         status bar",
+            " \\         toggle TSV mode",
+            " z (queue) jump to playing",
+            "",
+            " TOGGLES:",
+            " A         autoplay recommendations",
+            " r         repeat modes",
+            " s         shuffle",
+            " F         quality",
+            "",
+            " COLORS (settings.json):",
+            " color_playing  color_paused  color_error  color_chrome  color_accent",
+            " color_artist   color_title   color_album  color_year    color_separator",
+            " color_duration color_numbers color_liked  color_mark",
+            " Values: black red green yellow blue magenta cyan white (or 0-255)",
+            " tsv_max_col_width: default max column width in TSV mode (default 32, 0=unlimited)",
+            " tsv_max_artist_width / tsv_max_title_width / tsv_max_album_width",
+            " tsv_max_year_width / tsv_max_duration_width: per-field overrides (0=use default)",
+            "",
+        ]
+        box_h = 34
+        h, _ = self.stdscr.getmaxyx()
+        inner_h = min(h - 8, box_h - 2)
+        self._help_max_scroll = max(0, len(lines) - inner_h)
+        self._draw_overlay_box("Help  (? or q to close)", lines, self.help_scroll, box_w=86, box_h=box_h)
+
+    def _draw_info(self) -> None:
+        if self.info_album and not self.info_track:
+            a = self.info_album
+            lines: List[str] = [
+                f"Album  : {a.title}",
+                f"Artist : {a.artist}",
+                f"Year   : {year_norm(a.year)}",
+                f"ID     : {a.id}" if a.id else "",
+                "",
+            ]
+            if self.info_loading:
+                lines.append("Loading album info…")
+            else:
+                payload = self.info_payload or {}
+                if "error" in payload:
+                    lines.append(f"Error: {payload.get('error')}")
+                else:
+                    data = payload.get("data") if isinstance(payload, dict) else payload
+                    if isinstance(data, dict):
+                        for k in ("numberOfTracks", "numberOfVolumes", "releaseDate",
+                                  "audioQuality", "explicit", "upc", "popularity"):
+                            if k in data:
+                                lines.append(f"{k}: {data[k]}")
+            lines = [l for l in lines if l is not None]
+            self._draw_overlay_box("Album info", lines, self.info_scroll, box_w=76, box_h=16)
+            return
+
+        t = self.info_track
+        if not t:
+            self._draw_overlay_box("Info", ["(no selection)"], 0, box_w=72, box_h=10)
+            return
+        lines = [
+            f"Title   : {t.title}",
+            f"Artist  : {t.artist}" + (f" (id {t.artist_id})" if t.artist_id else ""),
+            f"Album   : {t.album}" + (f" (id {t.album_id})" if t.album_id else ""),
+        ]
+        yv = self._track_year(t)
+        if yv != "????":
+            lines.append(f"Year    : {yv}")
+        dv = self._track_duration(t)
+        if dv:
+            lines.append(f"Duration: {fmt_dur(dv)}")
+        lines += [f"Track id: {t.id}", f"Liked   : {'yes' if self.is_liked(t.id) else 'no'}", ""]
+        if self.info_loading:
+            lines.append("Loading /info …")
+        else:
+            payload = self.info_payload or {}
+            if "error" in payload:
+                lines.append(f"Error: {payload.get('error')}")
+            else:
+                data = payload.get("data") if isinstance(payload, dict) else None
+                if isinstance(data, dict):
+                    for k in ("audioQuality", "explicit", "popularity", "streamReady"):
+                        if k in data:
+                            lines.append(f"{k}: {data.get(k)}")
+        self._draw_overlay_box("Track info", lines, self.info_scroll, box_w=76, box_h=16)
+
+    def _draw_lyrics(self) -> None:
+        t_id = self.lyrics_track_id
+        title = "Lyrics"
+        t_ref = self.lyrics_track
+        if t_ref is None and self.current_track and self.current_track.id == t_id:
+            t_ref = self.current_track
+        if t_ref:
+            title = f"Lyrics – {t_ref.artist} - {t_ref.title}"
+        if self.lyrics_loading:
+            lines = ["Loading lyrics…"]
+        else:
+            lines = self.lyrics_lines or ["(empty)"]
+        self._draw_overlay_box(title[:80], lines, self.lyrics_scroll, box_w=84, box_h=30)
+
+    def draw(self) -> None:
+        if not self._need_redraw:
+            return
+
+        h, w = self.stdscr.getmaxyx()
+        top_h = 2
+        status_h = 2
+        usable_h = h - top_h - status_h
+
+        if self._redraw_status_only and not self.show_help and not self.info_overlay and not self.lyrics_overlay:
+            self._draw_status(h - status_h, 0, w)
+            self.stdscr.refresh()
+            self._need_redraw = False
+            self._redraw_status_only = False
+            return
+
+        self._redraw_status_only = False
+        self._need_redraw = False
+        self.stdscr.erase()
+
+        left_w = w if not self.queue_overlay else max(20, w - 44)
+
+        self._draw_tabs(0, 0, w)
+        self._draw_left(top_h, 0, usable_h, left_w)
+
+        if self.queue_overlay:
+            self._draw_queue(top_h, left_w, usable_h, w - left_w)
+
+        self._draw_status(h - status_h, 0, w)
+
+        if self.show_help:
+            self._draw_help()
+        if self.info_overlay:
+            self._draw_info()
+        if self.lyrics_overlay:
+            self._draw_lyrics()
+
+        self.stdscr.refresh()
+
+    # ---------- tab switching ----------
+    def switch_tab(self, t: int, refresh: bool = True) -> None:
+        self.tab = t
+        self.left_idx = 0
+        self.left_scroll = 0
+        self._loading = False
+        self._loading_key = ""
+        self.show_help = False
+        self.marked_left_idx.clear()
+
+        if self.tab == TAB_QUEUE:
+            self.focus = "queue"
+        elif self.focus == "queue" and not self.queue_overlay:
+            self.focus = "left"
+
+        if t == TAB_RECOMMENDED and refresh:
+            ctx = self._selected_left_track() or self.current_track
+            self.fetch_recommended_async(ctx)
+        elif t == TAB_LIKED and refresh:
+            self.fetch_liked_async()
+        elif t == TAB_ARTIST and refresh:
+            ctx = self._current_selection_track() or self.current_track
+            self.fetch_artist_async(ctx)
+        elif t == TAB_PLAYLISTS:
+            self.playlist_names = sorted(self.playlists.keys())
+            self.playlist_view_name = None
+            self.playlist_view_tracks = []
+
+        self._need_redraw = True
+        self._redraw_status_only = False
+
+    # ---------- navigation ----------
+    def _page_step(self) -> int:
+        h, _ = self.stdscr.getmaxyx()
+        return max(1, h - 2 - 2 - 1)
+
+    def nav_page(self, direction: int) -> None:
+        step = self._page_step()
+        if self._queue_context():
+            self.queue_cursor = clamp(self.queue_cursor + direction * step, 0, max(0, len(self.queue_items) - 1))
+        else:
+            _typ, items = self._left_items()
+            self.left_idx = clamp(self.left_idx + direction * step, 0, max(0, len(items) - 1))
+
+    def nav_home(self) -> None:
+        if self._queue_context():
+            self.queue_cursor = 0
+        else:
+            self.left_idx = 0
+
+    def nav_end(self) -> None:
+        if self._queue_context():
+            self.queue_cursor = max(0, len(self.queue_items) - 1)
+        else:
+            _typ, items = self._left_items()
+            self.left_idx = max(0, len(items) - 1)
+
+    def jump_to_playing_in_queue(self) -> None:
+        if not self.queue_items:
+            self.toast("Queue empty")
+            return
+        if not self.queue_overlay:
+            self.queue_overlay = True
+        self.queue_cursor = clamp(self.queue_play_idx, 0, len(self.queue_items) - 1)
+        self._need_redraw = True
+        self._redraw_status_only = False
+
+    # ---------- main loop ----------
+    def run(self) -> None:
+        last_persist = 0.0
+
+        # If starting on the Liked tab, fetch immediately
+        if self.tab == TAB_LIKED:
+            self.fetch_liked_async()
+
+        while True:
+            now = time.time()
+
+            if self._liked_refresh_due and now >= self._liked_refresh_due:
+                self._liked_refresh_due = 0.0
+                if self.tab == TAB_LIKED:
+                    self.fetch_liked_async()
+
+            self._do_info_fetch_if_due()
+
+            if self.info_overlay and not self.info_album:
+                t = self._current_selection_track()
+                if t and (self.info_track is None or t.id != self.info_track.id):
+                    self._request_info_refresh(t)
+
+            if self.current_track and not self.mp.alive():
+                tp, du, pa, vo, mu = self.mp.snapshot()
+                if tp is None and du is None:
+                    self.current_track = None
+                    self.next_track()
+                    self._need_redraw = True
+                    self._redraw_status_only = False
+
+            if now - last_persist > 2.0:
+                last_persist = now
+                self.settings.update({
+                    "volume": self.desired_volume, "mute": self.desired_mute,
+                    "color_mode": self.color_mode, "queue_overlay": self.queue_overlay,
+                    "show_toggles": self.show_toggles, "show_numbers": self.show_numbers,
+                    "show_track_album": self.show_track_album, "show_track_year": self.show_track_year,
+                    "show_track_duration": self.show_track_duration,
+                    "quality": QUALITY_ORDER[self.quality_idx],
+                    "auto_recommend": self.auto_recommend, "initial_tab": self.tab,
+                    "initial_filter": self.filter_q,
+                    "tab_align": self.tab_align,
+                })
+                try:
+                    save_settings(self.settings)
+                except Exception:
+                    pass
+
+            self.draw()
+
+            ch = self.stdscr.getch()
+            if ch == -1:
+                time.sleep(0.004)
+                continue
+
+            self._need_redraw = True
+            self._redraw_status_only = False
+
+            # Escape closes overlays / clears filter
+            if ch == 27:
+                if self.lyrics_overlay:
+                    self.lyrics_overlay = False
+                elif self.info_overlay:
+                    self.info_overlay = False
+                elif self.show_help:
+                    self.show_help = False
+                elif self.filter_q:
+                    self.filter_q = ""
+                    self.filter_hits = []
+                    self.filter_pos = -1
+                    self.toast("Filter cleared")
+                continue
+
+            if ch == ord("Q"):
+                break
+
+            if ch == ord("?"):
+                self.show_help = not self.show_help
+                continue
+
+            if self.show_help:
+                if ch in (27, ord("?"), ord("Q"), ord("q")):
+                    self.show_help = False
+                elif ch in (curses.KEY_DOWN, ord("j")):
+                    self.help_scroll = min(self.help_scroll + 1, max(0, getattr(self, "_help_max_scroll", 10_000)))
+                elif ch in (curses.KEY_UP, ord("k")):
+                    self.help_scroll = max(0, self.help_scroll - 1)
+                elif ch == curses.KEY_PPAGE:
+                    self.help_scroll = max(0, self.help_scroll - self._page_step())
+                elif ch == curses.KEY_NPAGE:
+                    self.help_scroll = min(self.help_scroll + self._page_step(), max(0, getattr(self, "_help_max_scroll", 10_000)))
+                elif ch in (curses.KEY_HOME, ord("g")):
+                    self.help_scroll = 0
+                elif ch in (curses.KEY_END, ord("G")):
+                    self.help_scroll = max(0, getattr(self, "_help_max_scroll", 10_000))
+                continue
+
+            if self.lyrics_overlay:
+                if ch in (27, ord("v"), ord("q")):
+                    self.lyrics_overlay = False
+                elif ch in (curses.KEY_DOWN, ord("j")):
+                    self.lyrics_scroll += 1
+                elif ch in (curses.KEY_UP, ord("k")):
+                    self.lyrics_scroll = max(0, self.lyrics_scroll - 1)
+                elif ch == curses.KEY_PPAGE:
+                    self.lyrics_scroll = max(0, self.lyrics_scroll - self._page_step())
+                elif ch == curses.KEY_NPAGE:
+                    self.lyrics_scroll += self._page_step()
+                elif ch in (curses.KEY_HOME, ord("g")):
+                    self.lyrics_scroll = 0
+                elif ch in (curses.KEY_END, ord("G")):
+                    self.lyrics_scroll = 10_000
+                continue
+
+            if ch == ord("/"):
+                self.do_search_prompt_anywhere()
+                continue
+            if ch == ord("f"):
+                self.filter_prompt()
+                continue
+            if ch == ord("("):
+                self.filter_next(-1)
+                continue
+            if ch == ord(")"):
+                self.filter_next(+1)
+                continue
+
+            if ch == ord("v"):
+                t_sel = self._current_selection_track()
+                self.toggle_lyrics(t_sel)
+                continue
+            if ch == ord("V"):
+                self.toggle_lyrics(self.current_track)
+                continue
+
+            if ch == ord("i"):
+                self.toggle_info_selected()
+                continue
+            if ch == ord("I"):
+                self.toggle_info_playing()
+                continue
+
+            if self.info_overlay:
+                if ch in (curses.KEY_DOWN, ord("j")):
+                    self.info_scroll += 1
+                    continue
+                if ch in (curses.KEY_UP, ord("k")):
+                    self.info_scroll = max(0, self.info_scroll - 1)
+                    continue
+
+            if ch == ord("o"):
+                t = self._current_selection_track()
+                if t:
+                    self.open_url(f"{self.web_base()}/track/{t.id}")
+                continue
+            if ch == ord("O"):
+                if self.current_track:
+                    self.open_url(f"{self.web_base()}/track/{self.current_track.id}")
+                continue
+
+            if ch == ord("t"):
+                self.play_track_with_resume()
+                continue
+
+            # \\ = toggle tab-align mode
+            if ch == ord("\\"):
+                self.tab_align = not self.tab_align
+                self.toast("TAB:on" if self.tab_align else "TAB:off")
+                continue
+
+            # q toggles queue overlay
+            if ch == ord("q"):
+                self.queue_overlay = not self.queue_overlay
+                if not self.queue_overlay and self.focus == "queue":
+                    self.focus = "left"
+                self.toast("Queue:on" if self.queue_overlay else "Queue:off")
+                continue
+
+            if ch == ord("\t") and self.queue_overlay:
+                self.focus = "queue" if self.focus == "left" else "left"
+                continue
+
+            # Tab switching: 1=Queue 2=Search 3=Recommended 4=Artist 5=Album 6=Liked 7=Playlists
+            if ch in (ord("1"), ord("2"), ord("3"), ord("4"), ord("5"), ord("6"), ord("7")):
+                mapping = {
+                    ord("1"): TAB_QUEUE, ord("2"): TAB_SEARCH, ord("3"): TAB_RECOMMENDED,
+                    ord("4"): TAB_ARTIST, ord("5"): TAB_ALBUM,
+                    ord("6"): TAB_LIKED, ord("7"): TAB_PLAYLISTS,
+                }
+                t_num = mapping[ch]
+                if t_num == TAB_ARTIST:
+                    ctx = self._current_selection_track() or self.current_track
+                    self.switch_tab(TAB_ARTIST, refresh=False)
+                    self.fetch_artist_async(ctx)
+                elif t_num == TAB_ALBUM:
+                    ctx = self._current_selection_track() or self.current_track
+                    if ctx:
+                        self.open_album_from_track(ctx)
+                    else:
+                        self.switch_tab(TAB_ALBUM, refresh=False)
+                else:
+                    self.switch_tab(t_num, refresh=True)
+                continue
+
+            if ch == ord("z"):
+                self.jump_to_playing_in_queue()
+                continue
+
+            if ch == ord("a"):
+                self.playlists_add_from_context()
+                continue
+
+            if ch == ord("N"):
+                self.show_numbers = not self.show_numbers
+                self.toast("Num:on" if self.show_numbers else "Num:off")
+                continue
+
+            if ch == ord("b"):
+                if self._queue_context() and self.queue_items:
+                    idx = clamp(self.queue_cursor, 0, len(self.queue_items) - 1)
+                    self.toggle_priority(idx)
+                elif not self._queue_context():
+                    t_sel = self._selected_left_track()
+                    if t_sel:
+                        self._enqueue_tracks([t_sel], False)
+                        new_idx = len(self.queue_items) - 1
+                        self.toggle_priority(new_idx)
+                continue
+
+            if ch == ord("B"):
+                self.clear_priority_queue()
+                continue
+
+            if ch == ord("u"):
+                self.unmark_all_current_view()
+                continue
+            if ch == ord("U"):
+                self.mark_all_current_view()
+                continue
+
+            # Playback
+            if ch == ord("p"):
+                self.toggle_pause()
+                continue
+            if ch == ord("m"):
+                self.mute_toggle()
+                continue
+            if ch == ord("-"):
+                self.volume_add(-2.0)
+                continue
+            if ch in (ord("+"), ord("=")):
+                self.volume_add(2.0)
+                continue
+            if ch == curses.KEY_LEFT:
+                self.seek_rel(-5.0)
+                continue
+            if ch == curses.KEY_RIGHT:
+                self.seek_rel(5.0)
+                continue
+            if ch == getattr(curses, "KEY_SLEFT", -999):
+                self.seek_rel(-30.0)
+                continue
+            if ch == getattr(curses, "KEY_SRIGHT", -999):
+                self.seek_rel(30.0)
+                continue
+
+            if ch in (ord("<"), ord(",")):
+                self.prev_track()
+                continue
+            if ch in (ord(">"), ord(".")):
+                self.next_track()
+                continue
+
+            if ch == ord("r"):
+                self.repeat_mode = (self.repeat_mode + 1) % 3
+                self.toast(["REP:off", "REP:all", "REP:one"][self.repeat_mode])
+                continue
+            if ch == ord("s"):
+                self.shuffle_on = not self.shuffle_on
+                self.toast("SHUF:on" if self.shuffle_on else "SHUF:off")
+                continue
+            if ch == ord("A"):
+                self.auto_recommend = not self.auto_recommend
+                self.toast("Auto:on" if self.auto_recommend else "Auto:off")
+                continue
+            if ch == ord("F"):
+                self.quality_idx = (self.quality_idx + 1) % len(QUALITY_ORDER)
+                self.toast(f"Q:{QUALITY_ORDER[self.quality_idx]}")
+                continue
+            if ch == ord("c"):
+                self.color_mode = not self.color_mode
+                self.toast("Color" if self.color_mode else "B/W")
+                continue
+            if ch == ord("S"):
+                self.show_toggles = not self.show_toggles
+                self.toast("Tog:on" if self.show_toggles else "Tog:off")
+                continue
+            if ch == ord("w"):
+                self.show_track_album = not self.show_track_album
+                self.toast("Album:on" if self.show_track_album else "Album:off")
+                continue
+            if ch == ord("y"):
+                self.show_track_year = not self.show_track_year
+                self.toast("Year:on" if self.show_track_year else "Year:off")
+                continue
+            if ch == ord("d") and self.tab != TAB_PLAYLISTS:
+                self.show_track_duration = not self.show_track_duration
+                self.toast("Dur:on" if self.show_track_duration else "Dur:off")
+                continue
+
+            if ch == ord("l"):
+                self.like_selected()
+                continue
+            if ch == ord("L"):
+                self.like_playing()
+                continue
+
+            if ch == ord(" "):
+                self.toggle_mark_and_advance()
+                continue
+
+            if ch == ord("e"):
+                self.enqueue_key(insert_after_playing=False)
+                continue
+            if ch == ord("E"):
+                self.enqueue_key(insert_after_playing=True)
+                continue
+
+            if self.tab == TAB_PLAYLISTS:
+                if ch == ord("n"):
+                    self.playlists_create()
+                    continue
+                if ch == ord("d"):
+                    self.playlists_delete_current()
+                    continue
+                if ch == ord("a"):
+                    self.playlists_add_from_context()
+                    continue
+                if ch in (curses.KEY_BACKSPACE, 127, 8):
+                    if self.playlist_view_name is not None:
+                        self.playlist_view_name = None
+                        self.playlist_view_tracks = []
+                        self.playlist_names = sorted(self.playlists.keys())
+                        self.left_idx = 0
+                        self.left_scroll = 0
+                        self._need_redraw = True
+                        self._redraw_status_only = False
+                    continue
+                if ch == ord("x") and self.playlist_view_name is not None:
+                    # Remove selected/marked tracks from the playlist
+                    pname = self.playlist_view_name
+                    tracks = self.playlist_view_tracks
+                    idxs = sorted([i for i in self.marked_left_idx if 0 <= i < len(tracks)])
+                    if not idxs:
+                        idxs = [clamp(self.left_idx, 0, max(0, len(tracks) - 1))] if tracks else []
+                    for idx in sorted(idxs, reverse=True):
+                        if 0 <= idx < len(tracks):
+                            tid = tracks[idx].id
+                            self.playlist_view_tracks = [t for j, t in enumerate(tracks) if j != idx]
+                            tracks = self.playlist_view_tracks
+                            ids = self.playlists.get(pname, [])
+                            # Remove first occurrence of this tid from stored playlist
+                            try:
+                                ids.remove(tid)
+                            except ValueError:
+                                pass
+                    self.marked_left_idx.clear()
+                    self.left_idx = clamp(self.left_idx, 0, max(0, len(self.playlist_view_tracks) - 1))
+                    save_playlists(self.playlists)
+                    self.toast("Removed from playlist")
+                    self._need_redraw = True
+                    self._redraw_status_only = False
+                    continue
+
+            if ch == ord("x") and self.tab != TAB_PLAYLISTS:
+                if self.queue_items:
+                    idxs = sorted([i for i in self.marked_queue_idx if 0 <= i < len(self.queue_items)])
+                    if not idxs:
+                        idxs = [clamp(self.queue_cursor, 0, len(self.queue_items) - 1)]
+                    for idx in sorted(idxs, reverse=True):
+                        del self.queue_items[idx]
+                        if idx < self.queue_play_idx:
+                            self.queue_play_idx -= 1
+                        elif idx == self.queue_play_idx:
+                            self.queue_play_idx = clamp(self.queue_play_idx, 0, max(0, len(self.queue_items) - 1))
+                    self._remap_priority_after_delete(idxs)
+                    self.marked_queue_idx.clear()
+                    self.queue_cursor = clamp(self.queue_cursor, 0, max(0, len(self.queue_items) - 1))
+                    self.toast("Removed")
+                continue
+
+            if ch == ord("X"):
+                if self.queue_items and self.prompt_yes_no("Clear queue? (y/n)"):
+                    if self.current_track and 0 <= self.queue_play_idx < len(self.queue_items):
+                        playing_item = self.queue_items[self.queue_play_idx]
+                        self.queue_items = [playing_item]
+                        self.queue_play_idx = 0
+                        self.queue_cursor = 0
+                    else:
+                        self.queue_items = []
+                        self.queue_play_idx = 0
+                        self.queue_cursor = 0
+                    self.marked_queue_idx.clear()
+                    self.priority_queue.clear()
+                    self.toast("Queue cleared")
+                    self._need_redraw = True
+                    self._redraw_status_only = False
+                continue
+
+            if ch in (ord("J"), ord("K")):
+                if not self.queue_items:
+                    continue
+                delta = +1 if ch == ord("J") else -1
+                idxs = sorted([i for i in self.marked_queue_idx if 0 <= i < len(self.queue_items)])
+                if not idxs:
+                    i = clamp(self.queue_cursor, 0, len(self.queue_items) - 1)
+                    j = i + delta
+                    if 0 <= j < len(self.queue_items):
+                        self.queue_items[i], self.queue_items[j] = self.queue_items[j], self.queue_items[i]
+                        pi, pj = self._priority_index_of(i), self._priority_index_of(j)
+                        if pi > 0:
+                            self.priority_queue[pi - 1] = j
+                        if pj > 0:
+                            self.priority_queue[pj - 1] = i
+                        self.queue_cursor = j
+                        if self.queue_play_idx == i:
+                            self.queue_play_idx = j
+                        elif self.queue_play_idx == j:
+                            self.queue_play_idx = i
+                    continue
+
+                s = set(idxs)
+                if delta < 0:
+                    for i in idxs:
+                        j = i - 1
+                        if j < 0 or j in s:
+                            continue
+                        self.queue_items[j], self.queue_items[i] = self.queue_items[i], self.queue_items[j]
+                        pi, pj = self._priority_index_of(i), self._priority_index_of(j)
+                        if pi > 0:
+                            self.priority_queue[pi - 1] = j
+                        if pj > 0:
+                            self.priority_queue[pj - 1] = i
+                        s.discard(i)
+                        s.add(j)
+                        if self.queue_play_idx == i:
+                            self.queue_play_idx = j
+                        elif self.queue_play_idx == j:
+                            self.queue_play_idx = i
+                else:
+                    for i in reversed(idxs):
+                        j = i + 1
+                        if j >= len(self.queue_items) or j in s:
+                            continue
+                        self.queue_items[j], self.queue_items[i] = self.queue_items[i], self.queue_items[j]
+                        pi, pj = self._priority_index_of(i), self._priority_index_of(j)
+                        if pi > 0:
+                            self.priority_queue[pi - 1] = j
+                        if pj > 0:
+                            self.priority_queue[pj - 1] = i
+                        s.discard(i)
+                        s.add(j)
+                        if self.queue_play_idx == i:
+                            self.queue_play_idx = j
+                        elif self.queue_play_idx == j:
+                            self.queue_play_idx = i
+                self.marked_queue_idx = s
+                m = sorted(s)
+                if m:
+                    self.queue_cursor = m[0] if delta < 0 else m[-1]
+                continue
+
+            if ch == ord("D"):
+                if not self._queue_context() and self.tab == TAB_ALBUM and self._selected_album_title_line():
+                    self.start_download_tracks(list(self.album_tracks))
+                    continue
+                if not self._queue_context() and self.tab == TAB_ARTIST:
+                    alb = self._selected_left_album()
+                    if alb:
+                        def worker_dl() -> None:
+                            try:
+                                aid = self._resolve_album_id_for_album(alb)
+                                if not aid:
+                                    self.toast("Album id?")
+                                    return
+                                self.start_download_tracks(self._fetch_album_tracks_by_album_id(aid))
+                            except Exception:
+                                self.toast("Error")
+                        threading.Thread(target=worker_dl, daemon=True).start()
+                        continue
+                if self.tab == TAB_PLAYLISTS and self.playlist_view_name is not None:
+                    self.start_download_tracks(list(self.playlist_view_tracks))
+                    continue
+                if self._queue_context():
+                    tracks = self._marked_tracks_from_queue() or ([self._queue_selected_track()] if self._queue_selected_track() else [])
+                else:
+                    tracks = self._marked_tracks_from_left() or ([self._selected_left_track()] if self._selected_left_track() else [])
+                self.start_download_tracks([t for t in tracks if t])
+                continue
+
+            # Navigation
+            if ch == curses.KEY_PPAGE:
+                self.nav_page(-1)
+                continue
+            if ch == curses.KEY_NPAGE:
+                self.nav_page(+1)
+                continue
+            if ch in (curses.KEY_HOME, ord("g")):
+                self.nav_home()
+                continue
+            if ch in (curses.KEY_END, ord("G")):
+                self.nav_end()
+                continue
+            if ch in (curses.KEY_DOWN, ord("j")):
+                if self._queue_context():
+                    self.queue_cursor = clamp(self.queue_cursor + 1, 0, max(0, len(self.queue_items) - 1))
+                else:
+                    _typ, items = self._left_items()
+                    new_idx = self.left_idx + 1
+                    while new_idx < len(items) and isinstance(items[new_idx], tuple) and items[new_idx][0] == "sep":
+                        new_idx += 1
+                    self.left_idx = clamp(new_idx, 0, max(0, len(items) - 1))
+                continue
+            if ch in (curses.KEY_UP, ord("k")):
+                if self._queue_context():
+                    self.queue_cursor = clamp(self.queue_cursor - 1, 0, max(0, len(self.queue_items) - 1))
+                else:
+                    _typ, items = self._left_items()
+                    new_idx = self.left_idx - 1
+                    while new_idx >= 0 and isinstance(items[new_idx], tuple) and items[new_idx][0] == "sep":
+                        new_idx -= 1
+                    self.left_idx = clamp(new_idx, 0, max(0, len(items) - 1))
+                continue
+
+            if ch in (10, 13):
+                if self.tab == TAB_PLAYLISTS and self.playlist_view_name is None:
+                    self.playlists_open_selected()
+                    continue
+                if self._queue_context():
+                    self.play_queue_index(self.queue_cursor)
+                    continue
+                if self.tab == TAB_ARTIST:
+                    alb = self._selected_left_album()
+                    if alb:
+                        self.open_album_from_album_obj(alb)
+                        continue
+                it = self._selected_left_track()
+                if it:
+                    self.play_track(it)
+                continue
+
+        # Cleanup
+        try:
+            save_queue(self.queue_items, self.queue_play_idx)
+        except Exception:
+            pass
+        try:
+            save_likes(self.likes)
+        except Exception:
+            pass
+        try:
+            save_playlists(self.playlists)
+        except Exception:
+            pass
+        try:
+            self.settings.update({
+                "volume": self.desired_volume, "mute": self.desired_mute,
+                "color_mode": self.color_mode, "queue_overlay": self.queue_overlay,
+                "show_toggles": self.show_toggles, "show_numbers": self.show_numbers,
+                "show_track_album": self.show_track_album, "show_track_year": self.show_track_year,
+                "show_track_duration": self.show_track_duration,
+                "quality": QUALITY_ORDER[self.quality_idx],
+                "auto_recommend": self.auto_recommend, "initial_tab": self.tab,
+                "initial_filter": self.filter_q,
+                "tab_align": self.tab_align,
+            })
+            save_settings(self.settings)
+        except Exception:
+            pass
+        self.meta.stop()
+        self.mp_poller.stop()
+        self.mp.stop()
+
+
+def parse_args(argv: List[str]) -> Dict[str, Any]:
+    out: Dict[str, Any] = {"api": DEFAULT_API}
+    i = 1
+    while i < len(argv):
+        a = argv[i]
+
+        if a == "--api" and i + 1 < len(argv):
+            out["api"] = argv[i + 1]; i += 2; continue
+
+        if a == "--quality" and i + 1 < len(argv):
+            q = argv[i + 1].upper()
+            if q in QUALITY_ORDER:
+                out["quality"] = q
+            else:
+                print(f"Unknown quality '{argv[i+1]}'. Options: {', '.join(QUALITY_ORDER)}", file=sys.stderr)
+                sys.exit(1)
+            i += 2; continue
+
+        if a == "--no-status":
+            out["show_toggles"] = False; i += 1; continue
+
+        if a == "--numbers":
+            out["show_numbers"] = True; i += 1; continue
+
+        if a == "--tab-align":
+            out["tab_align"] = True; i += 1; continue
+
+        if a in ("--verbose", "-v"):
+            out["verbose"] = True; i += 1; continue
+
+        if a in ("-h", "--help"):
+            print(
+                f"Usage: {argv[0]} [options]\n\n"
+                "Options:\n"
+                "  --api URL          API base URL\n"
+                f"                     (default: {DEFAULT_API})\n"
+                "  --quality LEVEL    Stream quality: HI_RES_LOSSLESS | LOSSLESS | HIGH | LOW\n"
+                "                     Overrides saved setting for this session.\n"
+                "  --no-status        Hide the status/toggles bar on startup\n"
+                "  --numbers          Show line numbers on startup\n"
+                "  --tab-align        Enable tab-aligned (TSV) field columns on startup\n"
+                "  --verbose / -v     Write debug log to debug.log in the config directory\n"
+                "\n"
+                "Tabs: 1 Queue  2 Search  3 Recommended  4 Artist  5 Album  6 Liked  7 Playlists\n"
+                "\n"
+                "Runtime keys: \\ toggle tab-align mode\n"
+                "\n"
+                "All other settings (color mode, queue overlay, etc.) persist between sessions\n"
+                "and can be toggled in-app.\n"
+                "\n"
+                "Color settings (settings.json):\n"
+                "  color_playing  color_paused  color_error  color_chrome  color_accent\n"
+                "  color_artist   color_title   color_album  color_year    color_separator\n"
+                "  color_duration color_numbers color_liked  color_mark\n"
+                "  Values: black red green yellow blue magenta cyan white (or 0-255)\n"
+            )
+            sys.exit(0)
+        i += 1
+    return out
+
+
+def main(argv: List[str]) -> int:
+    args = parse_args(argv)
+
+    if args.get("verbose"):
+        global _DEBUG_LOG
+        _DEBUG_LOG = os.path.join(STATE_DIR, "debug.log")
+        debug_log(f"=== mctui start {time.strftime('%Y-%m-%d %H:%M:%S')} ===")
+
+    def wrapped(stdscr: "curses._CursesWindow") -> None:
+        app = App(stdscr, args.get("api", DEFAULT_API), args)
+        if app.tab == TAB_QUEUE:
+            app.focus = "queue"
+        app.run()
+
+    curses.wrapper(wrapped)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))

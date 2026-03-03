@@ -3593,7 +3593,7 @@ class App:
                 buf_n = len(self._autoplay_buffer)
                 fetching = self._autoplay_prefetch_running
             if self.autoplay != AUTOPLAY_OFF and (buf_n > 0 or fetching):
-                parts.append(f"buf: {'…' if fetching else buf_n}")
+                parts.append(f"buffer: {'…' if fetching else buf_n}")
             line1 = " " + "   ".join(parts)
             self.stdscr.addstr(y, x, line1[:max(0, w - 1)].ljust(max(0, w - 1)), curses.A_DIM if self.color_mode else 0)
         else:
@@ -3652,13 +3652,13 @@ class App:
             " 1 Queue  2 Search  3 Recommended  4 Mix  5 Artist  6 Album  7 Liked  8 Playlists",
             "",
             "\x01 PLAYBACK                                 PLAYLISTS (8)",
-            " p         play/pause                     n     new",
-            " m         mute                           d     delete",
-            " -/+       volume                         Enter open",
-            " ←/→       seek 5s                        Bkspc back to playlists",
+            " p         play/pause                     n     new list",
+            " m         mute                           d     delete list",
+            " -/+       volume                         Enter open list",
+            " ←/→       seek 5s                        Bkspc back to lists",
             " Shift ←/→ seek 30s                       e/E   enqueue to end/after current",
             " ,/<       prev track                     a     add selected/marked to playlist",
-            " ./>       next track                     x     remove selected from playlist",
+            " ./>       next track                     X     remove selected from playlist",
             " t         resume playback from last know position",
             "",
             "\x01 ACTIONS",

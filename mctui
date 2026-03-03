@@ -66,7 +66,6 @@ LIKED_FILE     = os.path.join(STATE_DIR, "liked.json")
 PLAYLISTS_FILE = os.path.join(STATE_DIR, "playlists.json")
 HISTORY_FILE   = os.path.join(STATE_DIR, "history.json")
 SETTINGS_FILE  = os.path.join(STATE_DIR, "settings.json")
-HISTORY_MAX    = 500
 
 def _default_downloads_dir() -> str:
     import platform
@@ -449,7 +448,7 @@ def load_history() -> List[Any]:
 
 
 def save_history(tracks: List[Any]) -> None:
-    save_json(HISTORY_FILE, {"history_tracks": [track_to_mono(t) for t in tracks[:HISTORY_MAX]]})
+    save_json(HISTORY_FILE, {"history_tracks": [track_to_mono(t) for t in tracks]})
 
 
 def load_settings() -> Dict[str, Any]:
@@ -467,6 +466,7 @@ def load_settings() -> Dict[str, Any]:
     s.setdefault("quality", QUALITY_ORDER[0])
     s.setdefault("autoplay", AUTOPLAY_OFF)
     s.setdefault("autoplay_n", 3)
+    s.setdefault("history_max", 0)
     s.setdefault("show_numbers", False)
     s.setdefault("initial_tab", TAB_SEARCH)
     s.setdefault("initial_filter", "")
@@ -2113,8 +2113,9 @@ class App:
     def _record_history(self, t: Track) -> None:
         self.history_tracks = [h for h in self.history_tracks if h.id != t.id]
         self.history_tracks.insert(0, t)
-        if len(self.history_tracks) > HISTORY_MAX:
-            self.history_tracks = self.history_tracks[:HISTORY_MAX]
+        limit = int(self.settings.get("history_max", 0) or 0)
+        if limit > 0:
+            self.history_tracks = self.history_tracks[:limit]
         save_history(self.history_tracks)
 
     def _schedule_liked_refresh(self) -> None:
@@ -3719,7 +3720,8 @@ class App:
             "",
             "\x01 SETTINGS (settings.json)",
             " Autoplay:",
-            " autoplay_n: tracks to add per autoplay refill (default 3)",
+            " autoplay_n:  tracks to add per autoplay refill (default 3)",
+            " history_max: max history entries to keep (default 0 = unlimited)",
             "",
             " Download file hierarchy:",
             " download_dir (Linux default /tmp/mctui/)",

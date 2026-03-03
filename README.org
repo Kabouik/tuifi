@@ -60,7 +60,7 @@ Upon first execution, =mctui= wil generate these files in its directory; they ca
 
 * Development note
 
-This app was developed with AI assistance (Claude). I take no particular pride in the code — it was a weekend project and I wanted something usable quickly rather than something to be proud of architecturally.
+This program was developed with significant AI assistance. I take no particular pride in that, or the resulting code, but it was a week-end project and I wanted something usable quickly rather than something to be proud of architecturally.
 
 * Disclaimer
 

@@ -54,9 +54,13 @@ Settings are stored in =settings.json=, resolved from:
 2. =~/.config/mctui=
 3. =~/.local/state/monochrome-tui=
 
-Other state files: =queue.json=, =likes.json=, =playlists.json=.
+Other state files: =queue.json=, =liked.json=, =playlists.json=, =history.json=.
 
 Upon first execution, =mctui= wil generate these files in its directory; they can be moved to =~/.config/mctui/=.
+
+* Development note
+
+This app was developed with AI assistance (Claude). I take no particular pride in the code — it was a weekend project and I wanted something usable quickly rather than something to be proud of architecturally.
 
 * Disclaimer
 

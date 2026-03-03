@@ -19,12 +19,13 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+import uuid
 from dataclasses import dataclass, field
 from queue import Queue, Empty
 from typing import Any, Dict, List, Optional, Tuple
 
 APP_NAME = "monochrome-tui"
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 DEFAULT_API = "https://api.monochrome.tf" # See https://github.com/monochrome-music/monochrome/blob/main/INSTANCES.md#official--community-apis
 
 def print_version(prog: str) -> None:
@@ -60,10 +61,12 @@ def _resolve_config_dir() -> str:
     return xdg_cfg
 
 STATE_DIR = _resolve_config_dir()
-QUEUE_FILE = os.path.join(STATE_DIR, "queue.json")
-LIKES_FILE = os.path.join(STATE_DIR, "likes.json")
+QUEUE_FILE     = os.path.join(STATE_DIR, "queue.json")
+LIKED_FILE     = os.path.join(STATE_DIR, "liked.json")
 PLAYLISTS_FILE = os.path.join(STATE_DIR, "playlists.json")
-SETTINGS_FILE = os.path.join(STATE_DIR, "settings.json")
+HISTORY_FILE   = os.path.join(STATE_DIR, "history.json")
+SETTINGS_FILE  = os.path.join(STATE_DIR, "settings.json")
+HISTORY_MAX    = 500
 
 def _default_downloads_dir() -> str:
     import platform
@@ -74,14 +77,15 @@ def _default_downloads_dir() -> str:
 DOWNLOADS_DIR = _default_downloads_dir()
 QUALITY_ORDER = ["HI_RES_LOSSLESS", "LOSSLESS", "HIGH", "LOW"]
 
-TAB_QUEUE      = 1
-TAB_SEARCH     = 2
+TAB_QUEUE       = 1
+TAB_SEARCH      = 2
 TAB_RECOMMENDED = 3
-TAB_MIX        = 4
-TAB_ARTIST     = 5
-TAB_ALBUM      = 6
-TAB_LIKED      = 7
-TAB_PLAYLISTS  = 8
+TAB_MIX         = 4
+TAB_ARTIST      = 5
+TAB_ALBUM       = 6
+TAB_LIKED       = 7
+TAB_PLAYLISTS   = 8
+TAB_HISTORY     = 9
 
 TAB_NAMES = {
     TAB_QUEUE:       "1 Queue",
@@ -92,6 +96,7 @@ TAB_NAMES = {
     TAB_ALBUM:       "6 Album",
     TAB_LIKED:       "7 Liked",
     TAB_PLAYLISTS:   "8 Playlists",
+    TAB_HISTORY:     "9 History",
 }
 
 # Autoplay modes
@@ -237,6 +242,55 @@ class Track:
         )
 
 
+def track_to_mono(t: "Track", added_at: Optional[int] = None) -> Dict[str, Any]:
+    year = t.year if t.year and t.year != "????" else ""
+    release_date = f"{year}-01-01T00:00:00.000+0000" if year else None
+    return {
+        "id": t.id,
+        "addedAt": added_at,
+        "title": t.title,
+        "duration": t.duration,
+        "explicit": False,
+        "artist": {"id": t.artist_id, "name": t.artist, "handle": None, "type": "MAIN", "picture": None},
+        "artists": [{"id": t.artist_id, "name": t.artist}],
+        "album": {"id": t.album_id, "title": t.album, "cover": None, "releaseDate": release_date,
+                  "vibrantColor": "#FFFFFF", "artist": None, "numberOfTracks": None, "mediaMetadata": None},
+        "copyright": None, "isrc": None, "trackNumber": t.track_no,
+        "streamStartDate": release_date, "version": None, "mixes": {},
+        "isTracker": False, "trackerInfo": None, "audioUrl": None, "remoteUrl": None,
+        "audioQuality": "LOSSLESS", "mediaMetadata": {"tags": ["LOSSLESS"]},
+    }
+
+
+def mono_to_track(d: Dict[str, Any]) -> Optional["Track"]:
+    if not isinstance(d, dict):
+        return None
+    try:
+        tid = int(d.get("id", 0))
+        if tid <= 0:
+            return None
+        artist_d = d.get("artist") or {}
+        album_d  = d.get("album")  or {}
+        artist_name = str(artist_d.get("name", "") or "") if isinstance(artist_d, dict) else str(artist_d)
+        artist_id   = artist_d.get("id") if isinstance(artist_d, dict) else None
+        album_title = str(album_d.get("title", "") or "") if isinstance(album_d, dict) else str(album_d)
+        album_id    = album_d.get("id") if isinstance(album_d, dict) else None
+        rd = (album_d.get("releaseDate") or "") if isinstance(album_d, dict) else ""
+        year = rd[:4] if rd and len(rd) >= 4 else "????"
+        def _int(x: Any) -> Optional[int]:
+            try: return int(x) if x is not None else None
+            except Exception: return None
+        return Track(
+            id=tid, title=str(d.get("title", "") or ""),
+            artist=artist_name, album=album_title, year=year,
+            track_no=int(d.get("trackNumber", 0) or 0),
+            duration=_int(d.get("duration")),
+            artist_id=_int(artist_id), album_id=_int(album_id),
+        )
+    except Exception:
+        return None
+
+
 @dataclass
 class Album:
     id: int
@@ -318,33 +372,84 @@ def save_queue(items: List[Track], play_idx: int) -> None:
     save_json(QUEUE_FILE, {"version": 2, "idx": play_idx, "items": [t.to_dict() for t in items]})
 
 
-def load_likes() -> Dict[str, List[int]]:
-    data = load_json(LIKES_FILE, {"tracks": [], "artists": [], "albums": []})
-    out = {"tracks": [], "artists": [], "albums": []}
-    if isinstance(data, dict):
-        for k in out:
-            v = data.get(k)
-            if isinstance(v, list):
-                out[k] = [int(x) for x in v if str(x).isdigit()]
-    return out
+def load_liked() -> Tuple[List[Dict[str, Any]], set]:
+    """Load liked.json. Returns (list of mono dicts, set of liked IDs).
+    Migrates from old likes.json if liked.json doesn't exist yet."""
+    data = load_json(LIKED_FILE, None)
+    if data is None:
+        # Migrate from old likes.json if present
+        old = load_json(os.path.join(STATE_DIR, "likes.json"), None)
+        if isinstance(old, dict):
+            old_ids = [int(x) for x in old.get("tracks", []) if str(x).isdigit()]
+            queue_items, _ = load_queue()
+            by_id = {t.id: t for t in queue_items}
+            now_ms = int(time.time() * 1000)
+            tracks = [track_to_mono(by_id[tid], now_ms) for tid in old_ids if tid in by_id]
+            save_json(LIKED_FILE, {"favorites_tracks": tracks})
+            return tracks, {t["id"] for t in tracks}
+        return [], set()
+    tracks = [d for d in data.get("favorites_tracks", []) if isinstance(d, dict) and d.get("id")]
+    return tracks, {int(d["id"]) for d in tracks}
 
 
-def save_likes(likes: Dict[str, List[int]]) -> None:
-    save_json(LIKES_FILE, likes)
+def save_liked(tracks: List[Dict[str, Any]]) -> None:
+    save_json(LIKED_FILE, {"favorites_tracks": tracks})
 
 
-def load_playlists() -> Dict[str, List[int]]:
-    data = load_json(PLAYLISTS_FILE, {})
-    out: Dict[str, List[int]] = {}
-    if isinstance(data, dict):
-        for k, v in data.items():
-            if isinstance(k, str) and isinstance(v, list):
-                out[k] = [int(x) for x in v if str(x).isdigit()]
-    return out
+def load_playlists() -> Tuple[Dict[str, List[Any]], Dict[str, Dict[str, Any]]]:
+    """Load playlists.json. Returns (name→List[Track], name→metadata dict)."""
+    data = load_json(PLAYLISTS_FILE, None)
+    playlists: Dict[str, List[Any]] = {}
+    meta: Dict[str, Dict[str, Any]] = {}
+    if data is None:
+        # Migrate from old format {name: [ids]}
+        old = load_json(PLAYLISTS_FILE, {})
+        if isinstance(old, dict) and old:
+            # Old format had int IDs as values — detect by checking first value
+            first = next(iter(old.values()), None)
+            if isinstance(first, list) and (not first or isinstance(first[0], int)):
+                # Can't resolve IDs without API; start fresh
+                return {}, {}
+        return {}, {}
+    now_ms = int(time.time() * 1000)
+    for pl in data.get("user_playlists", []):
+        if not isinstance(pl, dict):
+            continue
+        name = str(pl.get("name", "") or "")
+        if not name:
+            continue
+        tracks = [t for t in (mono_to_track(d) for d in pl.get("tracks", [])) if t is not None]
+        playlists[name] = tracks
+        meta[name] = {
+            "id": str(pl.get("id") or uuid.uuid4()),
+            "createdAt": int(pl.get("createdAt") or now_ms),
+        }
+    return playlists, meta
 
 
-def save_playlists(pl: Dict[str, List[int]]) -> None:
-    save_json(PLAYLISTS_FILE, pl)
+def save_playlists(playlists: Dict[str, List[Any]], meta: Dict[str, Dict[str, Any]]) -> None:
+    now_ms = int(time.time() * 1000)
+    user_playlists = []
+    for name, tracks in playlists.items():
+        m = meta.get(name, {})
+        user_playlists.append({
+            "id": m.get("id") or str(uuid.uuid4()),
+            "name": name,
+            "tracks": [track_to_mono(t) for t in tracks],
+            "numberOfTracks": len(tracks),
+            "createdAt": m.get("createdAt") or now_ms,
+            "updatedAt": now_ms,
+        })
+    save_json(PLAYLISTS_FILE, {"user_playlists": user_playlists})
+
+
+def load_history() -> List[Any]:
+    data = load_json(HISTORY_FILE, {})
+    return [t for t in (mono_to_track(d) for d in data.get("history_tracks", [])) if t is not None]
+
+
+def save_history(tracks: List[Any]) -> None:
+    save_json(HISTORY_FILE, {"history_tracks": [track_to_mono(t) for t in tracks[:HISTORY_MAX]]})
 
 
 def load_settings() -> Dict[str, Any]:
@@ -763,14 +868,15 @@ class App:
         # Track id that triggered the most recent prefetch (avoid double-fetching)
         self._autoplay_last_seed_id: Optional[int] = None
 
-        self.likes = load_likes()
-        self.playlists = load_playlists()
         self.queue_items, self.queue_play_idx = load_queue()
+        self.liked_tracks, self.liked_ids = load_liked()
+        self.playlists, self.playlists_meta = load_playlists()
+        self.history_tracks = load_history()
         self.queue_cursor = 0
         self.focus = "left"
 
         self.tab = int(pick("initial_tab") or TAB_QUEUE)
-        self.tab = clamp(self.tab, TAB_QUEUE, TAB_PLAYLISTS)
+        self.tab = clamp(self.tab, TAB_QUEUE, TAB_HISTORY)
 
         self.search_q = ""
         self.search_results: List[Track] = []
@@ -1219,7 +1325,7 @@ class App:
             self._redraw_status_only = False
 
     def is_liked(self, tid: int) -> bool:
-        return tid in self.likes.get("tracks", [])
+        return tid in self.liked_ids
 
     def web_base(self) -> str:
         u = urllib.parse.urlparse(self.api_base)
@@ -1498,6 +1604,8 @@ class App:
             if self.playlist_view_name is None:
                 return ("playlists", self.playlist_names)
             return ("tracks", self.playlist_view_tracks)
+        if self.tab == TAB_HISTORY:
+            return ("tracks", self.history_tracks)
         return ("none", [])
 
     def _selected_left_item(self) -> Optional[Any]:
@@ -1868,6 +1976,7 @@ class App:
             self.last_error = None
             self._need_redraw = True
             self._redraw_status_only = False
+            self._record_history(t)
             # Trigger autoplay logic whenever a new track starts
             self._autoplay_maybe_enqueue()
         except Exception as e:
@@ -2001,20 +2110,28 @@ class App:
     # ---------------------------------------------------------------------------
     # likes
     # ---------------------------------------------------------------------------
+    def _record_history(self, t: Track) -> None:
+        self.history_tracks = [h for h in self.history_tracks if h.id != t.id]
+        self.history_tracks.insert(0, t)
+        if len(self.history_tracks) > HISTORY_MAX:
+            self.history_tracks = self.history_tracks[:HISTORY_MAX]
+        save_history(self.history_tracks)
+
     def _schedule_liked_refresh(self) -> None:
         self._liked_refresh_due = time.time() + 1.0
 
-    def toggle_like_track_id(self, tid: int, silent: bool = False) -> None:
-        lst = self.likes.setdefault("tracks", [])
-        if tid in lst:
-            lst[:] = [x for x in lst if x != tid]
+    def toggle_like(self, t: Track, silent: bool = False) -> None:
+        if t.id in self.liked_ids:
+            self.liked_ids.discard(t.id)
+            self.liked_tracks = [d for d in self.liked_tracks if d.get("id") != t.id]
             if not silent:
                 self.toast("Unliked")
         else:
-            lst.append(tid)
+            self.liked_ids.add(t.id)
+            self.liked_tracks.insert(0, track_to_mono(t, int(time.time() * 1000)))
             if not silent:
                 self.toast("Liked")
-        save_likes(self.likes)
+        save_liked(self.liked_tracks)
         self._schedule_liked_refresh()
 
     def like_selected(self) -> None:
@@ -2022,7 +2139,7 @@ class App:
             marked = self._marked_tracks_from_queue()
             if marked:
                 for t in marked:
-                    self.toggle_like_track_id(t.id, silent=True)
+                    self.toggle_like(t, silent=True)
                 self.toast(f"Liked/unliked {len(marked)}")
                 return
             t = self._queue_selected_track()
@@ -2030,16 +2147,16 @@ class App:
             marked = self._marked_tracks_from_left()
             if marked:
                 for t in marked:
-                    self.toggle_like_track_id(t.id, silent=True)
+                    self.toggle_like(t, silent=True)
                 self.toast(f"Liked/unliked {len(marked)}")
                 return
             t = self._selected_left_track()
         if t:
-            self.toggle_like_track_id(t.id)
+            self.toggle_like(t)
 
     def like_playing(self) -> None:
         if self.current_track:
-            self.toggle_like_track_id(self.current_track.id)
+            self.toggle_like(self.current_track)
 
     # ---------------------------------------------------------------------------
     # marking
@@ -2458,60 +2575,9 @@ class App:
         threading.Thread(target=worker, daemon=True).start()
 
     def fetch_liked_async(self) -> None:
-        self.liked_cache = []
-        ids = self.likes.get("tracks", [])[:260]
-        key = f"liked:{time.time()}"
-        self._set_loading(key)
-
-        def worker() -> None:
-            try:
-                if not ids:
-                    self.liked_cache = []
-                    self.toast("Liked")
-                    return
-                out_lock = threading.Lock()
-                out: List[Track] = []
-                q: Queue = Queue()
-                for tid in ids:
-                    q.put(tid)
-
-                def wkr() -> None:
-                    while True:
-                        if self._loading_key != key:
-                            return
-                        try:
-                            tid = q.get_nowait()
-                        except Exception:
-                            return
-                        try:
-                            info = self.client.info(tid)
-                            data = info.get("data") if isinstance(info, dict) else None
-                            if isinstance(data, dict):
-                                t = self._parse_track_obj(data)
-                                if t:
-                                    with out_lock:
-                                        out.append(t)
-                        except Exception:
-                            pass
-                        finally:
-                            q.task_done()
-
-                for _ in range(8):
-                    threading.Thread(target=wkr, daemon=True).start()
-                q.join()
-                if self._loading_key != key:
-                    return
-                out.sort(key=lambda t: ids.index(t.id) if t.id in ids else 10_000)
-                self.liked_cache = out
-                self.toast("Liked")
-            except Exception as e:
-                if self._loading_key == key:
-                    self.last_error = str(e)
-                    self.toast("Error")
-            finally:
-                self._clear_loading(key)
-
-        threading.Thread(target=worker, daemon=True).start()
+        self.liked_cache = [t for t in (mono_to_track(d) for d in self.liked_tracks) if t is not None]
+        self._need_redraw = True
+        self._redraw_status_only = False
 
     def fetch_artist_async(self, ctx: Optional[Track]) -> None:
         if not ctx:
@@ -2949,8 +3015,10 @@ class App:
         if name in self.playlists:
             self.toast("Exists")
             return
+        now_ms = int(time.time() * 1000)
         self.playlists[name] = []
-        save_playlists(self.playlists)
+        self.playlists_meta[name] = {"id": str(uuid.uuid4()), "createdAt": now_ms}
+        save_playlists(self.playlists, self.playlists_meta)
         self.playlist_names = sorted(self.playlists.keys())
         self.toast("Created")
         self._need_redraw = True
@@ -2968,7 +3036,8 @@ class App:
         if not self.prompt_yes_no(f"Delete '{name}'? (y/n)"):
             return
         self.playlists.pop(name, None)
-        save_playlists(self.playlists)
+        self.playlists_meta.pop(name, None)
+        save_playlists(self.playlists, self.playlists_meta)
         self.playlist_view_name = None
         self.playlist_view_tracks = []
         self.playlist_names = sorted(self.playlists.keys())
@@ -2989,118 +3058,38 @@ class App:
         self.fetch_playlist_tracks_async(name)
 
     def fetch_playlist_tracks_async(self, name: str) -> None:
-        ids = self.playlists.get(name, [])[:1500]
-        key = f"pl:{name}:{time.time()}"
-        self._set_loading(key)
-
-        def worker() -> None:
-            try:
-                out_lock = threading.Lock()
-                out: List[Track] = []
-                q: Queue = Queue()
-                for tid in ids:
-                    q.put(tid)
-
-                def wkr() -> None:
-                    while True:
-                        if self._loading_key != key:
-                            return
-                        try:
-                            tid = q.get_nowait()
-                        except Exception:
-                            return
-                        try:
-                            info = self.client.info(tid)
-                            data = info.get("data") if isinstance(info, dict) else None
-                            if isinstance(data, dict):
-                                t = self._parse_track_obj(data)
-                                if t:
-                                    with out_lock:
-                                        out.append(t)
-                        except Exception:
-                            pass
-                        finally:
-                            q.task_done()
-
-                for _ in range(8):
-                    threading.Thread(target=wkr, daemon=True).start()
-                q.join()
-                if self._loading_key != key:
-                    return
-                out.sort(key=lambda t: ids.index(t.id) if t.id in ids else 10_000)
-                self.playlist_view_tracks = out
-                self.toast("Playlist")
-            except Exception as e:
-                if self._loading_key == key:
-                    self.last_error = str(e)
-                    self.toast("Error")
-            finally:
-                self._clear_loading(key)
-
-        threading.Thread(target=worker, daemon=True).start()
+        self.playlist_view_tracks = list(self.playlists.get(name, []))
+        self._need_redraw = True
+        self._redraw_status_only = False
 
     def _enqueue_playlist_async(self, name: str, insert_after_playing: bool) -> None:
-        self.toast(f"Loading {name}…")
-        ids = self.playlists.get(name, [])[:1500]
+        tracks = self.playlists.get(name, [])
+        if tracks:
+            self._enqueue_tracks(list(tracks), insert_after_playing)
+        else:
+            self.toast("Empty playlist")
 
-        def worker() -> None:
-            try:
-                out_lock = threading.Lock()
-                out: List[Track] = []
-                q: Queue = Queue()
-                for tid in ids:
-                    q.put(tid)
-
-                def wkr() -> None:
-                    while True:
-                        try:
-                            tid = q.get_nowait()
-                        except Exception:
-                            return
-                        try:
-                            info = self.client.info(tid)
-                            data = info.get("data") if isinstance(info, dict) else None
-                            if isinstance(data, dict):
-                                t = self._parse_track_obj(data)
-                                if t:
-                                    with out_lock:
-                                        out.append(t)
-                        except Exception:
-                            pass
-                        finally:
-                            q.task_done()
-
-                for _ in range(8):
-                    threading.Thread(target=wkr, daemon=True).start()
-                q.join()
-                out.sort(key=lambda t: ids.index(t.id) if t.id in ids else 10_000)
-                self._enqueue_tracks(out, insert_after_playing)
-            except Exception as e:
-                self.toast(f"Error: {e}")
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def playlists_add_tracks(self, tids: List[int]) -> None:
-        if not tids:
+    def playlists_add_tracks(self, tracks: List[Track]) -> None:
+        if not tracks:
             self.toast("No tracks")
             return
         name = self.pick_playlist("Add to playlist")
         if not name:
             return
-        self.playlists.setdefault(name, []).extend([int(x) for x in tids if int(x) > 0])
-        save_playlists(self.playlists)
-        self.toast(f"Added {len(tids)}")
+        self.playlists.setdefault(name, []).extend(tracks)
+        save_playlists(self.playlists, self.playlists_meta)
+        self.toast(f"Added {len(tracks)}")
         self._need_redraw = True
         self._redraw_status_only = False
         if self.tab == TAB_PLAYLISTS and self.playlist_view_name == name:
-            self.fetch_playlist_tracks_async(name)
+            self.playlist_view_tracks = list(self.playlists[name])
 
     def playlists_add_from_context(self) -> None:
         if self._queue_context():
             tracks = self._marked_tracks_from_queue() or ([self._queue_selected_track()] if self._queue_selected_track() else [])
         else:
             tracks = self._marked_tracks_from_left() or ([self._selected_left_track()] if self._selected_left_track() else [])
-        self.playlists_add_tracks([t.id for t in tracks if t])
+        self.playlists_add_tracks([t for t in tracks if t])
 
     # ---------------------------------------------------------------------------
     # drawing
@@ -3117,7 +3106,7 @@ class App:
         return curses.color_pair(4)
 
     def _draw_tabs(self, y: int, x: int, w: int) -> None:
-        order = (1, 2, 3, 4, 5, 6, 7, 8)
+        order = (1, 2, 3, 4, 5, 6, 7, 8, 9)
         s = "  ".join([TAB_NAMES[i] for i in order])[:max(0, w - 1)]
         self.stdscr.addstr(y, x, s, self.C(4))
         cur = TAB_NAMES.get(self.tab, "")
@@ -3415,6 +3404,9 @@ class App:
         if typ == "tracks" and n == 0 and self.tab == TAB_LIKED:
             self.stdscr.addstr(y, x, " Press l/L on tracks in any tab to like them"[:max(0, w - 1)].ljust(max(0, w - 1)), self.C(10))
             return
+        if typ == "tracks" and n == 0 and self.tab == TAB_HISTORY:
+            self.stdscr.addstr(y, x, " Play tracks to build history"[:max(0, w - 1)].ljust(max(0, w - 1)), self.C(10))
+            return
         if  n == 0 and self.tab == TAB_PLAYLISTS:
             self.stdscr.addstr(y, x, " Press n to create a new playlist"[:max(0, w - 1)].ljust(max(0, w - 1)), self.C(10))
             return
@@ -3663,7 +3655,7 @@ class App:
         lines = [
             "",
             "\x01 TABS",
-            " 1 Queue  2 Search  3 Recommended  4 Mix  5 Artist  6 Album  7 Liked  8 Playlists",
+            " 1 Queue  2 Search  3 Recommended  4 Mix  5 Artist  6 Album  7 Liked  8 Playlists  9 History",
             "",
             "\x01 PLAYBACK                                 PLAYLISTS (8)",
             " p         play/pause                     n     new list",
@@ -3894,6 +3886,8 @@ class App:
             self.playlist_names = sorted(self.playlists.keys())
             self.playlist_view_name = None
             self.playlist_view_tracks = []
+        elif t == TAB_HISTORY:
+            pass  # history_tracks always up to date
 
         self._need_redraw = True
         self._redraw_status_only = False
@@ -4118,9 +4112,9 @@ class App:
                 self.focus = "queue" if self.focus == "left" else "left"
                 continue
 
-            # Tab switching: 1-8
+            # Tab switching: 1-9
             if ch in (ord("1"), ord("2"), ord("3"), ord("4"),
-                      ord("5"), ord("6"), ord("7"), ord("8")):
+                      ord("5"), ord("6"), ord("7"), ord("8"), ord("9")):
                 mapping = {
                     ord("1"): TAB_QUEUE,
                     ord("2"): TAB_SEARCH,
@@ -4130,6 +4124,7 @@ class App:
                     ord("6"): TAB_ALBUM,
                     ord("7"): TAB_LIKED,
                     ord("8"): TAB_PLAYLISTS,
+                    ord("9"): TAB_HISTORY,
                 }
                 t_num = mapping[ch]
                 if t_num == TAB_MIX:
@@ -4315,14 +4310,10 @@ class App:
                             tid = tracks[idx].id
                             self.playlist_view_tracks = [t for j, t in enumerate(tracks) if j != idx]
                             tracks = self.playlist_view_tracks
-                            ids = self.playlists.get(pname, [])
-                            try:
-                                ids.remove(tid)
-                            except ValueError:
-                                pass
+                            self.playlists[pname] = [t for t in self.playlists.get(pname, []) if t.id != tid]
                     self.marked_left_idx.clear()
                     self.left_idx = clamp(self.left_idx, 0, max(0, len(self.playlist_view_tracks) - 1))
-                    save_playlists(self.playlists)
+                    save_playlists(self.playlists, self.playlists_meta)
                     self.toast("Removed from playlist")
                     self._need_redraw = True
                     self._redraw_status_only = False
@@ -4511,11 +4502,11 @@ class App:
         except Exception:
             pass
         try:
-            save_likes(self.likes)
+            save_liked(self.liked_tracks)
         except Exception:
             pass
         try:
-            save_playlists(self.playlists)
+            save_playlists(self.playlists, self.playlists_meta)
         except Exception:
             pass
         try:

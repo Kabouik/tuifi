@@ -44,21 +44,24 @@ Press ? in tuifi for keybindings
 
 * Configuration
 
-Settings are stored in =settings.json= and automatically updated upon using toggles within the TUI. Settings are resolved from:
+Settings are stored in =settings.json= and automatically updated upon using toggles within the TUI. On first run, =tuifi= will prompt before creating the config directory.
 
-1. Script directory (if writable)
-2. =~/.config/tuifi=
-3. =~/.local/share/tuifi=
+Config directory per platform:
 
-Other state files:
+| Platform | Path                                            |
+|----------+-------------------------------------------------|
+| Linux    | =~/.config/tuifi= (or =$XDG_CONFIG_HOME/tuifi=) |
+| Termux   | =/data/data/com.termux/files/home/.config/tuifi= |
+| macOS    | =~/Library/Application Support/tuifi=           |
+| Windows  | =%APPDATA%\tuifi=                               |
+
+Other state files stored in the same directory:
 - =queue.json= keeps your current play queue among program executions,
 - =liked.json= stores liked tracks,
 - =playlists.json= stores playlists,
 - =history.json= keeps the playback history.
 
 =liked.json= and =playlists.json= are fully compatible with Monochrome instances (e.g., https://monochrome.tf) and can be imported there.
-
-Upon first execution, =tuifi= will generate these files in its directory; it is advised to move them to =~/.config/tuifi/= to conform to XDG standards.
 
 * Development note
 

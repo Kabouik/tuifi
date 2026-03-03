@@ -44,23 +44,15 @@ def debug_log(msg: str) -> None:
 
 def _resolve_config_dir() -> str:
     import platform
-    if platform.system() == "Windows":
-        app_data = os.environ.get("APPDATA") or os.path.join(os.path.expanduser("~"), "AppData", "Roaming")
-        return os.path.join(app_data, "tuifi")
-
-    xdg_cfg = os.path.join(
-        os.environ.get("XDG_CONFIG_HOME", os.path.join(os.path.expanduser("~"), ".config")),
-        "tuifi",
-    )
-    if os.path.isdir(xdg_cfg):
-        return xdg_cfg
-
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    if os.access(script_dir, os.W_OK):
-        return script_dir
-
+    system = platform.system()
+    if system == "Windows":
+        base = os.environ.get("APPDATA") or os.path.join(os.path.expanduser("~"), "AppData", "Roaming")
+        return os.path.join(base, "tuifi")
+    if system == "Darwin":
+        return os.path.join(os.path.expanduser("~"), "Library", "Application Support", "tuifi")
+    # Linux, Android/Termux, and other Unix-likes
     return os.path.join(
-        os.environ.get("XDG_DATA_HOME", os.path.join(os.path.expanduser("~"), ".local", "share")),
+        os.environ.get("XDG_CONFIG_HOME", os.path.join(os.path.expanduser("~"), ".config")),
         "tuifi",
     )
 
@@ -4582,6 +4574,15 @@ def parse_args(argv: List[str]) -> Dict[str, Any]:
 
 def main(argv: List[str]) -> int:
     args = parse_args(argv)
+
+    if not os.path.isdir(STATE_DIR):
+        print(f"tuifi config directory does not exist and will be created at:\n  {STATE_DIR}")
+        try:
+            input("Press Return to continue, or Ctrl-C to abort.")
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return 1
+        mkdirp(STATE_DIR)
 
     if args.get("verbose"):
         global _DEBUG_LOG

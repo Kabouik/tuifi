@@ -67,7 +67,7 @@ SETTINGS_FILE = os.path.join(STATE_DIR, "settings.json")
 
 def _default_downloads_dir() -> str:
     import platform
-    if platform.system() == "Windows":
+    if platform.system() == "Windows" or os.path.exists("/data/data/com.termux"):
         return os.path.join(os.path.expanduser("~"), "Downloads", "mctui")
     return "/tmp/mctui"
 

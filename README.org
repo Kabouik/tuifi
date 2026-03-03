@@ -70,6 +70,6 @@ This project is to be used at the user's own risk, based on their government and
 
 Hence, any copyright infringements or DMCA claims in this project's regards are to be forwarded to the associated content provider or API by the associated notifier of any such claims. This script does not infringe copyright, just like a web browser or a search engine, users are responsible with how they use the tool, and thus is not a valid reason to send a DMCA notice to Codeberg or the maintainers of this repository. If any source accessed using the script infringes on your rights as a copyright holder, they may be removed by contacting the web host service that published them online and is actually hosting them (not Codeberg, nor the maintainers of this repository).
 
-* License
+mm* License
 
 [[https://www.gnu.org/licenses/agpl-3.0.html][GNU Affero General Public License v3.0]]

@@ -3721,6 +3721,8 @@ class App:
             "\x01 SETTINGS (settings.json)",
             " Autoplay:",
             " autoplay_n:  tracks to add per autoplay refill (default 3)",
+            "",
+            " History tab:",
             " history_max: max history entries to keep (default 0 = unlimited)",
             "",
             " Download file hierarchy:",

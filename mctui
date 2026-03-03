@@ -2908,6 +2908,15 @@ class App:
         if self.filter_hits:
             self.filter_pos = 0
 
+    def _set_filter_cursor(self, idx: int) -> None:
+        if self.tab == TAB_QUEUE:
+            self.queue_cursor = idx
+        else:
+            self.left_idx = idx
+
+    def _get_filter_cursor(self) -> int:
+        return self.queue_cursor if self.tab == TAB_QUEUE else self.left_idx
+
     def filter_prompt(self) -> None:
         q = self.prompt_text("Filter:", self.filter_q)
         if q is None:
@@ -2917,17 +2926,17 @@ class App:
         if not self.filter_hits:
             self.toast("No match")
             return
-        cur = self.left_idx
+        cur = self._get_filter_cursor()
         j = next((k for k, idx in enumerate(self.filter_hits) if idx >= cur), 0)
         self.filter_pos = j
-        self.left_idx = self.filter_hits[self.filter_pos]
+        self._set_filter_cursor(self.filter_hits[self.filter_pos])
         self.toast(f"{self.filter_pos+1}/{len(self.filter_hits)}")
 
     def filter_next(self, delta: int) -> None:
         if not self.filter_hits:
             return
         self.filter_pos = (self.filter_pos + delta) % len(self.filter_hits)
-        self.left_idx = self.filter_hits[self.filter_pos]
+        self._set_filter_cursor(self.filter_hits[self.filter_pos])
         self.toast(f"{self.filter_pos+1}/{len(self.filter_hits)}")
 
     # ---------------------------------------------------------------------------

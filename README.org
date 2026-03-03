@@ -1,17 +1,17 @@
-#+title: mctui
+#+title: tuifi
 #+description: Terminal music player for Monochrome Hi-Fi
 
-A TUI music player for the [[https://monochrome.tf][Monochrome Hi-Fi]] streaming service. Browse, search, stream, download and manage lossless music from your terminal.
+A feature-rich TUI music player built on top of [[https://github.com/binimum/hifi-api][TIDAL HiFi API]]: browse, search, stream, download, organize and manage lossless music from your comfy terminal. While you may be able to access HiFi API instances right away, music piracy is illegal in most countries and is bad for the karma, and this project is intended for users who have a paid subscription but still favor a keyboard-driven terminal workflow.
 
 #+BEGIN_EXPORT html
-<a href="https://codeberg.org/kabouik/mctui/raw/branch/main/demo/mctui-demo.mp4">
+<a href="https://codeberg.org/kabouik/tuifi/raw/branch/main/demo/tuifi-demo.mp4">
   <img src="demo/screenshot.png" alt="Click to play the demo" />
 </a>
 #+END_EXPORT
 
 * Features
 
-- Playback control (play, pause, seek, volume, repeat, shuffle)
+- Playback control (play, pause, resume, seek, volume, repeat, shuffle)
 - Queue management with reordering and priority flags
 - Search, browse artists/albums, recommendations, mix
 - Autoplay mix or recommendations (infinite queue)
@@ -19,26 +19,22 @@ A TUI music player for the [[https://monochrome.tf][Monochrome Hi-Fi]] streaming
 - Like tracks
 - Lyrics display
 - Download individual tracks, multiple tracks (e.g., marked, or from a playlist), or full albums
-- Customizable (colors, optional TSV mode, show/hide fields, download file hierarchy)
-- Keyboard-oriented navigation
-- Monochrome.tf requires using Firebase for authentication, so `mctui` runs accountless, but exports playlists and queues to json files
+- Playback history
+- Customizable (colors, optional TSV mode, show/hide fields, file hierarchy for downloads, autoplay buffer)
+- Keyboard-oriented control
+- Accountless but playlists and liked songs are kept in standard json files that some web players can import
 
 * Usage
 
 #+begin_src sh
-Usage: ./mctui [options]
+Usage: ./tuifi [options]
 
 Options:
-  --api URL,       -a URL      API base URL
-                               (default: https://api.monochrome.tf)
-  --quality LEVEL, -q LEVEL    Media quality: HI_RES_LOSSLESS | LOSSLESS | HIGH | LOW
-  --no-status,     -ns         Hide the toggles bar on startup
-  --numbers,       -n          Show line numbers on startup
-  --tsv,           -t          Enable tab separated values (fields) on startup
-  --verbose,       -v          Write debug log to debug.log in the config directory
-  --version,       -V          Show version
+  --api URL, -a URL   API base URL (default: https://api.monochrome.tf)
+  --verbose, -v       Write debug log to debug.log in the config directory
+  --version, -V       Show version
 
-Press ? in mctui for keybindings
+Press ? in tuifi for keybindings
 #+end_src
 
 * Requirements
@@ -48,15 +44,21 @@ Press ? in mctui for keybindings
 
 * Configuration
 
-Settings are stored in =settings.json=, resolved from:
+Settings are stored in =settings.json= and automatically updated upon using toggles within the TUI. Settings are resolved from:
 
 1. Script directory (if writable)
-2. =~/.config/mctui=
-3. =~/.local/state/monochrome-tui=
+2. =~/.config/tuifi=
+3. =~/.local/share/tuifi=
 
-Other state files: =queue.json=, =liked.json=, =playlists.json=, =history.json=.
+Other state files:
+- =queue.json= keeps your current play queue among program executions,
+- =liked.json= stores liked tracks,
+- =playlists.json= stores playlists,
+- =history.json= keeps the playback history.
 
-Upon first execution, =mctui= wil generate these files in its directory; they can be moved to =~/.config/mctui/=.
+=liked.json= and =playlists.json= are fully compatible with Monochrome instances (e.g., https://monochrome.tf) and can be imported there.
+
+Upon first execution, =tuifi= will generate these files in its directory; it is advised to move them to =~/.config/tuifi/= to conform to XDG standards.
 
 * Development note
 
@@ -66,7 +68,7 @@ This program was developed with significant AI assistance. I take no particular 
 
 ** Content extraction
 
-Any content accessed by this project is hosted by external non-affiliated sources, and everything served through =mctui= is publicly accessible via the Monochrome Hi-Fi API. A web browser makes hundreds of requests to get everything made available by a site, this project goes on to make more targeted requests associated with only getting the content relevant to its purpose. If this project accesses your content, or content provided by your service, the code is public and may help you taking the necessary measures to counter the means to access it in the first place.
+Any content accessed by this project is hosted by external non-affiliated sources, and everything served through =tuifi= is publicly accessible via the Monochrome Hi-Fi API. A web browser makes hundreds of requests to get everything made available by a site, this project goes on to make more targeted requests associated with only getting the content relevant to its purpose. If this project accesses your content, or content provided by your service, the code is public and may help you taking the necessary measures to counter the means to access it in the first place.
 
 ** DMCA and copyright infringements
 
@@ -74,6 +76,6 @@ This project is to be used at the user's own risk, based on their government and
 
 Hence, any copyright infringements or DMCA claims in this project's regards are to be forwarded to the associated content provider or API by the associated notifier of any such claims. This script does not infringe copyright, just like a web browser or a search engine, users are responsible with how they use the tool, and thus is not a valid reason to send a DMCA notice to Codeberg or the maintainers of this repository. If any source accessed using the script infringes on your rights as a copyright holder, they may be removed by contacting the web host service that published them online and is actually hosting them (not Codeberg, nor the maintainers of this repository).
 
-mm* License
+* License
 
 [[https://www.gnu.org/licenses/agpl-3.0.html][GNU Affero General Public License v3.0]]

@@ -1,45 +1,47 @@
 #+title: mctui
 #+description: Terminal music player for Monochrome Hi-Fi
 
-A TUI music player for the [[https://monochrome.tf][Monochrome Hi-Fi]] streaming service. Browse, search, stream, and manage lossless music from your terminal.
+A TUI music player for the [[https://monochrome.tf][Monochrome Hi-Fi]] streaming service. Browse, search, stream, download and manage lossless music from your terminal.
 
-[[file:demo/mctui-demo.mp4][[[file:demo/screenshot.png][screenshot]​]​]]
+#+CAPTION: Click to play the demo
+[[file:demo/mctui-demo.mp4][[[file:demo/screenshot.png]]]]
+
+* Features
+
+- Playback control (play, pause, seek, volume, repeat, shuffle)
+- Queue management with reordering and priority flags
+- Search, browse artists/albums, recommendations, mix
+- Autoplay mix or recommendations (infinite queue)
+- Playlists (create, delete, add/remove tracks)
+- Like tracks
+- Lyrics display
+- Download individual tracks, multiple tracks (e.g., marked, or from a playlist), or full albums
+- Customizable (colors, optional TSV mode, show/hide fields, download file hierarchy)
+- Keyboard-oriented navigation
+- Monochrome.tf requires using Firebase for authentication, so `mctui` runs accountless, but exports playlists and queues to json files
+
+* Usage
+
+#+begin_src sh
+Usage: ./mctui [options]
+
+Options:
+  --api URL,       -a URL      API base URL
+                               (default: https://api.monochrome.tf)
+  --quality LEVEL, -q LEVEL    Media quality: HI_RES_LOSSLESS | LOSSLESS | HIGH | LOW
+  --no-status,     -ns         Hide the toggles bar on startup
+  --numbers,       -n          Show line numbers on startup
+  --tsv,           -t          Enable tab separated values (fields) on startup
+  --verbose,       -v          Write debug log to debug.log in the config directory
+  --version,       -V          Show version
+
+Press ? in mctui for keybindings
+#+end_src
 
 * Requirements
 
 - Python 3.7+
 - [[https://mpv.io][mpv]]
-
-* Usage
-
-#+begin_src sh
-./mctui [options]
-#+end_src
-
-| Option          | Description                                           |
-|-----------------+-------------------------------------------------------|
-| =--api URL=     | API base URL (default: =https://api.monochrome.tf=)   |
-| =--quality LVL= | Stream quality: HI_RES_LOSSLESS, LOSSLESS, HIGH, LOW |
-| =--tab-align=   | TSV column-aligned display mode                       |
-| =--no-status=   | Hide status bar on startup                            |
-| =--numbers=     | Show line numbers                                     |
-| =-v, --verbose= | Write debug log to =debug.log=                        |
-
-* Features
-
-- Playback control (play, pause, seek, volume, repeat, shuffle)
-- Queue management with reordering and priority queue
-- Search, browse artists/albums, recommendations
-- Autoplay recommendations
-- Playlists (create, delete, add/remove tracks)
-- Like tracks
-- Lyrics display
-- Downloads individual tracks, multiple tracks (e.g., marked, or from a playlist), or full albums
-- Customizable UI (colors, optional TSV mode, show/hide fields)
-- Keyboard-oriented navigation
-- Monochrome.tf requires using Firebase for authentication, so `mctui` runs accountless, but exports playlists and queues to json files
-  
-Press =?= in the app to see all keybindings.
 
 * Configuration
 
@@ -50,3 +52,5 @@ Settings are stored in =settings.json=, resolved from:
 3. =~/.local/state/monochrome-tui=
 
 Other state files: =queue.json=, =likes.json=, =playlists.json=.
+
+Upon first execution, =mctui= wil generate these files in its directory; they can be moved to =~/.config/mctui/=.

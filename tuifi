@@ -694,6 +694,7 @@ class DownloadManager:
         self._thread: Optional[threading.Thread] = None
         self.active = False
         self.progress_line = ""
+        self.progress_clear_at = 0.0
         self.error: Optional[str] = None
         self._total = 0
         self._completed = 0
@@ -730,7 +731,7 @@ class DownloadManager:
             with self._lock:
                 self._completed += 1
         self.active = False
-        self._set_progress("")
+        self.progress_clear_at = time.time() + 2.0
 
     def _set_progress(self, s: str) -> None:
         with self._lock:
@@ -2307,6 +2308,11 @@ class App:
         label = f"{t.artist[:16]} - {t.title[:16]}"
         count_s = f"[{current}/{total}]"
 
+        def sp(msg: str) -> None:
+            set_progress(msg)
+            self._need_redraw = True
+            self._redraw_status_only = True
+
         url = None
         last_err = ""
         for qi in range(self.quality_idx, len(QUALITY_ORDER)):
@@ -2325,7 +2331,7 @@ class App:
 
         if url is None:
             err_msg = f"all qualities failed: {last_err}"
-            set_progress(f"DL FAIL {count_s} {label}")
+            sp(f"DL FAIL {count_s} {label}")
             self.toast(f"DL Error: {err_msg[:50]}")
             debug_log(f"_download_worker: {err_msg}")
             return
@@ -2366,29 +2372,27 @@ class App:
             if tot and tot > 0:
                 pct = int((done * 100) / tot)
                 mb = done / (1024 * 1024)
-                set_progress(f"DL {count_s} {pct}% {mb:.1f}MB {label}")
+                sp(f"DL {count_s} {pct}% {mb:.1f}MB {label}")
             else:
                 mb = done / (1024 * 1024)
-                set_progress(f"DL {count_s} {mb:.1f}MB {label}")
-            self._need_redraw = True
-            self._redraw_status_only = True
+                sp(f"DL {count_s} {mb:.1f}MB {label}")
 
-        set_progress(f"DL {count_s} resolving {label}")
+        sp(f"DL {count_s} resolving {label}")
         try:
             http_stream_download(url, out_path, cb, timeout=120.0)
         except Exception as e:
-            set_progress(f"DL FAIL {count_s} {label}")
+            sp(f"DL FAIL {count_s} {label}")
             self.toast(f"DL Error: {str(e)[:50]}")
             debug_log(f"_download_worker: http error: {e}")
             return
-        set_progress(f"DL {count_s} done {label}")
+        sp(f"DL {count_s} done {label}")
 
         cover_path = os.path.join(out_dir, "cover.jpg")
         if not os.path.exists(cover_path):
             try:
                 cover_url = self._fetch_cover_url_for_track(t)
                 if cover_url:
-                    set_progress(f"DL {count_s} cover {label}")
+                    sp(f"DL {count_s} cover {label}")
                     cover_data = http_get_bytes(cover_url, timeout=20.0)
                     with open(cover_path, "wb") as f:
                         f.write(cover_data)
@@ -2398,7 +2402,7 @@ class App:
         lrc_path = os.path.join(out_dir, f"{base_name}.lrc")
         if not os.path.exists(lrc_path):
             try:
-                set_progress(f"DL {count_s} lyrics {label}")
+                sp(f"DL {count_s} lyrics {label}")
                 lyr_lines = []
                 try:
                     lyr_payload = self.client.lyrics(t.id)
@@ -2420,9 +2424,7 @@ class App:
         # Always overwrite the last sub-step (e.g. "lyrics ...") with a final completion line.
         # Use full (non-truncated) artist/title here, and include the extension.
         full_label = f"{t.artist} - {t.title}.{ext}"
-        set_progress(f"DL complete {count_s} {full_label}")
-        self._need_redraw = True
-        self._redraw_status_only = True
+        sp(f"DL complete {count_s} {full_label}")
 
 
     def _fetch_cover_url_for_track(self, t: Track) -> Optional[str]:
@@ -2472,7 +2474,9 @@ class App:
         if not tracks:
             self.toast("Nothing to download")
             return
-        self.toast(f"DL queued {len(tracks)}")
+        self.dl.progress_line = f"DL queued {len(tracks)}"
+        self._need_redraw = True
+        self._redraw_status_only = True
         self.dl.enqueue(tracks, self._download_worker)
 
     # ---------------------------------------------------------------------------
@@ -3620,11 +3624,17 @@ class App:
             song = f"ERROR: {self.last_error}"
         line2 = (left + song)[:max(0, w - 1)].ljust(max(0, w - 1))
 
+        now = time.time()
+        if not self.dl.active and self.dl.progress_clear_at and now > self.dl.progress_clear_at:
+            self.dl.progress_line = ""
+            self.dl.progress_clear_at = 0.0
         right = ""
-        if time.time() < self.toast_until and self.toast_msg:
+        if self.dl.progress_line:
+            right = self.dl.progress_line
+        elif self.dl.error:
+            right = "DLERR"
+        elif now < self.toast_until and self.toast_msg:
             right = self.toast_msg
-        else:
-            right = self.dl.progress_line or ("DLERR" if self.dl.error else "")
         if right:
             right = right[:max(0, w - 2)]
             tpos = max(0, (w - 1) - len(right))

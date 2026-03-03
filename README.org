@@ -3,8 +3,11 @@
 
 A TUI music player for the [[https://monochrome.tf][Monochrome Hi-Fi]] streaming service. Browse, search, stream, download and manage lossless music from your terminal.
 
-#+CAPTION: Click to play the demo
-[[file:demo/mctui-demo.mp4][[[file:demo/screenshot.png]]]]
+#+BEGIN_EXPORT html
+<a href="demo/mctui-demo.mp4">
+  <img src="demo/screenshot.png" alt="Click to play the demo" />
+</a>
+#+END_EXPORT
 
 * Features
 

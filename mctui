@@ -814,6 +814,7 @@ class App:
         self.info_album: Optional[Album] = None
         self.info_payload: Optional[Dict[str, Any]] = None
         self.info_loading = False
+        self.info_follow_selection = True
         self._info_target_id: Optional[int] = None
         self._info_target_album_id: Optional[int] = None
         self._info_refresh_due = 0.0
@@ -2635,6 +2636,7 @@ class App:
             self.info_overlay = False
             self._need_redraw = True
             return
+        self.info_follow_selection = True
         if self.tab == TAB_ALBUM and self._selected_album_title_line() and self.album_header:
             self.open_info_album(self.album_header)
             return
@@ -2656,6 +2658,7 @@ class App:
             self.info_overlay = False
             self._need_redraw = True
             return
+        self.info_follow_selection = False
         t = self.current_track
         if not t:
             return
@@ -2963,6 +2966,8 @@ class App:
         self.left_idx = 0
         self.left_scroll = 0
         self.toast("Deleted")
+        self._need_redraw = True
+        self._redraw_status_only = False
 
     def playlists_open_selected(self) -> None:
         if not self.playlist_names:
@@ -3942,7 +3947,7 @@ class App:
 
             self._do_info_fetch_if_due()
 
-            if self.info_overlay and not self.info_album:
+            if self.info_overlay and not self.info_album and self.info_follow_selection:
                 t = self._current_selection_track()
                 if t and (self.info_track is None or t.id != self.info_track.id):
                     self._request_info_refresh(t)
@@ -4022,7 +4027,7 @@ class App:
                 continue
 
             if self.lyrics_overlay:
-                if ch in (27, ord("v"), ord("q")):
+                if ch in (27, ord("v"), ord("V"), ord("q")):
                     self.lyrics_overlay = False
                 elif ch in (curses.KEY_DOWN, ord("j")):
                     self.lyrics_scroll += 1

@@ -57,3 +57,19 @@ Settings are stored in =settings.json=, resolved from:
 Other state files: =queue.json=, =likes.json=, =playlists.json=.
 
 Upon first execution, =mctui= wil generate these files in its directory; they can be moved to =~/.config/mctui/=.
+
+* Disclaimer
+
+** Content Extraction
+
+Any content accessed by this project is hosted by external non-affiliated sources, and everything served through =mctui= is publicly accessible via the Monochrome Hi-Fi API. While a web browser makes hundreds of requests to get everything made available by a site, this project goes on to make more targeted requests associated with only getting the content relevant to its purpose. If this project accesses content provided by your service, the code is public and may help you taking the necessary measures to counter the means used to access it in the first place.
+
+** DMCA and Copyright Infringements
+
+This project is to be used at the user's own risk, based on their government and laws. Streaming copyrighted content without owning a legal copy and from an unendorsed source is illegal. No audio files or direct links to audio files are stored in this repository, as the script merely interfaces with sources that exist independently. This project has no control over the content it finds and no control over the content served by Monochrome Hi-Fi or any other external service. A browser is a tool, and the maliciousness of the tool depends on the user. This project uses client-side content access mechanisms.
+
+Hence, any copyright infringements or DMCA claims in this project's regards are to be forwarded to the associated site by the associated notifier of any such claims. Using this script to access content does not infringe copyright because no copy of the content is made by the script, just like when using a web browser or a search engine, and thus is not a valid reason to send a DMCA notice to Codeberg or the maintainers of this repository. If any source accessed by the script infringes on your rights as a copyright holder, they may be removed by contacting the web host service that published them online and is actually hosting them (not Codeberg, nor the maintainers of this repository).
+
+* License
+
+[[https://www.gnu.org/licenses/agpl-3.0.html][GNU Affero General Public License v3.0]]

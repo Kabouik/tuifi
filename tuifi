@@ -4249,7 +4249,7 @@ class App:
                 continue
             if ch == ord("F"):
                 self.quality_idx = (self.quality_idx + 1) % len(QUALITY_ORDER)
-                self.toast(f"Q:{QUALITY_ORDER[self.quality_idx]}")
+                self.toast(f"Quality: {QUALITY_ORDER[self.quality_idx]}")
                 continue
             if ch == ord("T"):
                 self.show_toggles = not self.show_toggles

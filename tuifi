@@ -515,7 +515,8 @@ class MPV:
 
     def start(self, url: str, resume: bool = False) -> None:
         self.stop()
-        self.sock_path = f"/tmp/{APP_NAME}-mpv-{os.getpid()}-{int(time.time()*1000)}.sock"
+        _tmp = os.environ.get("TMPDIR", "/tmp")
+        self.sock_path = f"{_tmp}/{APP_NAME}-mpv-{os.getpid()}-{int(time.time()*1000)}.sock"
         try:
             if os.path.exists(self.sock_path):
                 os.unlink(self.sock_path)
@@ -539,7 +540,7 @@ class MPV:
         args.append(url)
 
         if _DEBUG_LOG:
-            self._mpv_stderr_path = f"/tmp/{APP_NAME}-mpv-err-{os.getpid()}.log"
+            self._mpv_stderr_path = f"{_tmp}/{APP_NAME}-mpv-err-{os.getpid()}.log"
             try:
                 self._mpv_stderr_fh = open(self._mpv_stderr_path, "w")
                 stderr_target: Any = self._mpv_stderr_fh
@@ -1886,7 +1887,7 @@ class App:
                 debug_log(f"  DASH: extracted direct URL from MPD: {direct_url[:120]}")
                 return direct_url
 
-            mpd_path = f"/tmp/{APP_NAME}-{track_id}-{int(time.time()*1000)}.mpd"
+            mpd_path = f"{os.environ.get('TMPDIR', '/tmp')}/{APP_NAME}-{track_id}-{int(time.time()*1000)}.mpd"
             with open(mpd_path, "w", encoding="utf-8") as f:
                 f.write(raw_text)
             debug_log(f"  DASH .mpd path: {mpd_path}")

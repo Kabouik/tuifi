@@ -925,7 +925,7 @@ class UIMixin:
             " Shift ←/→ seek 30s                                 e/E   enqueue to end/after current",
             " ,/<       prev track                               a     add selected/marked to playlist",
             " ./>       next track                               X     remove selected from playlist",
-            " t         resume playback from last know position",
+            " P         resume playback from last known position",
             "",
             "\x01 ACTIONS",
             " Enter     play without adding to queue",

@@ -323,7 +323,7 @@ class CoreMixin:
                     self.open_url(f"{self.web_base()}/track/{self.current_track.id}")
                 continue
 
-            if ch == ord("t"):
+            if ch == ord("P"):
                 self.play_track_with_resume()
                 continue
 

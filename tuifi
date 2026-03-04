@@ -3674,7 +3674,7 @@ class App:
             " Shift ←/→ seek 30s                                 e/E   enqueue to end/after current",
             " ,/<       prev track                               a     add selected/marked to playlist",
             " ./>       next track                               X     remove selected from playlist",
-            " t         resume playback from last know position",
+            " P         resume playback from last known position",
             "",
             "\x01 ACTIONS",
             " Enter     play without adding to queue",
@@ -4105,7 +4105,7 @@ class App:
                     self.open_url(f"{self.web_base()}/track/{self.current_track.id}")
                 continue
 
-            if ch == ord("t"):
+            if ch == ord("P"):
                 self.play_track_with_resume()
                 continue
 

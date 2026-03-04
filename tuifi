@@ -3706,6 +3706,7 @@ class App:
             "",
             "\x01 VIEW",
             " q         mini-queue overlay",
+            " Tab       move cursor between main tabs and mini-queue overlay"
             " c         color/bw",
             " w/y/d/n   album/year/duration/line number fields",
             " T         status bar",

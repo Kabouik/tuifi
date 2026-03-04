@@ -1,24 +1,24 @@
 
 # Table of Contents
 
-1.  [Features](#org50833b2)
-2.  [Usage](#org3e31c44)
-3.  [Requirements](#org63a8218)
-4.  [Configuration](#org14859bb)
-5.  [Development note](#org7f4c8f2)
-6.  [Disclaimer](#orgbdd312e)
-    1.  [Content extraction](#org2937142)
-    2.  [DMCA and copyright infringements](#org702d195)
-7.  [License](#org5349f7a)
+1.  [Features](#org77c0e91)
+2.  [Usage](#org15989c3)
+3.  [Requirements](#org357b583)
+4.  [Configuration](#org2bccf04)
+5.  [Development note](#orga7f3e0b)
+6.  [Disclaimer](#org39e89f8)
+    1.  [Content extraction](#org0a718fa)
+    2.  [DMCA and copyright infringements](#org85dfbf8)
+7.  [License](#org1a400d2)
 
-A feature-rich TUI music player built on top of [TIDAL HiFi API](https://github.com/binimum/hifi-api): browse, search, stream, download, organize and manage lossless music from your comfy terminal. While you may be able to access HiFi API instances right away, music piracy is illegal in most countries and is bad for the karma, and this project is intended for users who have a paid subscription but still favor a keyboard-driven terminal workflow.
+A feature-rich-ish TUI music player built on top of [TIDAL HiFi API](https://github.com/binimum/hifi-api): browse, search, stream, download, organize and manage lossless music from your comfy terminal. While you may be able to access HiFi API instances right away, music piracy is illegal in most countries and is bad for the karma, and this project is intended for users who have a paid subscription but still favor a keyboard-driven terminal workflow.
 
-<a href="https://codeberg.org/kabouik/tuifi/raw/branch/main/demo/tuifi-demo.mp4">
+<a href="demo/tuifi-demo.mp4">
   <img src="demo/screenshot.png" alt="Click to play the demo" />
 </a>
 
 
-<a id="org50833b2"></a>
+<a id="org77c0e91"></a>
 
 # Features
 
@@ -33,10 +33,10 @@ A feature-rich TUI music player built on top of [TIDAL HiFi API](https://github.
 -   Playback history
 -   Customizable (colors, optional TSV mode, show/hide fields, file hierarchy for downloads, autoplay buffer)
 -   Keyboard-oriented control
--   Accountless but playlists and liked songs are kept in standard json files that some web players can import
+-   Accountless but playlists and liked songs are kept in standard json files that some TIDAL HiFi web players can import
 
 
-<a id="org3e31c44"></a>
+<a id="org15989c3"></a>
 
 # Usage
 
@@ -50,7 +50,7 @@ A feature-rich TUI music player built on top of [TIDAL HiFi API](https://github.
     Press ? in tuifi for keybindings
 
 
-<a id="org63a8218"></a>
+<a id="org357b583"></a>
 
 # Requirements
 
@@ -58,7 +58,7 @@ A feature-rich TUI music player built on top of [TIDAL HiFi API](https://github.
 -   [mpv](https://mpv.io)
 
 
-<a id="org14859bb"></a>
+<a id="org2bccf04"></a>
 
 # Configuration
 
@@ -113,26 +113,26 @@ Other state files stored in the same directory:
 `liked.json` and `playlists.json` are fully compatible with Monochrome instances (e.g., <https://monochrome.tf>) and can be imported there.
 
 
-<a id="org7f4c8f2"></a>
+<a id="orga7f3e0b"></a>
 
 # Development note
 
 This program was developed with significant AI assistance. I take no particular pride in that, or the resulting code, but it was a week-end project and I wanted something usable quickly rather than something to be proud of architecturally.
 
 
-<a id="orgbdd312e"></a>
+<a id="org39e89f8"></a>
 
 # Disclaimer
 
 
-<a id="org2937142"></a>
+<a id="org0a718fa"></a>
 
 ## Content extraction
 
 Any content accessed by this project is hosted by external non-affiliated sources, and everything served through `tuifi` is publicly accessible via the Monochrome Hi-Fi API. A web browser makes hundreds of requests to get everything made available by a site, this project goes on to make more targeted requests associated with only getting the content relevant to its purpose. If this project accesses your content, or content provided by your service, the code is public and may help you taking the necessary measures to counter the means to access it in the first place.
 
 
-<a id="org702d195"></a>
+<a id="org85dfbf8"></a>
 
 ## DMCA and copyright infringements
 
@@ -141,7 +141,7 @@ This project is to be used at the user's own risk, based on their government and
 Hence, any copyright infringements or DMCA claims in this project's regards are to be forwarded to the associated content provider or API by the associated notifier of any such claims. This script does not infringe copyright, just like a web browser or a search engine, users are responsible with how they use the tool, and thus is not a valid reason to send a DMCA notice to Codeberg or the maintainers of this repository. If any source accessed using the script infringes on your rights as a copyright holder, they may be removed by contacting the web host service that published them online and is actually hosting them (not Codeberg, nor the maintainers of this repository).
 
 
-<a id="org5349f7a"></a>
+<a id="org1a400d2"></a>
 
 # License
 

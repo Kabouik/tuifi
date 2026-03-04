@@ -1,10 +1,10 @@
 #+title: tuifi
-#+description: Terminal music player for Monochrome Hi-Fi
+#+description: TUI music player for TIDAL HiFi API
 
-A feature-rich TUI music player built on top of [[https://github.com/binimum/hifi-api][TIDAL HiFi API]]: browse, search, stream, download, organize and manage lossless music from your comfy terminal. While you may be able to access HiFi API instances right away, music piracy is illegal in most countries and is bad for the karma, and this project is intended for users who have a paid subscription but still favor a keyboard-driven terminal workflow.
+A feature-rich-ish TUI music player built on top of [[https://github.com/binimum/hifi-api][TIDAL HiFi API]]: browse, search, stream, download, organize and manage lossless music from your comfy terminal. While you may be able to access HiFi API instances right away, music piracy is illegal in most countries and is bad for the karma, and this project is intended for users who have a paid subscription but still favor a keyboard-driven terminal workflow.
 
 #+BEGIN_EXPORT html
-<a href="https://codeberg.org/kabouik/tuifi/raw/branch/main/demo/tuifi-demo.mp4">
+<a href="demo/tuifi-demo.mp4">
   <img src="demo/screenshot.png" alt="Click to play the demo" />
 </a>
 #+END_EXPORT
@@ -22,7 +22,7 @@ A feature-rich TUI music player built on top of [[https://github.com/binimum/hif
 - Playback history
 - Customizable (colors, optional TSV mode, show/hide fields, file hierarchy for downloads, autoplay buffer)
 - Keyboard-oriented control
-- Accountless but playlists and liked songs are kept in standard json files that some web players can import
+- Accountless but playlists and liked songs are kept in standard json files that some TIDAL HiFi web players can import
 
 * Usage
 

@@ -56,6 +56,8 @@ Config directory per platform:
 | macOS    | =~/Library/Application Support/tuifi=           |
 | Windows  | =%APPDATA%\tuifi=                               |
 
+=settings.json= can be edited to change UI options, colours, metadata field widths, autoplay buffer size, download destinations and naming conventions, /etc./
+
 Other state files stored in the same directory:
 - =queue.json= keeps your current play queue among program executions,
 - =liked.json= stores liked tracks,

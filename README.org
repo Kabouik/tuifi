@@ -8,6 +8,7 @@ A feature-rich-ish TUI music player built on top of [[https://github.com/binimum
   <img src="demo/screenshot.png" alt="Click to play the demo" />
 </a>
 #+END_EXPORT
+/Click to play the demo video./
 
 * Features
 

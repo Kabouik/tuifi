@@ -33,7 +33,6 @@ _Click to play the demo video._
 -   Keyboard-oriented control
 -   Accountless but playlists and liked songs are kept in standard json files that some TIDAL HiFi web players can import
 
-
 <a id="org617893b"></a>
 
 # Usage
@@ -47,14 +46,12 @@ _Click to play the demo video._
     
     Press ? in tuifi for keybindings
 
-
 <a id="org9a38dcb"></a>
 
 # Requirements
 
 -   Python 3.7+
 -   [mpv](https://mpv.io)
-
 
 <a id="orgbaf4dcd"></a>
 
@@ -101,6 +98,8 @@ Config directory per platform:
 </tbody>
 </table>
 
+`settings.json` can be edited to change UI options, colours, metadata field widths, autoplay buffer size, download destinations and naming conventions, _etc._
+
 Other state files stored in the same directory:
 
 -   `queue.json` keeps your current play queue among program executions,
@@ -110,25 +109,21 @@ Other state files stored in the same directory:
 
 `liked.json` and `playlists.json` are fully compatible with Monochrome instances (e.g., <https://monochrome.tf>) and can be imported there.
 
-
 <a id="orgf741ad6"></a>
 
 # Development note
 
 This program was developed with significant AI assistance. I take no particular pride in that, or the resulting code, but it was a week-end project and I wanted something usable quickly rather than something to be proud of architecturally.
 
-
 <a id="org046119a"></a>
 
 # Disclaimer
-
 
 <a id="orga33dcd4"></a>
 
 ## Content extraction
 
 Any content accessed by this project is hosted by external non-affiliated sources, and everything served through `tuifi` is publicly accessible via the TIDAL Hi-Fi API. A web browser makes hundreds of requests to get everything made available by a site, this project goes on to make more targeted requests associated with only getting the content relevant to its purpose. If this project accesses your content, or content provided by your service, the code is public and may help you taking the necessary measures to counter the means to access it in the first place.
-
 
 <a id="org435f66b"></a>
 
@@ -137,7 +132,6 @@ Any content accessed by this project is hosted by external non-affiliated source
 This project is to be used at the user's own risk, based on their government and laws. No audio files or direct links to audio files are stored in this repository, the script merely interfaces with sources and API that exist independently and are publicly available. This project has no control over the content it finds at any point in time, and no control over the content served by the source services, it just uses a documented API provided by other tools to fetch targeted information and content otherwise available with a web browser.
 
 Hence, any copyright infringements or DMCA claims in this project's regards are to be forwarded to the associated content provider or API by the associated notifier of any such claims. This script does not infringe copyright, just like a web browser or a search engine, users are responsible with how they use the tool, and thus is not a valid reason to send a DMCA notice to Codeberg or the maintainers of this repository. If any source accessed using the script infringes on your rights as a copyright holder, they may be removed by contacting the web host service that published them online and is actually hosting them (not Codeberg, nor the maintainers of this repository).
-
 
 <a id="org4faac89"></a>
 

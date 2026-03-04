@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 tuifi - a TUI music player for TIDAL HiFi API
+Author: kabouik/matf
 """
 
 from __future__ import annotations

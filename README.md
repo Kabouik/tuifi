@@ -127,7 +127,7 @@ This program was developed with significant AI assistance. I take no particular 
 
 ## Content extraction
 
-Any content accessed by this project is hosted by external non-affiliated sources, and everything served through `tuifi` is publicly accessible via the Monochrome Hi-Fi API. A web browser makes hundreds of requests to get everything made available by a site, this project goes on to make more targeted requests associated with only getting the content relevant to its purpose. If this project accesses your content, or content provided by your service, the code is public and may help you taking the necessary measures to counter the means to access it in the first place.
+Any content accessed by this project is hosted by external non-affiliated sources, and everything served through `tuifi` is publicly accessible via the TIDAL Hi-Fi API. A web browser makes hundreds of requests to get everything made available by a site, this project goes on to make more targeted requests associated with only getting the content relevant to its purpose. If this project accesses your content, or content provided by your service, the code is public and may help you taking the necessary measures to counter the means to access it in the first place.
 
 
 <a id="org435f66b"></a>

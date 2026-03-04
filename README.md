@@ -1,24 +1,24 @@
 
 # Table of Contents
 
-1.  [Features](#org77c0e91)
-2.  [Usage](#org15989c3)
-3.  [Requirements](#org357b583)
-4.  [Configuration](#org2bccf04)
-5.  [Development note](#orga7f3e0b)
-6.  [Disclaimer](#org39e89f8)
-    1.  [Content extraction](#org0a718fa)
-    2.  [DMCA and copyright infringements](#org85dfbf8)
-7.  [License](#org1a400d2)
+1.  [Features](#orgbd6462d)
+2.  [Usage](#org617893b)
+3.  [Requirements](#org9a38dcb)
+4.  [Configuration](#orgbaf4dcd)
+5.  [Development note](#orgf741ad6)
+6.  [Disclaimer](#org046119a)
+    1.  [Content extraction](#orga33dcd4)
+    2.  [DMCA and copyright infringements](#org435f66b)
+7.  [License](#org4faac89)
 
 A feature-rich-ish TUI music player built on top of [TIDAL HiFi API](https://github.com/binimum/hifi-api): browse, search, stream, download, organize and manage lossless music from your comfy terminal. While you may be able to access HiFi API instances right away, music piracy is illegal in most countries and is bad for the karma, and this project is intended for users who have a paid subscription but still favor a keyboard-driven terminal workflow.
 
-<a href="demo/tuifi-demo.mp4">
+<a href="https://github.com/Kabouik/tuifi/raw/refs/heads/main/demo/tuifi-demo.mp4">
   <img src="demo/screenshot.png" alt="Click to play the demo" />
 </a>
 
 
-<a id="org77c0e91"></a>
+<a id="orgbd6462d"></a>
 
 # Features
 
@@ -36,7 +36,7 @@ A feature-rich-ish TUI music player built on top of [TIDAL HiFi API](https://git
 -   Accountless but playlists and liked songs are kept in standard json files that some TIDAL HiFi web players can import
 
 
-<a id="org15989c3"></a>
+<a id="org617893b"></a>
 
 # Usage
 
@@ -50,7 +50,7 @@ A feature-rich-ish TUI music player built on top of [TIDAL HiFi API](https://git
     Press ? in tuifi for keybindings
 
 
-<a id="org357b583"></a>
+<a id="org9a38dcb"></a>
 
 # Requirements
 
@@ -58,7 +58,7 @@ A feature-rich-ish TUI music player built on top of [TIDAL HiFi API](https://git
 -   [mpv](https://mpv.io)
 
 
-<a id="org2bccf04"></a>
+<a id="orgbaf4dcd"></a>
 
 # Configuration
 
@@ -113,26 +113,26 @@ Other state files stored in the same directory:
 `liked.json` and `playlists.json` are fully compatible with Monochrome instances (e.g., <https://monochrome.tf>) and can be imported there.
 
 
-<a id="orga7f3e0b"></a>
+<a id="orgf741ad6"></a>
 
 # Development note
 
 This program was developed with significant AI assistance. I take no particular pride in that, or the resulting code, but it was a week-end project and I wanted something usable quickly rather than something to be proud of architecturally.
 
 
-<a id="org39e89f8"></a>
+<a id="org046119a"></a>
 
 # Disclaimer
 
 
-<a id="org0a718fa"></a>
+<a id="orga33dcd4"></a>
 
 ## Content extraction
 
 Any content accessed by this project is hosted by external non-affiliated sources, and everything served through `tuifi` is publicly accessible via the Monochrome Hi-Fi API. A web browser makes hundreds of requests to get everything made available by a site, this project goes on to make more targeted requests associated with only getting the content relevant to its purpose. If this project accesses your content, or content provided by your service, the code is public and may help you taking the necessary measures to counter the means to access it in the first place.
 
 
-<a id="org85dfbf8"></a>
+<a id="org435f66b"></a>
 
 ## DMCA and copyright infringements
 
@@ -141,7 +141,7 @@ This project is to be used at the user's own risk, based on their government and
 Hence, any copyright infringements or DMCA claims in this project's regards are to be forwarded to the associated content provider or API by the associated notifier of any such claims. This script does not infringe copyright, just like a web browser or a search engine, users are responsible with how they use the tool, and thus is not a valid reason to send a DMCA notice to Codeberg or the maintainers of this repository. If any source accessed using the script infringes on your rights as a copyright holder, they may be removed by contacting the web host service that published them online and is actually hosting them (not Codeberg, nor the maintainers of this repository).
 
 
-<a id="org1a400d2"></a>
+<a id="org4faac89"></a>
 
 # License
 

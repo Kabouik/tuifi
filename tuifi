@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import curses
 import json
+import locale
 import os
 import random
 import re
@@ -295,6 +296,12 @@ class Album:
     year: str
 
 
+@dataclass
+class Artist:
+    id: int
+    name: str
+
+
 class HiFiClient:
     def __init__(self, base: str) -> None:
         self.base = base.rstrip("/")
@@ -368,8 +375,8 @@ def save_queue(items: List[Track], play_idx: int) -> None:
     save_json(QUEUE_FILE, {"version": 2, "idx": play_idx, "items": [t.to_dict() for t in items]})
 
 
-def load_liked() -> Tuple[List[Dict[str, Any]], set]:
-    """Load liked.json. Returns (list of mono dicts, set of liked IDs).
+def load_liked() -> Tuple[List[Dict[str, Any]], set, List[Dict[str, Any]], set, List[Dict[str, Any]], set, List[Dict[str, Any]], set]:
+    """Load liked.json. Returns (tracks, track_ids, albums, album_ids, artists, artist_ids, playlists, playlist_names).
     Migrates from old likes.json if liked.json doesn't exist yet."""
     data = load_json(LIKED_FILE, None)
     if data is None:
@@ -382,14 +389,32 @@ def load_liked() -> Tuple[List[Dict[str, Any]], set]:
             now_ms = int(time.time() * 1000)
             tracks = [track_to_mono(by_id[tid], now_ms) for tid in old_ids if tid in by_id]
             save_json(LIKED_FILE, {"favorites_tracks": tracks})
-            return tracks, {t["id"] for t in tracks}
-        return [], set()
+            return tracks, {t["id"] for t in tracks}, [], set(), [], set(), [], set()
+        return [], set(), [], set(), [], set(), [], set()
     tracks = [d for d in data.get("favorites_tracks", []) if isinstance(d, dict) and d.get("id")]
-    return tracks, {int(d["id"]) for d in tracks}
+    albums = [d for d in data.get("favorites_albums", []) if isinstance(d, dict) and d.get("id")]
+    artists = [d for d in data.get("favorites_artists", []) if isinstance(d, dict) and d.get("id")]
+    playlists = [d for d in data.get("favorites_playlists", []) if isinstance(d, dict) and d.get("name")]
+    return (
+        tracks, {int(d["id"]) for d in tracks},
+        albums, {int(d["id"]) for d in albums},
+        artists, {int(d["id"]) for d in artists},
+        playlists, {d["name"] for d in playlists},
+    )
 
 
-def save_liked(tracks: List[Dict[str, Any]]) -> None:
-    save_json(LIKED_FILE, {"favorites_tracks": tracks})
+def save_liked(
+    tracks: List[Dict[str, Any]],
+    albums: List[Dict[str, Any]],
+    artists: List[Dict[str, Any]],
+    playlists: List[Dict[str, Any]],
+) -> None:
+    save_json(LIKED_FILE, {
+        "favorites_tracks": tracks,
+        "favorites_albums": albums,
+        "favorites_artists": artists,
+        "favorites_playlists": playlists,
+    })
 
 
 def load_playlists() -> Tuple[Dict[str, List[Any]], Dict[str, Dict[str, Any]]]:
@@ -862,7 +887,10 @@ class App:
         self._autoplay_last_seed_id: Optional[int] = None
 
         self.queue_items, self.queue_play_idx = load_queue()
-        self.liked_tracks, self.liked_ids = load_liked()
+        (self.liked_tracks, self.liked_ids,
+         self.liked_albums, self.liked_album_ids,
+         self.liked_artists, self.liked_artist_ids,
+         self.liked_playlists, self.liked_playlist_ids) = load_liked()
         self.playlists, self.playlists_meta = load_playlists()
         self.history_tracks = load_history()
         self.queue_cursor = 0
@@ -879,6 +907,11 @@ class App:
         self.mix_title: str = ""
         self.mix_track: str = ""
         self.liked_cache: List[Track] = []
+        self.liked_album_cache: List[Album] = []
+        self.liked_artist_cache: List[Artist] = []
+        self.liked_playlist_cache: List[str] = []
+        self.liked_filter: int = 0
+        self.artist_ctx: Optional[Tuple[int, str]] = None
         self.artist_albums: List[Album] = []
         self.artist_tracks: List[Track] = []
         self.album_header: Optional[Album] = None
@@ -1578,6 +1611,8 @@ class App:
             return ("tracks", self.mix_tracks)
         if self.tab == TAB_ARTIST:
             items: List[Any] = []
+            if self.artist_ctx:
+                items.append(("artist_header", self.artist_ctx))
             if self.artist_albums:
                 items.append(("sep", "Albums"))
                 items.extend(self.artist_albums)
@@ -1592,7 +1627,30 @@ class App:
             items.extend(self.album_tracks)
             return ("album_mixed", items)
         if self.tab == TAB_LIKED:
-            return ("tracks", self.liked_cache)
+            f = self.liked_filter
+            if f == 1:
+                return ("tracks", self.liked_cache)
+            if f == 2:
+                return ("liked_mixed", self.liked_artist_cache)
+            if f == 3:
+                return ("liked_mixed", self.liked_album_cache)
+            if f == 4:
+                return ("liked_mixed", self.liked_playlist_cache)
+            # f == 0: all categories with section separators
+            items: List[Any] = []
+            if self.liked_cache:
+                items.append(("sep", "Tracks"))
+                items.extend(self.liked_cache)
+            if self.liked_album_cache:
+                items.append(("sep", "Albums"))
+                items.extend(self.liked_album_cache)
+            if self.liked_artist_cache:
+                items.append(("sep", "Artists"))
+                items.extend(self.liked_artist_cache)
+            if self.liked_playlist_cache:
+                items.append(("sep", "Playlists"))
+                items.extend(self.liked_playlist_cache)
+            return ("liked_mixed", items)
         if self.tab == TAB_PLAYLISTS:
             if self.playlist_view_name is None:
                 return ("playlists", self.playlist_names)
@@ -2122,6 +2180,9 @@ class App:
     def _schedule_liked_refresh(self) -> None:
         self._liked_refresh_due = time.time() + 1.0
 
+    def _save_liked(self) -> None:
+        save_liked(self.liked_tracks, self.liked_albums, self.liked_artists, self.liked_playlists)
+
     def toggle_like(self, t: Track, silent: bool = False) -> None:
         if t.id in self.liked_ids:
             self.liked_ids.discard(t.id)
@@ -2133,19 +2194,76 @@ class App:
             self.liked_tracks.insert(0, track_to_mono(t, int(time.time() * 1000)))
             if not silent:
                 self.toast("Liked")
-        save_liked(self.liked_tracks)
+        self._save_liked()
+        self._schedule_liked_refresh()
+
+    def toggle_like_album(self, album: Album) -> None:
+        if album.id in self.liked_album_ids:
+            self.liked_album_ids.discard(album.id)
+            self.liked_albums = [d for d in self.liked_albums if d.get("id") != album.id]
+            self.toast("Album unliked")
+        else:
+            self.liked_album_ids.add(album.id)
+            self.liked_albums.insert(0, {"id": album.id, "title": album.title, "artist": album.artist, "year": album.year})
+            self.toast("Album liked")
+        self._save_liked()
+        self._schedule_liked_refresh()
+
+    def toggle_like_artist(self, artist_id: int, name: str) -> None:
+        if artist_id in self.liked_artist_ids:
+            self.liked_artist_ids.discard(artist_id)
+            self.liked_artists = [d for d in self.liked_artists if d.get("id") != artist_id]
+            self.toast("Artist unliked")
+        else:
+            self.liked_artist_ids.add(artist_id)
+            self.liked_artists.insert(0, {"id": artist_id, "name": name})
+            self.toast("Artist liked")
+        self._save_liked()
+        self._schedule_liked_refresh()
+
+    def toggle_like_playlist(self, name: str) -> None:
+        if name in self.liked_playlist_ids:
+            self.liked_playlist_ids.discard(name)
+            self.liked_playlists = [d for d in self.liked_playlists if d.get("name") != name]
+            self.toast("Playlist unliked")
+        else:
+            self.liked_playlist_ids.add(name)
+            pl_id = (self.playlists_meta.get(name) or {}).get("id", str(uuid.uuid4()))
+            self.liked_playlists.insert(0, {"name": name, "id": pl_id})
+            self.toast("Playlist liked")
+        self._save_liked()
         self._schedule_liked_refresh()
 
     def like_selected(self) -> None:
-        if self._queue_context():
-            marked = self._marked_tracks_from_queue()
-            if marked:
-                for t in marked:
-                    self.toggle_like(t, silent=True)
-                self.toast(f"Liked/unliked {len(marked)}")
+        if not self._queue_context():
+            # Artist tab: always like/unlike the whole artist
+            if self.tab == TAB_ARTIST:
+                if self.artist_ctx:
+                    self.toggle_like_artist(*self.artist_ctx)
+                else:
+                    self.toast("No artist")
                 return
-            t = self._queue_selected_track()
-        else:
+            it = self._selected_left_item()
+            # Album header tuple
+            if isinstance(it, tuple) and len(it) == 2 and it[0] == "album_title" and isinstance(it[1], Album):
+                self.toggle_like_album(it[1])
+                return
+            # Album object (in liked_mixed or artist view)
+            if isinstance(it, Album):
+                self.toggle_like_album(it)
+                return
+            # Artist object (in liked_mixed)
+            if isinstance(it, Artist):
+                self.toggle_like_artist(it.id, it.name)
+                return
+            # Playlist name string: in playlists list view or liked_mixed
+            if isinstance(it, str) and (
+                (self.tab == TAB_PLAYLISTS and self.playlist_view_name is None)
+                or self.tab == TAB_LIKED
+            ):
+                self.toggle_like_playlist(it)
+                return
+            # Fall through: like marked or selected tracks
             marked = self._marked_tracks_from_left()
             if marked:
                 for t in marked:
@@ -2153,6 +2271,16 @@ class App:
                 self.toast(f"Liked/unliked {len(marked)}")
                 return
             t = self._selected_left_track()
+            if t:
+                self.toggle_like(t)
+            return
+        marked = self._marked_tracks_from_queue()
+        if marked:
+            for t in marked:
+                self.toggle_like(t, silent=True)
+            self.toast(f"Liked/unliked {len(marked)}")
+            return
+        t = self._queue_selected_track()
         if t:
             self.toggle_like(t)
 
@@ -2581,6 +2709,15 @@ class App:
 
     def fetch_liked_async(self) -> None:
         self.liked_cache = [t for t in (mono_to_track(d) for d in self.liked_tracks) if t is not None]
+        self.liked_album_cache = [
+            Album(id=d["id"], title=d.get("title", ""), artist=d.get("artist", ""), year=d.get("year", ""))
+            for d in self.liked_albums
+        ]
+        self.liked_artist_cache = [
+            Artist(id=d["id"], name=d.get("name", ""))
+            for d in self.liked_artists
+        ]
+        self.liked_playlist_cache = [d["name"] for d in self.liked_playlists]
         self._need_redraw = True
         self._redraw_status_only = False
 
@@ -2589,6 +2726,7 @@ class App:
             self.toast("No context")
             return
         self.artist_albums, self.artist_tracks = [], []
+        self.artist_ctx = None
         key = f"artist:{ctx.id}:{time.time()}"
         self._set_loading(key)
 
@@ -2659,6 +2797,8 @@ class App:
 
                 self.artist_albums = albums[:500]
                 self.artist_tracks = tracks[:600]
+                if aid:
+                    self.artist_ctx = (int(aid), ctx.artist)
                 self.toast("Artist")
             except Exception as e:
                 if self._loading_key == key:
@@ -3406,8 +3546,10 @@ class App:
         if  n == 0 and self.tab == TAB_ALBUM:
             self.stdscr.addstr(y, x, " Press 6 on a track in any tab to show its album"[:max(0, w - 1)].ljust(max(0, w - 1)), self.C(10))
             return
-        if typ == "tracks" and n == 0 and self.tab == TAB_LIKED:
-            self.stdscr.addstr(y, x, " Press l/L on tracks in any tab to like them"[:max(0, w - 1)].ljust(max(0, w - 1)), self.C(10))
+        if n == 0 and self.tab == TAB_LIKED:
+            FILTER_NAMES = ["All", "Tracks", "Albums", "Artists", "Playlists"]
+            fn = FILTER_NAMES[self.liked_filter]
+            self.stdscr.addstr(y, x, f" No liked {fn.lower()} — press l on items to like, Tab to filter"[:max(0, w - 1)].ljust(max(0, w - 1)), self.C(10))
             return
         if typ == "tracks" and n == 0 and self.tab == TAB_HISTORY:
             self.stdscr.addstr(y, x, " Play tracks to build history"[:max(0, w - 1)].ljust(max(0, w - 1)), self.C(10))
@@ -3485,6 +3627,39 @@ class App:
                 if isinstance(it, Track):
                     marked = (i in self.marked_left_idx)
                     self._draw_track_line(yy, x, w, it, selected=selected, marked=marked, idx1=i + 1)
+                    continue
+
+            if typ == "liked_mixed":
+                if isinstance(it, tuple) and it[0] == "sep":
+                    extra = "──" if self.tab_align else ""
+                    line = f"{extra}── {it[1]} ──"
+                    offs = self._draw_line_no(yy, x, i + 1, w) if self.show_numbers else 0
+                    self.stdscr.addstr(yy, x + offs, line[:max(0, w - offs - 1)].ljust(max(0, w - offs - 1)), self.C(4))
+                    continue
+                if isinstance(it, Track):
+                    marked = (i in self.marked_left_idx)
+                    self._draw_track_line(yy, x, w, it, selected=selected, marked=marked, idx1=i + 1)
+                    continue
+                if isinstance(it, Album):
+                    yv = year_norm(it.year)
+                    ys = f", {yv}" if (self.show_track_year and yv != "????") else ""
+                    line = f"  {it.artist} — {it.title}{ys}"
+                    offs = self._draw_line_no(yy, x, i + 1, w) if self.show_numbers else 0
+                    self.stdscr.addstr(yy, x + offs, line[:max(0, w - offs - 1)].ljust(max(0, w - offs - 1)),
+                                       (curses.A_REVERSE if selected else 0) | self.C(8))
+                    continue
+                if isinstance(it, Artist):
+                    line = f"  {it.name}"
+                    offs = self._draw_line_no(yy, x, i + 1, w) if self.show_numbers else 0
+                    self.stdscr.addstr(yy, x + offs, line[:max(0, w - offs - 1)].ljust(max(0, w - offs - 1)),
+                                       (curses.A_REVERSE if selected else 0) | self.C(8))
+                    continue
+                if isinstance(it, str):  # playlist name
+                    count = len(self.playlists.get(it, []))
+                    display = f"  {it} ({count} tracks)" if count else f"  {it}"
+                    offs = self._draw_line_no(yy, x, i + 1, w) if self.show_numbers else 0
+                    self.stdscr.addstr(yy, x + offs, display[:max(0, w - offs - 1)].ljust(max(0, w - offs - 1)),
+                                       curses.A_REVERSE if selected else 0)
                     continue
 
             if typ == "playlists":
@@ -3687,8 +3862,9 @@ class App:
             " D         download (selected, marked, album, all tracks of a playlist)",
             " Space     mark/unmark selected and advance",
             " U/u       mark/unmark all",
-            " l         like/unlike selected or marked",
+            " l         like/unlike track/album (6)/artist (5)/playlist (8)",
             " L         like/unlike playing",
+            " Tab       cycle liked category filter (on tab 7)",
             " g/G       move cursor to top/bottom",
             " j/k/↓/↑   move cursor down/up",
             " J/K       move track or marked tracks down/up",
@@ -4281,6 +4457,13 @@ class App:
             if ch == ord("L"):
                 self.like_playing()
                 continue
+            if ch == 9 and self.tab == TAB_LIKED:  # Tab: cycle liked filter
+                _LIKED_FILTER_NAMES = ["All", "Tracks", "Albums", "Artists", "Playlists"]
+                self.liked_filter = (self.liked_filter + 1) % len(_LIKED_FILTER_NAMES)
+                self.left_idx = 0
+                self.left_scroll = 0
+                self.toast(f"Liked: {_LIKED_FILTER_NAMES[self.liked_filter]}")
+                continue
 
             if ch == ord(" "):
                 self.toggle_mark_and_advance()
@@ -4516,7 +4699,7 @@ class App:
         except Exception:
             pass
         try:
-            save_liked(self.liked_tracks)
+            self._save_liked()
         except Exception:
             pass
         try:

@@ -27,7 +27,7 @@ from queue import Queue, Empty
 from typing import Any, Dict, List, Optional, Tuple
 
 APP_NAME = "tuifi"
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 DEFAULT_API = "https://api.monochrome.tf" # See https://github.com/monochrome-music/monochrome/blob/main/INSTANCES.md#official--community-apis
 
 def print_version(prog: str) -> None:
@@ -85,15 +85,15 @@ TAB_PLAYLISTS   = 8
 TAB_HISTORY     = 9
 
 TAB_NAMES = {
-    TAB_QUEUE:       "1 Queue",
-    TAB_SEARCH:      "2 Search",
-    TAB_RECOMMENDED: "3 Recommended",
-    TAB_MIX:         "4 Mix",
-    TAB_ARTIST:      "5 Artist",
-    TAB_ALBUM:       "6 Album",
-    TAB_LIKED:       "7 Liked",
-    TAB_PLAYLISTS:   "8 Playlists",
-    TAB_HISTORY:     "9 History",
+    TAB_QUEUE:       "Queue¹",
+    TAB_SEARCH:      "Search²",
+    TAB_RECOMMENDED: "Recommended³",
+    TAB_MIX:         "Mix⁴",
+    TAB_ARTIST:      "Artist⁵",
+    TAB_ALBUM:       "Album⁶",
+    TAB_LIKED:       "Liked⁷",
+    TAB_PLAYLISTS:   "Playlists⁸",
+    TAB_HISTORY:     "History⁹",
 }
 
 # Autoplay modes
@@ -294,12 +294,14 @@ class Album:
     title: str
     artist: str
     year: str
+    track_id: Optional[int] = None   # hint for ID resolution when id==0
 
 
 @dataclass
 class Artist:
     id: int
     name: str
+    track_id: Optional[int] = None   # hint for ID resolution when id==0
 
 
 class HiFiClient:
@@ -394,7 +396,9 @@ def load_liked() -> Tuple[List[Dict[str, Any]], set, List[Dict[str, Any]], set, 
     tracks = [d for d in data.get("favorites_tracks", []) if isinstance(d, dict) and d.get("id")]
     albums = [d for d in data.get("favorites_albums", []) if isinstance(d, dict) and d.get("id")]
     artists = [d for d in data.get("favorites_artists", []) if isinstance(d, dict) and d.get("id")]
-    playlists = [d for d in data.get("favorites_playlists", []) if isinstance(d, dict) and d.get("name")]
+    # Use "tuifi_liked_playlists" (not "favorites_playlists") so Monochrome.tf doesn't
+    # try to import playlists whose track details are not stored in liked.json.
+    playlists = [d for d in data.get("tuifi_liked_playlists", data.get("favorites_playlists", [])) if isinstance(d, dict) and d.get("name")]
     return (
         tracks, {int(d["id"]) for d in tracks},
         albums, {int(d["id"]) for d in albums},
@@ -413,7 +417,7 @@ def save_liked(
         "favorites_tracks": tracks,
         "favorites_albums": albums,
         "favorites_artists": artists,
-        "favorites_playlists": playlists,
+        "tuifi_liked_playlists": playlists,
     })
 
 
@@ -922,6 +926,8 @@ class App:
 
         self.left_idx = 0
         self.left_scroll = 0
+        self._tab_positions: Dict[int, Tuple[int, int]] = {}
+        self._prev_tab: int = self.tab
 
         self.marked_left_idx: set = set()
         self.marked_queue_idx: set = set()
@@ -1253,6 +1259,104 @@ class App:
             finally:
                 self._clear_loading(key)
                 
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _extract_mix_id_from_payload(self, payload: Dict[str, Any]) -> Optional[str]:
+        """Search common paths for any mix ID in an API payload (album, artist, track info)."""
+        for root in (payload.get("data") if isinstance(payload, dict) else None, payload):
+            if not isinstance(root, dict):
+                continue
+            mixes = root.get("mixes")
+            if isinstance(mixes, dict):
+                for v in mixes.values():
+                    if isinstance(v, str) and v.strip():
+                        return v.strip()
+        return None
+
+    def fetch_mix_from_album_async(self, album: Album) -> None:
+        """Load the Mix tab seeded from an album (uses first album track as seed)."""
+        self.mix_tracks = []
+        self.mix_title = ""
+        self.mix_track = album.title
+        key = f"mix:album:{album.id}:{time.time()}"
+        self._set_loading(key)
+
+        def worker() -> None:
+            try:
+                # Try mix ID embedded in album payload first
+                seed_track: Optional[Track] = None
+                mix_id: Optional[str] = None
+                if album.id and album.id > 0:
+                    try:
+                        payload = self.client.album(int(album.id))
+                        mix_id = self._extract_mix_id_from_payload(payload)
+                        if not mix_id:
+                            # Fall back: use first track from album as mix seed
+                            tracks = self._extract_tracks_from_album_payload(payload)
+                            if tracks:
+                                seed_track = tracks[0]
+                    except Exception:
+                        pass
+                if self._loading_key != key:
+                    return
+                if mix_id:
+                    mix_payload = self.client.mix(mix_id)
+                elif seed_track:
+                    mix_payload = self._fetch_track_mix_payload_for_track(seed_track)
+                else:
+                    self.toast("No mix for album")
+                    return
+                if not mix_payload or self._loading_key != key:
+                    return
+                tracks = self._extract_tracks_from_mix_payload(mix_payload)
+                self.mix_tracks = tracks
+                self.mix_title = f"{album.artist} — {album.title} (Mix)"
+                self.toast(f"Mix: {len(tracks)} tracks")
+            except Exception as e:
+                if self._loading_key == key:
+                    self.last_error = str(e)
+                    self.toast("Mix error")
+            finally:
+                self._clear_loading(key)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def fetch_mix_from_artist_async(self, artist: Artist) -> None:
+        """Load the Mix tab seeded from an artist."""
+        self.mix_tracks = []
+        self.mix_title = ""
+        self.mix_track = artist.name
+        key = f"mix:artist:{artist.id}:{time.time()}"
+        self._set_loading(key)
+
+        def worker() -> None:
+            try:
+                mix_id: Optional[str] = None
+                if artist.id and artist.id > 0:
+                    try:
+                        payload = self.client.artist(int(artist.id))
+                        mix_id = self._extract_mix_id_from_payload(payload)
+                    except Exception:
+                        pass
+                if not mix_id:
+                    self.toast("No mix for artist")
+                    return
+                if self._loading_key != key:
+                    return
+                mix_payload = self.client.mix(mix_id)
+                tracks = self._extract_tracks_from_mix_payload(mix_payload)
+                if self._loading_key != key:
+                    return
+                self.mix_tracks = tracks
+                self.mix_title = f"{artist.name} (Mix)"
+                self.toast(f"Mix: {len(tracks)} tracks")
+            except Exception as e:
+                if self._loading_key == key:
+                    self.last_error = str(e)
+                    self.toast("Mix error")
+            finally:
+                self._clear_loading(key)
+
         threading.Thread(target=worker, daemon=True).start()
 
     # ---------------------------------------------------------------------------
@@ -1637,19 +1741,20 @@ class App:
             if f == 4:
                 return ("liked_mixed", self.liked_playlist_cache)
             # f == 0: all categories with section separators
+            # order: Playlists, Artists, Albums, Tracks
             items: List[Any] = []
-            if self.liked_cache:
-                items.append(("sep", "Tracks"))
-                items.extend(self.liked_cache)
-            if self.liked_album_cache:
-                items.append(("sep", "Albums"))
-                items.extend(self.liked_album_cache)
-            if self.liked_artist_cache:
-                items.append(("sep", "Artists"))
-                items.extend(self.liked_artist_cache)
             if self.liked_playlist_cache:
                 items.append(("sep", "Playlists"))
                 items.extend(self.liked_playlist_cache)
+            if self.liked_artist_cache:
+                items.append(("sep", "Artists"))
+                items.extend(self.liked_artist_cache)
+            if self.liked_album_cache:
+                items.append(("sep", "Albums"))
+                items.extend(self.liked_album_cache)
+            if self.liked_cache:
+                items.append(("sep", "Tracks"))
+                items.extend(self.liked_cache)
             return ("liked_mixed", items)
         if self.tab == TAB_PLAYLISTS:
             if self.playlist_view_name is None:
@@ -1711,7 +1816,7 @@ class App:
         s = initial
         cur = len(s)
         curses.curs_set(1)
-        win.nodelay(False)
+        self.stdscr.nodelay(False)
         inner_w = max(1, box_w - 4 - label_len)
         input_x = 2 + label_len
         while True:
@@ -1723,20 +1828,30 @@ class App:
             win.addstr(1, input_x, display)
             win.move(1, input_x + min(cur - view_start, inner_w))
             win.refresh()
-            ch = win.getch()
-            if ch == 27:
-                win.nodelay(True)
-                while win.getch() != -1:
+            ch = self.stdscr.get_wch()
+            if isinstance(ch, str) and not ch.isprintable():
+                try:
+                    ch = ord(ch)
+                except TypeError:
+                    ch = -1
+            if isinstance(ch, str):
+                s = s[:cur] + ch + s[cur:]
+                cur += 1
+            elif ch == 27:
+                self.stdscr.nodelay(True)
+                while self.stdscr.getch() != -1:
                     pass
-                win.nodelay(False)
                 curses.curs_set(0)
-                self.stdscr.nodelay(True)
+                self._need_redraw = True
+                self._redraw_status_only = False
                 return None
-            if ch in (10, 13):
+            elif ch in (10, 13):
                 curses.curs_set(0)
                 self.stdscr.nodelay(True)
+                self._need_redraw = True
+                self._redraw_status_only = False
                 return s.strip()
-            if ch in (curses.KEY_BACKSPACE, 127, 8):
+            elif ch in (curses.KEY_BACKSPACE, 127, 8):
                 if cur > 0:
                     s = s[:cur - 1] + s[cur:]
                     cur -= 1
@@ -1764,13 +1879,6 @@ class App:
                     i -= 1
                 s = s[:i] + s[cur:]
                 cur = i
-            elif 32 <= ch <= 1114111:
-                try:
-                    c = chr(ch)
-                    s = s[:cur] + c + s[cur:]
-                    cur += 1
-                except Exception:
-                    pass
 
     def prompt_yes_no(self, title: str) -> bool:
         h, w = self.stdscr.getmaxyx()
@@ -1790,8 +1898,8 @@ class App:
             if ch in (ord("n"), ord("N"), 27):
                 return False
 
-    def pick_playlist(self, title: str) -> Optional[str]:
-        names = sorted(self.playlists.keys())
+    def pick_playlist(self, title: str, exclude: Optional[str] = None) -> Optional[str]:
+        names = [n for n in sorted(self.playlists.keys()) if n != exclude]
         if not names:
             self.toast("No playlists")
             return None
@@ -2236,15 +2344,24 @@ class App:
 
     def like_selected(self) -> None:
         if not self._queue_context():
-            # Artist tab: always like/unlike the whole artist
-            if self.tab == TAB_ARTIST:
-                if self.artist_ctx:
-                    self.toggle_like_artist(*self.artist_ctx)
-                else:
-                    self.toast("No artist")
+            _, items = self._left_items()
+            # Like all marked albums first (works in TAB_ARTIST and TAB_LIKED)
+            marked_albums = [items[i] for i in sorted(self.marked_left_idx)
+                             if 0 <= i < len(items) and isinstance(items[i], Album)]
+            if marked_albums:
+                for alb in marked_albums:
+                    self.toggle_like_album(alb)
+                self.toast(f"Liked/unliked {len(marked_albums)} albums")
+                self._need_redraw = True
+                self._redraw_status_only = False
                 return
             it = self._selected_left_item()
-            # Album header tuple
+            # Artist header row in artist_mixed view
+            if isinstance(it, tuple) and it[0] == "artist_header":
+                if self.artist_ctx:
+                    self.toggle_like_artist(*self.artist_ctx)
+                return
+            # Album header tuple (album_mixed)
             if isinstance(it, tuple) and len(it) == 2 and it[0] == "album_title" and isinstance(it[1], Album):
                 self.toggle_like_album(it[1])
                 return
@@ -2296,7 +2413,11 @@ class App:
             self.marked_queue_idx = set(range(len(self.queue_items)))
         else:
             typ, items = self._left_items()
-            self.marked_left_idx = {i for i, it in enumerate(items) if isinstance(it, Track)}
+            sel = self._selected_left_item()
+            if isinstance(sel, Album):
+                self.marked_left_idx = {i for i, it in enumerate(items) if isinstance(it, Album)}
+            else:
+                self.marked_left_idx = {i for i, it in enumerate(items) if isinstance(it, Track)}
         self.toast("Marked all")
         self._need_redraw = True
         self._redraw_status_only = False
@@ -2305,7 +2426,14 @@ class App:
         if self._queue_context():
             self.marked_queue_idx.clear()
         else:
-            self.marked_left_idx.clear()
+            typ, items = self._left_items()
+            sel = self._selected_left_item()
+            if isinstance(sel, Album):
+                self.marked_left_idx = {i for i in self.marked_left_idx
+                                        if not (0 <= i < len(items) and isinstance(items[i], Album))}
+            else:
+                self.marked_left_idx = {i for i in self.marked_left_idx
+                                        if not (0 <= i < len(items) and isinstance(items[i], Track))}
         self.toast("Unmarked")
         self._need_redraw = True
         self._redraw_status_only = False
@@ -2325,7 +2453,7 @@ class App:
             if not items:
                 return
             i = clamp(self.left_idx, 0, len(items) - 1)
-            if isinstance(items[i], Track):
+            if isinstance(items[i], (Track, Album, Artist)):
                 if i in self.marked_left_idx:
                     self.marked_left_idx.remove(i)
                 else:
@@ -2387,8 +2515,69 @@ class App:
                 self.toast("Error")
         threading.Thread(target=worker, daemon=True).start()
 
+    def _download_marked_albums_async(self, albums: List[Album]) -> None:
+        self.toast(f"Fetching {len(albums)} albums…")
+        def worker() -> None:
+            try:
+                all_tracks: List[Track] = []
+                for album in albums:
+                    aid = self._resolve_album_id_for_album(album)
+                    if aid:
+                        all_tracks.extend(self._fetch_album_tracks_by_album_id(aid))
+                if all_tracks:
+                    self.start_download_tracks(all_tracks)
+                else:
+                    self.toast("No tracks")
+            except Exception:
+                self.toast("Error")
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _enqueue_marked_albums_async(self, albums: List[Album], insert_after_playing: bool) -> None:
+        self.toast(f"Fetching {len(albums)} albums…")
+        def worker() -> None:
+            try:
+                all_tracks: List[Track] = []
+                for album in albums:
+                    aid = self._resolve_album_id_for_album(album)
+                    if aid:
+                        all_tracks.extend(self._fetch_album_tracks_by_album_id(aid))
+                if all_tracks:
+                    self._enqueue_tracks(all_tracks, insert_after_playing)
+                else:
+                    self.toast("No tracks")
+            except Exception:
+                self.toast("Error")
+        threading.Thread(target=worker, daemon=True).start()
+
     def enqueue_key(self, insert_after_playing: bool) -> None:
         if not self._queue_context():
+            typ, items = self._left_items()
+            marked_albums = [items[i] for i in sorted(self.marked_left_idx)
+                             if 0 <= i < len(items) and isinstance(items[i], Album)]
+            if marked_albums:
+                self._enqueue_marked_albums_async(marked_albums, insert_after_playing)
+                return
+            it = self._selected_left_item()
+            # Artist header row in Artist tab
+            if isinstance(it, tuple) and it[0] == "artist_header":
+                artist_id, name = it[1]
+                self._enqueue_artist_async(Artist(id=artist_id, name=name),
+                                           insert_after_playing)
+                return
+            # Album title row in Album tab
+            if isinstance(it, tuple) and it[0] == "album_title" and isinstance(it[1], Album):
+                self.enqueue_album_async(it[1], insert_after_playing)
+                return
+            if self.tab == TAB_LIKED:
+                if isinstance(it, Album):
+                    self.enqueue_album_async(it, insert_after_playing)
+                    return
+                if isinstance(it, Artist):
+                    self._enqueue_artist_async(it, insert_after_playing)
+                    return
+                if isinstance(it, str):
+                    self._enqueue_playlist_async(it, insert_after_playing)
+                    return
             if self.tab == TAB_ARTIST:
                 alb = self._selected_left_album()
                 if alb:
@@ -2413,6 +2602,540 @@ class App:
             tracks = [t for t in tracks if t is not None]
         self._enqueue_tracks(tracks, insert_after_playing)
 
+    def _enqueue_artist_async(self, artist: Artist, insert_after_playing: bool) -> None:
+        self.toast("Artist…")
+        def worker() -> None:
+            try:
+                tracks: List[Track] = []
+                aid = artist.id
+                if not aid and artist.track_id:
+                    try:
+                        info = self.client.info(artist.track_id)
+                        data = info.get("data") if isinstance(info, dict) else None
+                        if isinstance(data, dict):
+                            a = data.get("artist")
+                            if isinstance(a, dict) and str(a.get("id", "")).isdigit():
+                                aid = int(a["id"])
+                    except Exception:
+                        pass
+                if aid:
+                    payload = self.client.artist(aid)
+                    dicts: List[Dict[str, Any]] = []
+                    self._scan_for_track_dicts(payload, dicts, limit=600)
+                    for d in dicts:
+                        t = self._parse_track_obj(d)
+                        if t:
+                            tracks.append(t)
+                if not tracks:
+                    payload2 = self.client.search_tracks(artist.name, limit=300)
+                    a0 = artist.name.strip().lower()
+                    tracks = [t for t in self._extract_tracks_from_search(payload2)
+                              if t.artist.strip().lower() == a0]
+                if tracks:
+                    def _yr2(t: Track) -> int:
+                        y = year_norm(t.year)
+                        return int(y) if y.isdigit() else 9999
+                    tracks = sorted(tracks, key=lambda t: (_yr2(t), t.album.lower(), t.track_no or 9999))
+                    self._enqueue_tracks(tracks, insert_after_playing)
+                else:
+                    self.toast("No tracks")
+            except Exception:
+                self.toast("Error")
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _download_artist_async(self, artist: Artist) -> None:
+        self.toast("Artist DL…")
+        def worker() -> None:
+            try:
+                tracks: List[Track] = []
+                aid = artist.id
+                if not aid and artist.track_id:
+                    try:
+                        info = self.client.info(artist.track_id)
+                        data = info.get("data") if isinstance(info, dict) else None
+                        if isinstance(data, dict):
+                            a = data.get("artist")
+                            if isinstance(a, dict) and str(a.get("id", "")).isdigit():
+                                aid = int(a["id"])
+                    except Exception:
+                        pass
+                if aid:
+                    payload = self.client.artist(aid)
+                    dicts: List[Dict[str, Any]] = []
+                    self._scan_for_track_dicts(payload, dicts, limit=600)
+                    for d in dicts:
+                        t = self._parse_track_obj(d)
+                        if t:
+                            tracks.append(t)
+                if not tracks:
+                    payload2 = self.client.search_tracks(artist.name, limit=300)
+                    a0 = artist.name.strip().lower()
+                    tracks = [t for t in self._extract_tracks_from_search(payload2)
+                              if t.artist.strip().lower() == a0]
+                if tracks:
+                    self.start_download_tracks(tracks)
+                else:
+                    self.toast("No tracks")
+            except Exception:
+                self.toast("Error")
+        threading.Thread(target=worker, daemon=True).start()
+
+    def save_mix_as_playlist_async(self, name: str, seed: Any) -> None:
+        """Create a playlist from a mix seed (Track/Album/Artist), save to tab 8 and liked."""
+        now_ms = int(time.time() * 1000)
+        if name in self.playlists:
+            self.toast("Name exists")
+            return
+        self.playlists[name] = []
+        self.playlists_meta[name] = {"id": str(uuid.uuid4()), "createdAt": now_ms}
+        save_playlists(self.playlists, self.playlists_meta)
+        self.playlist_names = sorted(self.playlists.keys())
+        # Also mark as liked so it appears in Liked → Playlists & mixes
+        if name not in self.liked_playlist_ids:
+            self.liked_playlist_ids.add(name)
+            self.liked_playlists.insert(0, {"name": name, "id": self.playlists_meta[name]["id"]})
+            self._save_liked()
+        self.toast("Mix saved (loading tracks…)")
+        self._need_redraw = True
+        self._redraw_status_only = False
+
+        def worker() -> None:
+            try:
+                tracks: List[Track] = []
+                if isinstance(seed, Track):
+                    mix_payload = self._fetch_track_mix_payload_for_track(seed)
+                    if mix_payload:
+                        tracks = self._extract_tracks_from_mix_payload(mix_payload)
+                elif isinstance(seed, Album):
+                    payload = None
+                    if seed.id and seed.id > 0:
+                        try:
+                            payload = self.client.album(int(seed.id))
+                        except Exception:
+                            pass
+                    mix_id = self._extract_mix_id_from_payload(payload) if payload else None
+                    if mix_id:
+                        tracks = self._extract_tracks_from_mix_payload(self.client.mix(mix_id))
+                    elif payload:
+                        album_tracks = self._extract_tracks_from_album_payload(payload)
+                        if album_tracks:
+                            mix_payload = self._fetch_track_mix_payload_for_track(album_tracks[0])
+                            if mix_payload:
+                                tracks = self._extract_tracks_from_mix_payload(mix_payload)
+                elif isinstance(seed, Artist):
+                    artist_payload = None
+                    if seed.id and seed.id > 0:
+                        try:
+                            artist_payload = self.client.artist(int(seed.id))
+                        except Exception:
+                            pass
+                    mix_id = self._extract_mix_id_from_payload(artist_payload) if artist_payload else None
+                    if mix_id:
+                        tracks = self._extract_tracks_from_mix_payload(self.client.mix(mix_id))
+                    elif artist_payload:
+                        dicts: List[Dict[str, Any]] = []
+                        self._scan_for_track_dicts(artist_payload, dicts, limit=5)
+                        for d in dicts:
+                            t = self._parse_track_obj(d)
+                            if t:
+                                mix_payload = self._fetch_track_mix_payload_for_track(t)
+                                if mix_payload:
+                                    tracks = self._extract_tracks_from_mix_payload(mix_payload)
+                                    break
+                if tracks:
+                    self.playlists[name] = tracks
+                    save_playlists(self.playlists, self.playlists_meta)
+                    self.playlist_names = sorted(self.playlists.keys())
+                    self.toast(f"Mix '{name}': {len(tracks)} tracks saved")
+                else:
+                    self.toast(f"Mix '{name}' saved (no tracks found)")
+                self._need_redraw = True
+                self._redraw_status_only = False
+            except Exception as e:
+                self.last_error = str(e)
+                self.toast("Mix save error")
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def open_artist_by_id(self, artist_id: int, name: str) -> None:
+        ctx = Track(id=0, title="", artist=name, album="", year="????",
+                    track_no=0, artist_id=artist_id)
+        self.switch_tab(TAB_ARTIST, refresh=False)
+        self.fetch_artist_async(ctx)
+
+    def playlists_open_by_name(self, name: str) -> None:
+        self.switch_tab(TAB_PLAYLISTS, refresh=False)
+        self.playlist_names = sorted(self.playlists.keys())
+        self.left_idx = 0
+        self.left_scroll = 0
+        if name in self.playlists:
+            self.playlist_view_name = name
+            self.playlist_view_tracks = []
+            self.fetch_playlist_tracks_async(name)
+        else:
+            self.playlist_view_name = None
+            self.playlist_view_tracks = []
+            self._need_redraw = True
+            self._redraw_status_only = False
+
+    def pick_from_list(self, title: str, options: List[str]) -> int:
+        """Pager-like selection popup.
+
+        Normal mode: j/^n/^n/↓ navigate down; k/^k/^p/↑ navigate up;
+                     Enter(CR=13) confirms; letter shortcuts [x] trigger action;
+                     / enters filter mode; Esc cancels.
+        Filter mode: type to fuzzy-filter; Enter/^n confirm; Esc goes back;
+                     Backspace deletes (empty filter → back to normal mode).
+        """
+        if not options:
+            return -1
+
+        def _fuzzy(q: str, s: str) -> bool:
+            s_l = s.lower()
+            qi = 0
+            for c in s_l:
+                if qi < len(q) and c == q[qi]:
+                    qi += 1
+            return qi == len(q)
+
+        def _shortcut(label: str) -> Optional[str]:
+            """Extract single-char shortcut from trailing [x]."""
+            if len(label) >= 3 and label[-1] == "]" and label[-3] == "[":
+                return label[-2]
+            return None
+
+        h, w = self.stdscr.getmaxyx()
+        box_w = min(w - 6, max(62, max(len(s) for s in options) + 8))
+        box_h = min(h - 6, max(6, len(options) + 4))
+        y0 = (h - box_h) // 2
+        x0 = (w - box_w) // 2
+        for yy in range(y0, y0 + box_h):
+            self.stdscr.addstr(yy, x0, " " * box_w)
+        win = self.stdscr.derwin(box_h, box_w, y0, x0)
+        win.keypad(True)
+        idx = 0
+        filt = ""
+        filt_active = False
+        self.stdscr.nodelay(False)
+        try:
+            while True:
+                if filt_active and filt:
+                    visible: List[Tuple[int, str]] = [
+                        (i, s) for i, s in enumerate(options) if _fuzzy(filt.lower(), s)
+                    ]
+                else:
+                    visible = list(enumerate(options))
+                idx = clamp(idx, 0, max(0, len(visible) - 1))
+
+                win.erase()
+                win.box()
+                win.addstr(0, 2, f" {title} "[:box_w - 2], self.C(4))
+
+                # filter bar
+                if filt_active:
+                    filt_disp = f"/{filt}_"
+                    filt_attr = self.C(5)
+                    hint = f" {len(visible)}/{len(options)}  ^n/^p: navigate  Enter: select  Esc: back "
+                else:
+                    filt_disp = "/type to filter actions"
+                    filt_attr = self.C(10)
+                    hint = " j/k ^n/^p: navigate  /: filter  Esc: cancel "
+                win.addstr(1, 2, filt_disp[:box_w - 4], filt_attr)
+
+                inner_h = box_h - 4
+                scroll = max(0, idx - inner_h + 1) if idx >= inner_h else 0
+                for row in range(inner_h):
+                    fi = scroll + row
+                    if fi >= len(visible):
+                        break
+                    attr = curses.A_REVERSE if fi == idx else 0
+                    win.addstr(2 + row, 2, visible[fi][1][:box_w - 4].ljust(box_w - 4), attr)
+
+                win.addstr(box_h - 1, 2, hint[:box_w - 4], self.C(10))
+                win.refresh()
+
+                ch = self.stdscr.get_wch()
+                if isinstance(ch, str) and not ch.isprintable():
+                    try:
+                        ch = ord(ch)
+                    except TypeError:
+                        ch = -1
+
+                # Esc always closes the popup regardless of mode
+                if ch == 27:
+                    return -1
+
+                if filt_active:
+                    # ^N(14)/↓ navigate down; ^P(16)/^K(11)/↑ navigate up; Enter confirms
+                    nav_down = ch in (curses.KEY_DOWN, 14)
+                    nav_up   = ch in (curses.KEY_UP, 11, 16)
+                    if nav_down:
+                        idx = min(idx + 1, max(0, len(visible) - 1))
+                    elif nav_up:
+                        idx = max(idx - 1, 0)
+                    elif ch in (10, 13):                            # Enter = confirm
+                        return visible[idx][0] if visible else -1
+                    elif isinstance(ch, str):
+                        filt += ch
+                        idx = 0
+                    elif ch in (curses.KEY_BACKSPACE, 127, 8):
+                        filt = filt[:-1]
+                        if not filt:                                # empty filter → back to normal
+                            orig = visible[idx][0] if visible else 0
+                            filt_active = False
+                            idx = orig
+                else:
+                    # j/^N(14)/↓ navigate down; k/^P(16)/^K(11)/↑ navigate up
+                    nav_down = ch in (curses.KEY_DOWN, 14, "j")
+                    nav_up   = ch in (curses.KEY_UP, 11, 16, "k")
+                    if nav_down:
+                        idx = min(idx + 1, max(0, len(visible) - 1))
+                    elif nav_up:
+                        idx = max(idx - 1, 0)
+                    elif ch in (10, 13):                            # Enter (CR or LF) = confirm
+                        return visible[idx][0] if visible else -1
+                    elif ch in ("/", ":", "!"):                     # enter filter mode
+                        filt_active = True
+                        filt = ""
+                        idx = 0
+                    elif isinstance(ch, str) and ch not in ("j", "k", "/", ":", "!"):
+                        # shortcut key [x] matching
+                        for fi, (oi, label) in enumerate(visible):
+                            sc = _shortcut(label)
+                            if sc and sc == ch:
+                                return oi
+        finally:
+            self.stdscr.nodelay(True)
+            self._need_redraw = True
+            self._redraw_status_only = False
+
+    def like_popup_from_playing(self) -> None:
+        t = self._current_selection_track()
+        if not t:
+            self.toast("No track selected")
+            return
+        artist_id = t.artist_id or self.meta.artist_id.get(t.id, 0) or 0
+        options = [
+            f"Artist: {t.artist}",
+            f"Album: {t.album}",
+            "Store mix in playlist and like…",
+        ]
+        choice = self.pick_from_list("Like/unlike", options)
+        if choice == 0:
+            self.toggle_like_artist(artist_id, t.artist)
+        elif choice == 1:
+            album_obj = Album(
+                id=t.album_id or self.meta.album_id.get(t.id, 0) or 0,
+                title=t.album, artist=t.artist, year=t.year,
+            )
+            self.toggle_like_album(album_obj)
+        elif choice == 2:
+            default_name = f"(Mix) {t.artist} - {t.title}"
+            name = self.prompt_text("Mix name:", default_name)
+            if name:
+                self.save_mix_as_playlist_async(name, t)
+
+    def context_actions_popup(self) -> None:
+        """Show a context-sensitive actions popup for the current selection."""
+        it = self._selected_left_item() if not self._queue_context() else self._queue_selected_track()
+
+        # Unwrap artist_header tuple → Artist
+        if isinstance(it, tuple) and it[0] == "artist_header":
+            artist_id, name = it[1]
+            it = Artist(id=artist_id, name=name)
+        # Unwrap album_title tuple → Album
+        elif isinstance(it, tuple) and it[0] == "album_title" and isinstance(it[1], Album):
+            it = it[1]
+
+        # Determine context label and build action list
+        if isinstance(it, Track):
+            artist_id = it.artist_id or self.meta.artist_id.get(it.id, 0) or 0
+            album_id = it.album_id or self.meta.album_id.get(it.id, 0) or 0
+            liked_t = self.is_liked(it.id)
+            liked_ar = artist_id in self.liked_artist_ids
+            album_obj = Album(id=album_id, title=it.album, artist=it.artist, year=it.year,
+                              track_id=it.id if not album_id else None)
+            liked_al = album_obj.id in self.liked_album_ids
+            title = f"{it.artist} — {it.title}"
+            artist_obj = Artist(id=artist_id, name=it.artist,
+                                track_id=it.id if not artist_id else None)
+            options = [
+                "Go to Recommended tab [3]",
+                "Go to Mix tab [4]",
+                "Go to Artist tab [5]",
+                "Go to Album tab [6]",
+                "Enqueue [e]",
+                "Enqueue next [E]",
+                "Enqueue album [a]",
+                "Enqueue album next [A]",
+                "Enqueue all artist' tracks",
+                "Enqueue all artist' tracks next",
+                f"{'Unlike' if liked_t else 'Like'} track [l]",
+                f"{'Unlike' if liked_ar else 'Like'} artist",
+                f"{'Unlike' if liked_al else 'Like'} album",
+                "Add to playlist [p]",
+                "Download [d]",
+                "Download album [D]",
+                "Download artist",
+                "Save corresponding mix…",
+            ]
+            choice = self.pick_from_list(title, options)
+            if choice == 0:
+                self.switch_tab(TAB_RECOMMENDED, refresh=False)
+                self.fetch_recommended_async(it)
+            elif choice == 1:
+                self.switch_tab(TAB_MIX, refresh=False)
+                self.fetch_mix_async(it)
+            elif choice == 2:
+                self.switch_tab(TAB_ARTIST, refresh=False)
+                self.fetch_artist_async(it)
+            elif choice == 3:
+                self.open_album_from_track(it)
+            elif choice == 4:
+                self._enqueue_tracks([it], insert_after_playing=False)
+            elif choice == 5:
+                self._enqueue_tracks([it], insert_after_playing=True)
+            elif choice == 6:
+                self.enqueue_album_async(album_obj, insert_after_playing=False)
+            elif choice == 7:
+                self.enqueue_album_async(album_obj, insert_after_playing=True)
+            elif choice == 8:
+                self._enqueue_artist_async(artist_obj, insert_after_playing=False)
+            elif choice == 9:
+                self._enqueue_artist_async(artist_obj, insert_after_playing=True)
+            elif choice == 10:
+                self.toggle_like(it)
+            elif choice == 11:
+                self.toggle_like_artist(artist_id, it.artist)
+            elif choice == 12:
+                self.toggle_like_album(album_obj)
+            elif choice == 13:
+                self.playlists_add_tracks([it])
+            elif choice == 14:
+                self.start_download_tracks([it])
+            elif choice == 15:
+                def _dl_album() -> None:
+                    try:
+                        aid = self._resolve_album_id_for_album(album_obj)
+                        if aid:
+                            self.start_download_tracks(self._fetch_album_tracks_by_album_id(aid))
+                        else:
+                            self.toast("Album id?")
+                    except Exception:
+                        self.toast("Error")
+                threading.Thread(target=_dl_album, daemon=True).start()
+            elif choice == 16:
+                self._download_artist_async(artist_obj)
+            elif choice == 17:
+                default_name = f"(Mix) {it.artist} - {it.title}"
+                name = self.prompt_text("Mix name:", default_name)
+                if name:
+                    self.save_mix_as_playlist_async(name, it)
+
+        elif isinstance(it, Album):
+            liked_al = it.id in self.liked_album_ids
+            title = f"{it.artist} — {it.title}"
+            options = [
+                "Go to Mix tab [4]",
+                "Go to Artist tab [5]",
+                "Enqueue album [e]",
+                "Enqueue album next [E]",
+                f"{'Unlike' if liked_al else 'Like'} album [l]",
+                "Add to playlist [a]",
+                "Download album [d]",
+                "Save corresponding mix…",
+            ]
+            choice = self.pick_from_list(title, options)
+            if choice == 0:
+                self.switch_tab(TAB_MIX, refresh=False)
+                self.fetch_mix_from_album_async(it)
+            elif choice == 1:
+                fake = Track(id=0, title="", artist=it.artist, album="", year="????", track_no=0)
+                self.switch_tab(TAB_ARTIST, refresh=False)
+                self.fetch_artist_async(fake)
+            elif choice == 2:
+                self.enqueue_album_async(it, insert_after_playing=False)
+            elif choice == 3:
+                self.enqueue_album_async(it, insert_after_playing=True)
+            elif choice == 4:
+                self.toggle_like_album(it)
+            elif choice == 5:
+                self._add_album_to_playlist_async(it)
+            elif choice == 6:
+                def _dl_alb() -> None:
+                    try:
+                        aid = self._resolve_album_id_for_album(it)
+                        if aid:
+                            self.start_download_tracks(self._fetch_album_tracks_by_album_id(aid))
+                        else:
+                            self.toast("Album id?")
+                    except Exception:
+                        self.toast("Error")
+                threading.Thread(target=_dl_alb, daemon=True).start()
+            elif choice == 7:
+                default_name = f"(Mix) {it.artist} - {it.title}"
+                name = self.prompt_text("Mix name:", default_name)
+                if name:
+                    self.save_mix_as_playlist_async(name, it)
+
+        elif isinstance(it, Artist):
+            liked_ar = it.id in self.liked_artist_ids
+            title = it.name
+            options = [
+                "Go to Mix tab [4]",
+                "Go to Artist tab [5]",
+                "Enqueue all artist' tracks [e]",
+                "Enqueue all artist' tracks next [E]",
+                f"{'Unlike' if liked_ar else 'Like'} artist [l]",
+                "Add to playlist [a]",
+                "Download artist [d]",
+            ]
+            choice = self.pick_from_list(title, options)
+            if choice == 0:
+                self.switch_tab(TAB_MIX, refresh=False)
+                self.fetch_mix_from_artist_async(it)
+            elif choice == 1:
+                self.open_artist_by_id(it.id, it.name)
+            elif choice == 2:
+                self._enqueue_artist_async(it, insert_after_playing=False)
+            elif choice == 3:
+                self._enqueue_artist_async(it, insert_after_playing=True)
+            elif choice == 4:
+                self.toggle_like_artist(it.id, it.name)
+            elif choice == 5:
+                self._add_artist_to_playlist_async(it)
+            elif choice == 6:
+                self._download_artist_async(it)
+
+        elif isinstance(it, str):
+            # playlist name
+            liked_pl = it in self.liked_playlist_ids
+            title = it
+            options = [
+                "Open",
+                "Enqueue [e]",
+                f"{'Unlike' if liked_pl else 'Like'} playlist [l]",
+                "Add to playlist [a]",
+                "Download with subfolders [d]",
+                "Download flat [D]",
+            ]
+            choice = self.pick_from_list(title, options)
+            if choice == 0:
+                self.playlists_open_by_name(it)
+            elif choice == 1:
+                self._enqueue_playlist_async(it, insert_after_playing=False)
+            elif choice == 2:
+                self.toggle_like_playlist(it)
+            elif choice == 3:
+                self._add_playlist_to_playlist_async(it)
+            elif choice == 4:
+                self._download_playlist_async(it, flat=False)
+            elif choice == 5:
+                self._download_playlist_async(it, flat=True)
+
+        else:
+            self.toast("No selection")
+
     # ---------------------------------------------------------------------------
     # downloads
     # ---------------------------------------------------------------------------
@@ -2427,6 +3150,27 @@ class App:
         return "bin"
 
     def _download_worker(self, t: Track, remaining: int, current: int, total: int, set_progress) -> None:
+        self._download_worker_impl(t, remaining, current, total, set_progress, DOWNLOADS_DIR, flat=False)
+
+    def _make_playlist_download_worker(self, playlist_name: str, flat: bool):
+        root = os.path.join(DOWNLOADS_DIR, safe_filename(playlist_name))
+        def worker(t: Track, remaining: int, current: int, total: int, set_progress) -> None:
+            self._download_worker_impl(t, remaining, current, total, set_progress, root, flat=flat)
+        return worker
+
+    def _download_playlist_async(self, name: str, flat: bool) -> None:
+        tracks = list(self.playlists.get(name, []))
+        if not tracks:
+            self.toast("Nothing to download")
+            return
+        self.toast(f"DL playlist {'flat' if flat else 'structured'}…")
+        worker = self._make_playlist_download_worker(name, flat)
+        self.dl.progress_line = f"DL queued {len(tracks)}"
+        self._need_redraw = True
+        self._redraw_status_only = True
+        self.dl.enqueue(tracks, worker)
+
+    def _download_worker_impl(self, t: Track, remaining: int, current: int, total: int, set_progress, root: str, flat: bool) -> None:
         label = f"{t.artist[:16]} - {t.title[:16]}"
         count_s = f"[{current}/{total}]"
 
@@ -2460,13 +3204,16 @@ class App:
 
         ext = self._guess_ext(url)
         yv = self._track_year(t)
-        structure = str(self.settings.get("download_structure") or "{artist}/{artist} - {album} ({year})")
-        rel_path = structure.format(
-            artist=safe_filename(t.artist),
-            album=safe_filename(t.album),
-            year=yv if yv != "????" else "unknown",
-        )
-        out_dir = os.path.join(DOWNLOADS_DIR, rel_path)
+        if flat:
+            out_dir = root
+        else:
+            structure = str(self.settings.get("download_structure") or "{artist}/{artist} - {album} ({year})")
+            rel_path = structure.format(
+                artist=safe_filename(t.artist),
+                album=safe_filename(t.album),
+                year=yv if yv != "????" else "unknown",
+            )
+            out_dir = os.path.join(root, rel_path)
         mkdirp(out_dir)
         # filename pattern is configurable via settings["download_filename"]
         filename_pat = str(self.settings.get("download_filename") or "{track:02d}. {artist} - {title}")
@@ -2489,7 +3236,7 @@ class App:
 
         base_name = safe_filename(base_name_raw)
         out_path = os.path.join(out_dir, f"{base_name}.{ext}")
-        
+
         def cb(done: int, tot: Optional[int]) -> None:
             if tot and tot > 0:
                 pct = int((done * 100) / tot)
@@ -2607,6 +3354,17 @@ class App:
     def _resolve_album_id_for_album(self, album: Album) -> Optional[int]:
         if album.id and album.id > 0:
             return album.id
+        # Fast path: if we have a hint track id, ask the API directly
+        if album.track_id:
+            try:
+                info = self.client.info(album.track_id)
+                data = info.get("data") if isinstance(info, dict) else None
+                if isinstance(data, dict):
+                    alb = data.get("album")
+                    if isinstance(alb, dict) and str(alb.get("id", "")).isdigit():
+                        return int(alb["id"])
+            except Exception:
+                pass
         try:
             payload = self.client.search_tracks(f"{album.artist} {album.title}", limit=180)
             tracks = self._extract_tracks_from_search(payload)
@@ -2793,10 +3551,18 @@ class App:
                                 cur.id = t.album_id
                             if year_norm(cur.year) == "????" and year_norm(t.year) != "????":
                                 cur.year = t.year
-                    albums = sorted(best.values(), key=lambda a: (-(int(a.year) if year_norm(a.year) != "????" else 0), a.title.lower()))
+                    albums = sorted(best.values(), key=lambda a: (int(a.year) if year_norm(a.year) != "????" else 9999, a.title.lower()))
 
+                # Sort API-sourced albums chronologically too
+                albums = sorted(albums, key=lambda a: (int(a.year) if year_norm(a.year) != "????" else 9999, a.title.lower()))
                 self.artist_albums = albums[:500]
-                self.artist_tracks = tracks[:600]
+                def _yr(t: Track) -> int:
+                    y = year_norm(t.year)
+                    return int(y) if y.isdigit() else 9999
+                self.artist_tracks = sorted(
+                    tracks[:600],
+                    key=lambda t: (_yr(t), t.album.lower(), t.track_no or 9999),
+                )
                 if aid:
                     self.artist_ctx = (int(aid), ctx.artist)
                 self.toast("Artist")
@@ -3113,6 +3879,9 @@ class App:
             elif isinstance(it, Album):
                 if q in f"{it.artist} {it.title}".lower():
                     self.filter_hits.append(i)
+            elif isinstance(it, Artist):
+                if q in it.name.lower():
+                    self.filter_hits.append(i)
             elif isinstance(it, str):
                 if q in it.lower():
                     self.filter_hits.append(i)
@@ -3137,11 +3906,9 @@ class App:
         if not self.filter_hits:
             self.toast("No match")
             return
-        cur = self._get_filter_cursor()
-        j = next((k for k, idx in enumerate(self.filter_hits) if idx >= cur), 0)
-        self.filter_pos = j
-        self._set_filter_cursor(self.filter_hits[self.filter_pos])
-        self.toast(f"{self.filter_pos+1}/{len(self.filter_hits)}")
+        self.filter_pos = 0
+        self._set_filter_cursor(self.filter_hits[0])
+        self.toast(f"1/{len(self.filter_hits)}")
 
     def filter_next(self, delta: int) -> None:
         if not self.filter_hits:
@@ -3214,13 +3981,7 @@ class App:
         else:
             self.toast("Empty playlist")
 
-    def playlists_add_tracks(self, tracks: List[Track]) -> None:
-        if not tracks:
-            self.toast("No tracks")
-            return
-        name = self.pick_playlist("Add to playlist")
-        if not name:
-            return
+    def _add_tracks_to_named_playlist(self, tracks: List[Track], name: str) -> None:
         self.playlists.setdefault(name, []).extend(tracks)
         save_playlists(self.playlists, self.playlists_meta)
         self.toast(f"Added {len(tracks)}")
@@ -3229,11 +3990,131 @@ class App:
         if self.tab == TAB_PLAYLISTS and self.playlist_view_name == name:
             self.playlist_view_tracks = list(self.playlists[name])
 
+    def playlists_add_tracks(self, tracks: List[Track]) -> None:
+        if not tracks:
+            self.toast("No tracks")
+            return
+        name = self.pick_playlist("Add to playlist")
+        if not name:
+            return
+        self._add_tracks_to_named_playlist(tracks, name)
+
+    def _add_album_to_playlist_async(self, album: Album) -> None:
+        name = self.pick_playlist("Add to playlist")
+        if not name:
+            return
+        self.toast("Fetching album…")
+        def worker() -> None:
+            try:
+                aid = self._resolve_album_id_for_album(album)
+                if not aid:
+                    self.toast("Album id?")
+                    return
+                tracks = self._fetch_album_tracks_by_album_id(aid)
+                if tracks:
+                    self._add_tracks_to_named_playlist(tracks, name)
+                else:
+                    self.toast("No tracks")
+            except Exception:
+                self.toast("Error")
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _add_marked_albums_to_playlist_async(self, albums: List[Album]) -> None:
+        name = self.pick_playlist("Add to playlist")
+        if not name:
+            return
+        self.toast(f"Fetching {len(albums)} albums…")
+        def worker() -> None:
+            try:
+                all_tracks: List[Track] = []
+                for album in albums:
+                    aid = self._resolve_album_id_for_album(album)
+                    if aid:
+                        all_tracks.extend(self._fetch_album_tracks_by_album_id(aid))
+                if all_tracks:
+                    self._add_tracks_to_named_playlist(all_tracks, name)
+                else:
+                    self.toast("No tracks")
+            except Exception:
+                self.toast("Error")
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _add_artist_to_playlist_async(self, artist: Artist) -> None:
+        name = self.pick_playlist("Add to playlist")
+        if not name:
+            return
+        self.toast("Fetching artist…")
+        def worker() -> None:
+            try:
+                tracks: List[Track] = []
+                aid = artist.id
+                if not aid and artist.track_id:
+                    try:
+                        info = self.client.info(artist.track_id)
+                        data = info.get("data") if isinstance(info, dict) else None
+                        if isinstance(data, dict):
+                            a = data.get("artist")
+                            if isinstance(a, dict) and str(a.get("id", "")).isdigit():
+                                aid = int(a["id"])
+                    except Exception:
+                        pass
+                if aid:
+                    payload = self.client.artist(aid)
+                    dicts: List[Dict[str, Any]] = []
+                    self._scan_for_track_dicts(payload, dicts, limit=600)
+                    for d in dicts:
+                        t = self._parse_track_obj(d)
+                        if t:
+                            tracks.append(t)
+                if not tracks:
+                    payload2 = self.client.search_tracks(artist.name, limit=300)
+                    a0 = artist.name.strip().lower()
+                    tracks = [t for t in self._extract_tracks_from_search(payload2)
+                              if t.artist.strip().lower() == a0]
+                if tracks:
+                    def _yr(t: Track) -> int:
+                        y = year_norm(t.year)
+                        return int(y) if y.isdigit() else 9999
+                    tracks = sorted(tracks, key=lambda t: (_yr(t), t.album.lower(), t.track_no or 9999))
+                    self._add_tracks_to_named_playlist(tracks, name)
+                else:
+                    self.toast("No tracks")
+            except Exception:
+                self.toast("Error")
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _add_playlist_to_playlist_async(self, source_name: str) -> None:
+        tracks = list(self.playlists.get(source_name, []))
+        if not tracks:
+            self.toast("Empty playlist")
+            return
+        name = self.pick_playlist("Add to playlist", exclude=source_name)
+        if not name:
+            return
+        self._add_tracks_to_named_playlist(tracks, name)
+
     def playlists_add_from_context(self) -> None:
         if self._queue_context():
             tracks = self._marked_tracks_from_queue() or ([self._queue_selected_track()] if self._queue_selected_track() else [])
-        else:
-            tracks = self._marked_tracks_from_left() or ([self._selected_left_track()] if self._selected_left_track() else [])
+            self.playlists_add_tracks([t for t in tracks if t])
+            return
+        typ, items = self._left_items()
+        marked_albums = [items[i] for i in sorted(self.marked_left_idx)
+                         if 0 <= i < len(items) and isinstance(items[i], Album)]
+        if marked_albums:
+            self._add_marked_albums_to_playlist_async(marked_albums)
+            return
+        it = self._selected_left_item()
+        if isinstance(it, Artist):
+            self._add_artist_to_playlist_async(it)
+            return
+        if isinstance(it, Album):
+            self._add_album_to_playlist_async(it)
+            return
+        if isinstance(it, str):
+            self._add_playlist_to_playlist_async(it)
+            return
+        tracks = self._marked_tracks_from_left() or ([self._selected_left_track()] if self._selected_left_track() else [])
         self.playlists_add_tracks([t for t in tracks if t])
 
     # ---------------------------------------------------------------------------
@@ -3504,7 +4385,7 @@ class App:
             self.stdscr.addstr(y, x, " Press e/E on tracks in any tab to enqueue, q to show queue overlay"[:max(0, w - 1)].ljust(max(0, w - 1)), self.C(10))
             return
         if typ == "tracks" and n == 0 and self.tab == TAB_SEARCH:
-            self.stdscr.addstr(y, x, " Search term with /"[:max(0, w - 1)].ljust(max(0, w - 1)), self.C(10))
+            self.stdscr.addstr(y, x, " Search on TIDAL with /"[:max(0, w - 1)].ljust(max(0, w - 1)), self.C(10))
             return
         if typ == "tracks" and n == 0 and self.tab == TAB_RECOMMENDED:
             hint = (
@@ -3541,15 +4422,15 @@ class App:
                     )
             return
         if  n == 0 and self.tab == TAB_ARTIST:
-            self.stdscr.addstr(y, x, " Press 5 on a track in any tab to show its artist"[:max(0, w - 1)].ljust(max(0, w - 1)), self.C(10))
+            self.stdscr.addstr(y, x, " Press 5 on a track or album in any tab to show its artist"[:max(0, w - 1)].ljust(max(0, w - 1)), self.C(10))
             return
         if  n == 0 and self.tab == TAB_ALBUM:
             self.stdscr.addstr(y, x, " Press 6 on a track in any tab to show its album"[:max(0, w - 1)].ljust(max(0, w - 1)), self.C(10))
             return
         if n == 0 and self.tab == TAB_LIKED:
-            FILTER_NAMES = ["All", "Tracks", "Albums", "Artists", "Playlists"]
+            FILTER_NAMES = ["All", "Tracks", "Artists", "Albums", "Playlists"]
             fn = FILTER_NAMES[self.liked_filter]
-            self.stdscr.addstr(y, x, f" No liked {fn.lower()} — press l on items to like, Tab to filter"[:max(0, w - 1)].ljust(max(0, w - 1)), self.C(10))
+            self.stdscr.addstr(y, x, f"\n Nothing liked here — press l on items to like them\n Cycle sub-categories with [/] or ^←/^→"[:max(0, w - 1)].ljust(max(0, w - 1)), self.C(10))
             return
         if typ == "tracks" and n == 0 and self.tab == TAB_HISTORY:
             self.stdscr.addstr(y, x, " Play tracks to build history"[:max(0, w - 1)].ljust(max(0, w - 1)), self.C(10))
@@ -3593,9 +4474,24 @@ class App:
                 continue
 
             if typ == "artist_mixed":
+                if isinstance(it, tuple) and it[0] == "artist_header":
+                    artist_id, name = it[1]
+                    liked_artist = artist_id in self.liked_artist_ids
+                    base_attr = curses.A_REVERSE if selected else 0
+                    offs = self._draw_line_no(yy, x, i + 1, w) if self.show_numbers else 0
+                    px = x + offs; pw = max(0, w - offs - 1)
+                    if pw > 0:
+                        self.stdscr.addstr(yy, px, "  "[:pw], base_attr)
+                        px += 2; pw -= 2
+                    if pw > 0 and liked_artist:
+                        self.stdscr.addstr(yy, px, "♥ "[:pw], base_attr | self.C(14))
+                        px += 2; pw -= 2
+                    if pw > 0:
+                        self.stdscr.addstr(yy, px, name[:pw].ljust(pw)[:pw],
+                                           base_attr | self.C(7) | curses.A_BOLD)
+                    continue
                 if isinstance(it, tuple) and it[0] == "sep":
-                    extra = "──" if self.tab_align else ""
-                    line = f"{extra}── {it[1]} ──"
+                    line = f"──── {it[1]} ──" if self.tab_align else f"── {it[1]} ──"
                     offs = self._draw_line_no(yy, x, i + 1, w) if self.show_numbers else 0
                     self.stdscr.addstr(yy, x + offs, line[:max(0, w - offs - 1)].ljust(max(0, w - offs - 1)),
                                        self.C(4))
@@ -3603,11 +4499,23 @@ class App:
                 if isinstance(it, Album):
                     yv = year_norm(it.year)
                     ys = f", {yv}" if (self.show_track_year and yv != "????") else ""
-                    indent = "     " if self.tab_align else "   "
-                    line = f"{indent}{it.title}{ys}"
+                    liked_alb = it.id in self.liked_album_ids
+                    base_attr = curses.A_REVERSE if selected else 0
+                    marked = (i in self.marked_left_idx)
                     offs = self._draw_line_no(yy, x, i + 1, w) if self.show_numbers else 0
-                    self.stdscr.addstr(yy, x + offs, line[:max(0, w - offs - 1)].ljust(max(0, w - offs - 1)),
-                                       (curses.A_REVERSE if selected else 0) | self.C(8))
+                    px = x + offs; pw = max(0, w - offs - 1)
+                    indent_w = 5 if self.tab_align else 3
+                    pref = ("+" + " " * (indent_w - 1)) if marked else (" " * indent_w)
+                    if pw > 0:
+                        self.stdscr.addstr(yy, px, pref[:pw],
+                                           base_attr | (self.C(15) if marked else 0))
+                        px += indent_w; pw -= indent_w
+                    if pw > 0 and liked_alb:
+                        self.stdscr.addstr(yy, px, "♥ "[:pw], base_attr | self.C(14))
+                        px += 2; pw -= 2
+                    if pw > 0:
+                        self.stdscr.addstr(yy, px, f"{it.title}{ys}"[:pw].ljust(pw)[:pw],
+                                           base_attr | self.C(8))
                     continue
                 if isinstance(it, Track):
                     marked = (i in self.marked_left_idx)
@@ -3619,10 +4527,20 @@ class App:
                     a = it[1]
                     yv = year_norm(a.year)
                     ys = f", {yv}" if (self.show_track_year and yv != "????") else ""
-                    line = f"  {a.artist} — {a.title}{ys}"
+                    liked_alb = a.id in self.liked_album_ids
+                    base_attr = (curses.A_REVERSE if selected else 0) | self.C(8)
                     offs = self._draw_line_no(yy, x, i + 1, w) if self.show_numbers else 0
-                    self.stdscr.addstr(yy, x + offs, line[:max(0, w - offs - 1)].ljust(max(0, w - offs - 1)),
-                                       (curses.A_REVERSE if selected else 0) | self.C(8))
+                    px = x + offs; pw = max(0, w - offs - 1)
+                    if pw > 0:
+                        self.stdscr.addstr(yy, px, "  "[:pw], base_attr)
+                        px += 2; pw -= 2
+                    if pw > 0 and liked_alb:
+                        self.stdscr.addstr(yy, px, "♥ "[:pw],
+                                           (curses.A_REVERSE if selected else 0) | self.C(14))
+                        px += 2; pw -= 2
+                    if pw > 0:
+                        self.stdscr.addstr(yy, px,
+                                           f"{a.artist} — {a.title}{ys}"[:pw].ljust(pw)[:pw], base_attr)
                     continue
                 if isinstance(it, Track):
                     marked = (i in self.marked_left_idx)
@@ -3631,8 +4549,7 @@ class App:
 
             if typ == "liked_mixed":
                 if isinstance(it, tuple) and it[0] == "sep":
-                    extra = "──" if self.tab_align else ""
-                    line = f"{extra}── {it[1]} ──"
+                    line = f"── {it[1]} ──"
                     offs = self._draw_line_no(yy, x, i + 1, w) if self.show_numbers else 0
                     self.stdscr.addstr(yy, x + offs, line[:max(0, w - offs - 1)].ljust(max(0, w - offs - 1)), self.C(4))
                     continue
@@ -3643,31 +4560,68 @@ class App:
                 if isinstance(it, Album):
                     yv = year_norm(it.year)
                     ys = f", {yv}" if (self.show_track_year and yv != "????") else ""
-                    line = f"  {it.artist} — {it.title}{ys}"
+                    base_attr = curses.A_REVERSE if selected else 0
+                    marked = (i in self.marked_left_idx)
                     offs = self._draw_line_no(yy, x, i + 1, w) if self.show_numbers else 0
-                    self.stdscr.addstr(yy, x + offs, line[:max(0, w - offs - 1)].ljust(max(0, w - offs - 1)),
-                                       (curses.A_REVERSE if selected else 0) | self.C(8))
+                    px = x + offs; pw = max(0, w - offs - 1)
+                    pref = "+  " if marked else "   "
+                    if pw > 0:
+                        self.stdscr.addstr(yy, px, pref[:pw],
+                                           base_attr | (self.C(15) if marked else 0))
+                        px += 3; pw -= 3
+                    if pw > 0:
+                        self.stdscr.addstr(yy, px, "♥ "[:pw], base_attr | self.C(14))
+                        px += 2; pw -= 2
+                    if pw > 0:
+                        self.stdscr.addstr(yy, px,
+                                           f"{it.artist} — {it.title}{ys}"[:pw].ljust(pw)[:pw],
+                                           base_attr | self.C(8))
                     continue
                 if isinstance(it, Artist):
-                    line = f"  {it.name}"
+                    base_attr = curses.A_REVERSE if selected else 0
                     offs = self._draw_line_no(yy, x, i + 1, w) if self.show_numbers else 0
-                    self.stdscr.addstr(yy, x + offs, line[:max(0, w - offs - 1)].ljust(max(0, w - offs - 1)),
-                                       (curses.A_REVERSE if selected else 0) | self.C(8))
+                    px = x + offs; pw = max(0, w - offs - 1)
+                    if pw > 0:
+                        self.stdscr.addstr(yy, px, "   "[:pw], base_attr)
+                        px += 3; pw -= 3
+                    if pw > 0:
+                        self.stdscr.addstr(yy, px, "♥ "[:pw], base_attr | self.C(14))
+                        px += 2; pw -= 2
+                    if pw > 0:
+                        self.stdscr.addstr(yy, px, it.name[:pw].ljust(pw)[:pw],
+                                           base_attr | self.C(7))
                     continue
                 if isinstance(it, str):  # playlist name
                     count = len(self.playlists.get(it, []))
-                    display = f"  {it} ({count} tracks)" if count else f"  {it}"
+                    base_attr = curses.A_REVERSE if selected else 0
                     offs = self._draw_line_no(yy, x, i + 1, w) if self.show_numbers else 0
-                    self.stdscr.addstr(yy, x + offs, display[:max(0, w - offs - 1)].ljust(max(0, w - offs - 1)),
-                                       curses.A_REVERSE if selected else 0)
+                    px = x + offs; pw = max(0, w - offs - 1)
+                    if pw > 0:
+                        self.stdscr.addstr(yy, px, "   "[:pw], base_attr)
+                        px += 3; pw -= 3
+                    if pw > 0:
+                        self.stdscr.addstr(yy, px, "♥ "[:pw], base_attr | self.C(14))
+                        px += 2; pw -= 2
+                    if pw > 0:
+                        content = f"{it} ({count} tracks)" if count else it
+                        self.stdscr.addstr(yy, px, content[:pw].ljust(pw)[:pw], base_attr)
                     continue
 
             if typ == "playlists":
                 offs = self._draw_line_no(yy, x, i + 1, w) if self.show_numbers else 0
+                liked_pl = str(it) in self.liked_playlist_ids
                 count = len(self.playlists.get(str(it), []))
-                display = f"{it} ({count} tracks)" if count else str(it)
-                self.stdscr.addstr(yy, x + offs, display[:max(0, w - offs - 1)].ljust(max(0, w - offs - 1)),
-                                   curses.A_REVERSE if selected else 0)
+                content = f"{it} ({count} tracks)" if count else str(it)
+                base_attr = curses.A_REVERSE if selected else 0
+                px = x + offs; pw = max(0, w - offs - 1)
+                if liked_pl:
+                    if pw > 0:
+                        self.stdscr.addstr(yy, px, "♥ "[:pw], base_attr | self.C(14))
+                        px += 2; pw -= 2
+                    if pw > 0:
+                        self.stdscr.addstr(yy, px, content[:pw].ljust(pw)[:pw], base_attr)
+                else:
+                    self.stdscr.addstr(yy, px, content[:pw].ljust(pw)[:pw], base_attr)
                 continue
 
             offs = self._draw_line_no(yy, x, i + 1, w) if self.show_numbers else 0
@@ -3850,33 +4804,31 @@ class App:
             " Shift ←/→ seek 30s                                 e/E   enqueue to end/after current",
             " ,/<       prev track                               a     add selected/marked to playlist",
             " ./>       next track                               X     remove selected from playlist",
+            " Enter     play selected without adding to queue",
             " P         resume playback from last known position",
             "",
             "\x01 ACTIONS",
-            " Enter     play without adding to queue",
+            " :/!       contextual actions menu",
             " e/E       enqueue to end/after current",
-            " b         flag to play next (set priority N)",
+            " b         flag queue track to play next (set priority N)",
             " B         clear priority flags",
-            " 4         show mix based on selected track",
-            " 5/6       show tracks from artist/album of selected track",
+            " 4         show mix based on selected track or album",
+            " 5/6       show artist/album content relative to selected track",
             " D         download (selected, marked, album, all tracks of a playlist)",
             " Space     mark/unmark selected and advance",
             " U/u       mark/unmark all",
-            " l         like/unlike track/album (6)/artist (5)/playlist (8)",
-            " L         like/unlike playing",
-            " Tab       cycle liked category filter (on tab 7)",
-            " g/G       move cursor to top/bottom",
-            " j/k/↓/↑   move cursor down/up",
+            " l         like/unlike selected or marked: track, album, artist,  playlist",
+            " L         like/unlike playing track",
+            " *         contextual like/unlike menu for selected track: artist/album/playlist",
             " J/K       move track or marked tracks down/up",
             " x         remove track from queue/playlist",
             " X         clear queue",
-            " z         jump to currently playing",
             " i/I       show selected/playing info",
             " v/V       show lyrics of selected/playing",
             " o/O       open selected/playing in browser",
             "",
             "\x01 GENERAL",
-            " /         search online",
+            " /         search TIDAL",
             " f         filter term in current view",
             " (/)       prev/next filter hit",
             " Esc       close search/filter prompt",
@@ -3884,12 +4836,18 @@ class App:
             "",
             "\x01 VIEW",
             " q         mini-queue overlay",
-            " Tab       move cursor between main tabs and mini-queue overlay"
+            " Tab       move cursor between main view and mini-queue overlay",
+            " z         jump to currently playing",
+            " ^←/^→/1-9 cycle through main tabs and Liked sub-categories",
+            " [/]       navigate liked sub-categories (tab 7): All, Tracks, Artist, Album, Playlists",
+            " ;         go back to last tab"
+            " g/G       move cursor to top/bottom",
+            " j/k/↓/↑   move cursor down/up",
+            " ^↓/^↑     jump to adjacent sub-section (tabs 5 and 7) or to next artist/album in list",
             " c         color/bw",
             " w/y/d/n   album/year/duration/line number fields",
             " T         status bar",
             " \\         toggle TSV mode",
-            " z (queue) jump to playing",
             "",
             "\x01 TOGGLES",
             " A         autoplay mode (off, mix, recommended)",
@@ -3932,7 +4890,7 @@ class App:
         h, _ = self.stdscr.getmaxyx()
         inner_h = min(h - 8, box_h - 2)
         self._help_max_scroll = max(0, len(lines) - inner_h)
-        self._draw_overlay_box("Help  (? or q to close)", lines, self.help_scroll, box_w=96, box_h=box_h)
+        self._draw_overlay_box("Help  (? or q to close)", lines, self.help_scroll, box_w=97, box_h=box_h)
 
     def _draw_info(self) -> None:
         if self.info_album and not self.info_track:
@@ -4005,12 +4963,26 @@ class App:
             lines = self.lyrics_lines or ["(empty)"]
         self._draw_overlay_box(title[:80], lines, self.lyrics_scroll, box_w=84, box_h=30)
 
+    def _draw_liked_filter_bar(self, y: int, x: int, w: int) -> None:
+        FILTER_LABELS = ["All", "Tracks", "Artists", "Albums", "Playlists"]
+        self.stdscr.addstr(y, x, " " * max(0, w - 1), self.C(4))
+        cx = x + 1
+        for i, label in enumerate(FILTER_LABELS):
+            if cx >= w - 1:
+                break
+            attr = self.C(5) if i == self.liked_filter else self.C(4)
+            self.stdscr.addstr(y, cx, label[:max(0, w - cx - 1)], attr)
+            cx += len(label)
+            if i < len(FILTER_LABELS) - 1 and cx < w - 2:
+                self.stdscr.addstr(y, cx, "  ", self.C(4))
+                cx += 2
+
     def draw(self) -> None:
         if not self._need_redraw:
             return
 
         h, w = self.stdscr.getmaxyx()
-        top_h = 2
+        top_h = 3 if self.tab == TAB_LIKED else 2
         status_h = 2
         usable_h = h - top_h - status_h
 
@@ -4028,6 +5000,8 @@ class App:
         left_w = w if not self.queue_overlay else max(20, w - 44)
 
         self._draw_tabs(0, 0, w)
+        if self.tab == TAB_LIKED:
+            self._draw_liked_filter_bar(2, 0, w)
         self._draw_left(top_h, 0, usable_h, left_w)
 
         if self.queue_overlay:
@@ -4048,9 +5022,12 @@ class App:
     # tab switching
     # ---------------------------------------------------------------------------
     def switch_tab(self, t: int, refresh: bool = True) -> None:
+        # save current tab position before switching
+        self._tab_positions[self.tab] = (self.left_idx, self.left_scroll)
+        if t != self.tab:
+            self._prev_tab = self.tab
+
         self.tab = t
-        self.left_idx = 0
-        self.left_scroll = 0
         self._loading = False
         self._loading_key = ""
         self.show_help = False
@@ -4060,6 +5037,14 @@ class App:
             self.focus = "queue"
         elif self.focus == "queue" and not self.queue_overlay:
             self.focus = "left"
+
+        # tabs that fetch fresh network data reset cursor; others restore saved position
+        fresh_fetch = refresh and t in (TAB_RECOMMENDED, TAB_MIX, TAB_ARTIST, TAB_ALBUM)
+        if not fresh_fetch and t in self._tab_positions:
+            self.left_idx, self.left_scroll = self._tab_positions[t]
+        else:
+            self.left_idx = 0
+            self.left_scroll = 0
 
         if t == TAB_RECOMMENDED and refresh:
             ctx = self._selected_left_track() or self.current_track
@@ -4265,10 +5250,10 @@ class App:
                 continue
 
             if self.info_overlay:
-                if ch in (curses.KEY_DOWN, ord("j")):
+                if ch == ord("j"):
                     self.info_scroll += 1
                     continue
-                if ch in (curses.KEY_UP, ord("k")):
+                if ch == ord("k"):
                     self.info_scroll = max(0, self.info_scroll - 1)
                     continue
 
@@ -4317,17 +5302,60 @@ class App:
                     ord("9"): TAB_HISTORY,
                 }
                 t_num = mapping[ch]
-                if t_num == TAB_MIX:
-                    ctx = self._current_selection_track() or self.current_track
-                    self.switch_tab(TAB_MIX, refresh=False)
-                    self.fetch_mix_async(ctx)
-                elif t_num == TAB_ARTIST:
-                    ctx = self._current_selection_track() or self.current_track
-                    self.switch_tab(TAB_ARTIST, refresh=False)
-                    self.fetch_artist_async(ctx)
-                elif t_num == TAB_ALBUM:
-                    ctx = self._current_selection_track() or self.current_track
+                if t_num == TAB_RECOMMENDED:
+                    ctx = self._current_selection_track()
                     if ctx:
+                        self.switch_tab(TAB_RECOMMENDED, refresh=False)
+                        self.fetch_recommended_async(ctx)
+                    else:
+                        self.switch_tab(TAB_RECOMMENDED, refresh=False)
+                elif t_num == TAB_MIX:
+                    it = self._selected_left_item() if not self._queue_context() else None
+                    ctx = self._current_selection_track()
+                    if isinstance(it, Album):
+                        self.switch_tab(TAB_MIX, refresh=False)
+                        self.fetch_mix_from_album_async(it)
+                    elif isinstance(it, Artist):
+                        self.switch_tab(TAB_MIX, refresh=False)
+                        self.fetch_mix_from_artist_async(it)
+                    elif ctx:
+                        self.switch_tab(TAB_MIX, refresh=False)
+                        self.fetch_mix_async(ctx)
+                    else:
+                        self.switch_tab(TAB_MIX, refresh=False)
+
+                elif t_num == TAB_ARTIST:
+                    # Already in Artist tab: do nothing.
+                    if self.tab == TAB_ARTIST:
+                        continue
+                    # From Album tab, always resolve the artist from a real track
+                    # from the currently loaded album view, including when the
+                    # selected row is the ("album_title", Album) header tuple.
+                    if not self._queue_context() and self.tab == TAB_ALBUM:
+                        _typ, _items = self._left_items()
+                        album_ctx = next((x for x in _items if isinstance(x, Track)), None)
+                        if album_ctx:
+                            self.switch_tab(TAB_ARTIST, refresh=False)
+                            self.fetch_artist_async(album_ctx)
+                        else:
+                            self.switch_tab(TAB_ARTIST, refresh=False)
+                        continue
+                    it = self._selected_left_item() if not self._queue_context() else None
+                    ctx = self._current_selection_track()
+                    if isinstance(it, Artist):
+                        self.open_artist_by_id(it.id, it.name)
+                    elif ctx:
+                        self.switch_tab(TAB_ARTIST, refresh=False)
+                        self.fetch_artist_async(ctx)
+                    else:
+                        self.switch_tab(TAB_ARTIST, refresh=False)
+                        
+                elif t_num == TAB_ALBUM:
+                    it = self._selected_left_item() if not self._queue_context() else None
+                    ctx = self._current_selection_track()
+                    if isinstance(it, Album):
+                        self.open_album_from_album_obj(it)
+                    elif ctx:
                         self.open_album_from_track(ctx)
                     else:
                         self.switch_tab(TAB_ALBUM, refresh=False)
@@ -4457,12 +5485,186 @@ class App:
             if ch == ord("L"):
                 self.like_playing()
                 continue
-            if ch == 9 and self.tab == TAB_LIKED:  # Tab: cycle liked filter
-                _LIKED_FILTER_NAMES = ["All", "Tracks", "Albums", "Artists", "Playlists"]
-                self.liked_filter = (self.liked_filter + 1) % len(_LIKED_FILTER_NAMES)
+            if ch == ord("*"):
+                self.like_popup_from_playing()
+                continue
+            if ch in (ord(":"), ord("!")):
+                self.context_actions_popup()
+                continue
+            if ch == ord(";"):
+                if self._prev_tab != self.tab:
+                    self.switch_tab(self._prev_tab, refresh=False)
+                continue
+            if ch in (ord("["), ord("]")) and self.tab == TAB_LIKED:
+                _LIKED_FILTER_NAMES = ["All", "Tracks", "Artists", "Albums", "Playlists & mixes"]
+                delta = 1 if ch == ord("]") else -1
+                self.liked_filter = (self.liked_filter + delta) % len(_LIKED_FILTER_NAMES)
                 self.left_idx = 0
                 self.left_scroll = 0
                 self.toast(f"Liked: {_LIKED_FILTER_NAMES[self.liked_filter]}")
+                continue
+
+            # Ctrl+Left / Ctrl+Right: cycle through all tabs including Liked subtabs
+            # Sequence: Queue Search Recommended Mix Artist Album
+            #           Liked/All Liked/Tracks Liked/Artists Liked/Albums Liked/Playlists
+            #           Playlists History  (wraps)
+            def _is_ctrl_right(c: int) -> bool:
+                try:
+                    return curses.keyname(c) in (b"kRIT5", b"kRIT3")
+                except Exception:
+                    return c in (444, 560)
+            def _is_ctrl_left(c: int) -> bool:
+                try:
+                    return curses.keyname(c) in (b"kLFT5", b"kLFT3")
+                except Exception:
+                    return c in (443, 545)
+            if isinstance(ch, int) and (_is_ctrl_left(ch) or _is_ctrl_right(ch)):
+                _NAV_SEQ = [
+                    (TAB_QUEUE, 0), (TAB_SEARCH, 0),
+                    (TAB_RECOMMENDED, 0), (TAB_MIX, 0),
+                    (TAB_ARTIST, 0), (TAB_ALBUM, 0),
+                    (TAB_LIKED, 0), (TAB_LIKED, 1), (TAB_LIKED, 2),
+                    (TAB_LIKED, 3), (TAB_LIKED, 4),
+                    (TAB_PLAYLISTS, 0), (TAB_HISTORY, 0),
+                ]
+                cur_f = self.liked_filter if self.tab == TAB_LIKED else 0
+                cur_pos = next(
+                    (i for i, (t, f) in enumerate(_NAV_SEQ)
+                     if t == self.tab and f == cur_f), 0)
+                delta = 1 if _is_ctrl_right(ch) else -1
+                nxt_tab, nxt_f = _NAV_SEQ[(cur_pos + delta) % len(_NAV_SEQ)]
+                if nxt_tab == TAB_LIKED:
+                    # Switch to liked tab and set filter without full refresh
+                    if self.tab != TAB_LIKED:
+                        self.switch_tab(TAB_LIKED, refresh=False)
+                        self.fetch_liked_async()
+                    self.liked_filter = nxt_f
+                    self.left_idx = 0
+                    self.left_scroll = 0
+                    _LIKED_FILTER_NAMES = ["All", "Tracks", "Artists", "Albums", "Playlists & mixes"]
+                    self.toast(f"Liked: {_LIKED_FILTER_NAMES[nxt_f]}")
+                else:
+                    self.switch_tab(nxt_tab, refresh=True)
+                self._need_redraw = True
+                continue
+
+            # Ctrl+Down / Ctrl+Up: jump between album groups / sections
+            def _is_ctrl_down(c: int) -> bool:
+                try: return curses.keyname(c) in (b"kDN5", b"kDN3")
+                except Exception: return False
+            def _is_ctrl_up(c: int) -> bool:
+                try: return curses.keyname(c) in (b"kUP5", b"kUP3")
+                except Exception: return False
+            if isinstance(ch, int) and (_is_ctrl_down(ch) or _is_ctrl_up(ch)):
+                _dir = 1 if _is_ctrl_down(ch) else -1
+
+                # Group key for album-boundary detection: (year, album)
+                def _gkey(t: Track) -> tuple:
+                    return (year_norm(t.year), t.album.lower())
+
+                def _alb_down(lst: list, cur: int) -> int:
+                    if not (0 <= cur < len(lst)) or not isinstance(lst[cur], Track):
+                        return cur
+                    key = _gkey(lst[cur])
+                    i = cur + 1
+                    while i < len(lst) and isinstance(lst[i], Track):
+                        if _gkey(lst[i]) != key:
+                            return i
+                        i += 1
+                    return cur  # no next group
+
+                def _alb_up(lst: list, cur: int) -> int:
+                    if not (0 <= cur < len(lst)) or not isinstance(lst[cur], Track):
+                        return cur
+                    key = _gkey(lst[cur])
+                    i = cur - 1
+                    while i >= 0 and isinstance(lst[i], Track) and _gkey(lst[i]) == key:
+                        i -= 1
+                    start = i + 1
+                    if start < cur:
+                        return start  # jump to start of current group
+                    if i >= 0 and isinstance(lst[i], Track):
+                        prev_key = _gkey(lst[i])
+                        while i > 0 and isinstance(lst[i - 1], Track) and _gkey(lst[i - 1]) == prev_key:
+                            i -= 1
+                        return i
+                    return cur  # no prev group
+
+                if self._queue_context():
+                    # Jump between album groups in queue
+                    _q = self.queue_items
+                    _c = self.queue_cursor
+                    _n = _alb_down(_q, _c) if _dir > 0 else _alb_up(_q, _c)
+                    self.queue_cursor = clamp(_n, 0, max(0, len(_q) - 1))
+                    self._need_redraw = True
+                else:
+                    _typ, _items = self._left_items()
+                    _cur = self.left_idx
+                    _new = _cur
+
+                    if self.tab == TAB_LIKED and self.liked_filter == 0:
+                        # sep-based section jump
+                        if _dir > 0:
+                            _i = _cur + 1
+                            while _i < len(_items):
+                                if isinstance(_items[_i], tuple) and _items[_i][0] == "sep":
+                                    _j = _i + 1
+                                    while _j < len(_items) and isinstance(_items[_j], tuple) and _items[_j][0] == "sep":
+                                        _j += 1
+                                    _new = min(_j, len(_items) - 1)
+                                    break
+                                _i += 1
+                            else:
+                                _new = len(_items) - 1
+                        else:
+                            # Walk back to the sep that starts our section, then back to the previous sep
+                            _i = _cur - 1
+                            while _i >= 0 and not (isinstance(_items[_i], tuple) and _items[_i][0] == "sep"):
+                                _i -= 1
+                            # _i is now at current section's sep (or -1)
+                            if _i > 0:
+                                _i -= 1
+                                while _i >= 0 and not (isinstance(_items[_i], tuple) and _items[_i][0] == "sep"):
+                                    _i -= 1
+                                # _i is at prev section's sep; jump to its first non-sep item
+                                _j = (_i + 1) if _i >= 0 else 0
+                                while _j < len(_items) and isinstance(_items[_j], tuple) and _items[_j][0] == "sep":
+                                    _j += 1
+                                _new = _j
+                            # if _i <= 0 we're already in the first section, stay
+
+                    elif self.tab == TAB_ARTIST:
+                        # Artist tab: full-cycle — artist_header ↔ Albums ↔ Tracks (album-groups)
+                        _artist_idx  = 0 if (_items and isinstance(_items[0], tuple) and _items[0][0] == "artist_header") else -1
+                        _first_album = next((i for i, x in enumerate(_items) if isinstance(x, Album)), len(_items))
+                        _first_track = next((i for i, x in enumerate(_items) if isinstance(x, Track)), len(_items))
+                        _last_album  = next((i for i in range(len(_items) - 1, -1, -1) if isinstance(_items[i], Album)), -1)
+                        _cur_item    = _items[_cur] if 0 <= _cur < len(_items) else None
+
+                        if _dir > 0:
+                            if isinstance(_cur_item, tuple) and _cur_item[0] == "artist_header":
+                                _new = _first_album if _first_album < len(_items) else _first_track
+                            elif isinstance(_cur_item, Album):
+                                _new = _first_track if _first_track < len(_items) else _cur
+                            elif isinstance(_cur_item, Track):
+                                _new = _alb_down(_items, _cur)
+                        else:
+                            if isinstance(_cur_item, Album):
+                                _new = max(0, _artist_idx) if _artist_idx >= 0 else 0
+                            elif isinstance(_cur_item, Track):
+                                _n2 = _alb_up(_items, _cur)
+                                if _n2 == _cur:
+                                    # first track of first group → jump to last album
+                                    _new = _last_album if _last_album >= 0 else max(0, _artist_idx if _artist_idx >= 0 else 0)
+                                else:
+                                    _new = _n2
+
+                    else:
+                        # All other tabs: plain album-group jump within the item list
+                        _new = _alb_down(_items, _cur) if _dir > 0 else _alb_up(_items, _cur)
+
+                    self.left_idx = clamp(_new, 0, max(0, len(_items) - 1))
+                    self._need_redraw = True
                 continue
 
             if ch == ord(" "):
@@ -4615,6 +5817,13 @@ class App:
                 continue
 
             if ch == ord("D"):
+                if not self._queue_context():
+                    typ, items = self._left_items()
+                    marked_albums = [items[i] for i in sorted(self.marked_left_idx)
+                                     if 0 <= i < len(items) and isinstance(items[i], Album)]
+                    if marked_albums:
+                        self._download_marked_albums_async(marked_albums)
+                        continue
                 if not self._queue_context() and self.tab == TAB_ALBUM and self._selected_album_title_line():
                     self.start_download_tracks(list(self.album_tracks))
                     continue
@@ -4683,6 +5892,17 @@ class App:
                 if self._queue_context():
                     self.play_queue_index(self.queue_cursor)
                     continue
+                if self.tab == TAB_LIKED:
+                    it_liked = self._selected_left_item()
+                    if isinstance(it_liked, Artist):
+                        self.open_artist_by_id(it_liked.id, it_liked.name)
+                        continue
+                    if isinstance(it_liked, Album):
+                        self.open_album_from_album_obj(it_liked)
+                        continue
+                    if isinstance(it_liked, str):
+                        self.playlists_open_by_name(it_liked)
+                        continue
                 if self.tab == TAB_ARTIST:
                     alb = self._selected_left_album()
                     if alb:
@@ -4759,6 +5979,7 @@ def parse_args(argv: List[str]) -> Dict[str, Any]:
 
 
 def main(argv: List[str]) -> int:
+    locale.setlocale(locale.LC_ALL, "")
     args = parse_args(argv)
 
     if not os.path.isdir(STATE_DIR):
@@ -4781,6 +6002,7 @@ def main(argv: List[str]) -> int:
             app.focus = "queue"
         app.run()
 
+    os.environ.setdefault("ESCDELAY", "25")  # shorten ncurses ESC wait (ms)
     curses.wrapper(wrapped)
     return 0
 

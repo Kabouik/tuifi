@@ -20,18 +20,19 @@ _Click to play the demo video._
 
 # Features
 
--   Playback control (play, pause, resume, seek, volume, repeat, shuffle)
--   Queue management with reordering and priority flags
--   Search, browse artists/albums, recommendations, mix
--   Autoplay mix or recommendations (infinite queue)
--   Playlists (create, delete, add/remove tracks)
--   Like tracks
--   Lyrics display
--   Download individual tracks, multiple tracks (e.g., marked, or from a playlist), or full albums
--   Playback history
--   Customizable (colors, optional TSV mode, show/hide fields, file hierarchy for downloads, autoplay buffer)
--   Keyboard-oriented control
--   Accountless but playlists and liked songs are kept in standard json files that some TIDAL HiFi web players can import
+- Playback control (play, pause, resume, seek, volume, repeat, shuffle)
+- Queue management with reordering and priority flags
+- Search, browse artists/albums, recommendations, mix
+- Autoplay mix or recommendations (infinite queue)
+- Browse similar artists
+- Playlists (create, delete, add/remove tracks)
+- Like tracks, albums, artists, and playlists
+- Lyrics display
+- Download individual or multiple tracks (e.g., marked, albums, playlists), or full artist discographies
+- Playback history
+- Customizable (colors, optional TSV mode, show/hide fields, file hierarchy for downloads, autoplay buffer)
+- Keyboard-oriented control
+- Accountless but playlists and liked songs are kept in standard json files that some TIDAL HiFi web players can import
 
 <a id="org617893b"></a>
 
@@ -62,7 +63,6 @@ Settings are stored in `settings.json` and automatically updated upon using togg
 Config directory per platform:
 
 <table border="2" cellspacing="0" cellpadding="6" rules="groups" frame="hsides">
-
 
 <colgroup>
 <col  class="org-left" />
@@ -98,7 +98,7 @@ Config directory per platform:
 </tbody>
 </table>
 
-`settings.json` can be edited to change UI options, colours, metadata field widths, autoplay buffer size, download destinations and naming conventions, _etc._
+`settings.json` can be edited to change UI options, colours, metadata field widths, autoplay buffer size, download destinations and naming conventions, TIDAL HiFi API URL, _etc._
 
 Other state files stored in the same directory:
 
@@ -113,7 +113,7 @@ Other state files stored in the same directory:
 
 # Development note
 
-This program was developed with significant AI assistance. I take no particular pride in that, or the resulting code, but it was a week-end project and I wanted something usable quickly rather than something to be proud of architecturally.
+This program was developed with significant AI assistance. I take no particular pride in that, or the resulting code, but it is fair to be honest about it. It was a week-end project and I wanted something usable quickly rather than something to be proud of architecturally.
 
 <a id="org046119a"></a>
 

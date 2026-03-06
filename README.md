@@ -139,3 +139,6 @@ Hence, any copyright infringements or DMCA claims in this project's regards are 
 
 [GNU Affero General Public License v3.0](https://www.gnu.org/licenses/agpl-3.0.html)
 
+# Mirrors
+
+https://git.sr.ht/~matf/tuifi, https://codeberg.org/kabouik/tuifi, https://github.com/kabouik/tuifi

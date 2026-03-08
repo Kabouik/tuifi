@@ -16,7 +16,7 @@ A feature-rich-ish TUI music player built on top of [[https://github.com/binimum
 - Queue management with reordering and priority flags
 - Search, browse artists/albums, recommendations, mix
 - Autoplay mix or recommendations (infinite queue)
-- Browse similar artists
+- Find similar artists
 - Playlists (create, delete, add/remove tracks)
 - Like tracks, albums, artists, and playlists
 - Lyrics display
@@ -24,7 +24,7 @@ A feature-rich-ish TUI music player built on top of [[https://github.com/binimum
 - Playback history
 - Customizable (colors, optional TSV mode, show/hide fields, file hierarchy for downloads, autoplay buffer)
 - Keyboard-oriented control
-- Accountless but playlists and liked songs are kept in standard json files that some TIDAL HiFi web players can import
+- Accountless: playlists, liked songs and queue are kept in standard json files that some TIDAL HiFi web players can import
 
 * Usage
 
@@ -41,8 +41,36 @@ Press ? in tuifi for keybindings
 
 * Requirements
 
-- Python 3.7+
+- Python 3.7+ (3.13 on Windows)
 - [[https://mpv.io][mpv]]
+
+* Installation
+
+=tuifi= so far is a standalone script and requires no installation, you can just clone this repository and execute the script:
+
+#+begin_src shell
+git clone https://git.sr.ht/~matf/tuifi cd tuifi
+./tuifi
+
+# Or add it to your $PATH so that tuifi becomes a system wide command, e.g. with:
+mkdir -p ~/.local/bin
+ln -s /path/to/tuifi/tuifi ~/.local/bin/tuifi
+#+end_src
+
+** Windwos peculiarities
+
+The =ncurses= libary does not exist officially for Windows, but =windows-curses= can be used. It is available /via/ =pip= up to Python 3.13. The easiest way to install a specific Python version on Windows as well as the other dependency, =mpv=, is probably using [[https://chocolatey.org/install][Chocolatey]]:
+
+#+begin_src shell
+choco install python313 mpv git -y # In an admin PowerShell
+python3.13.exe -m pip install windows-curses
+#+end_src
+
+Then make a shortcut that uses Python 3.13 specifically, or the following command:
+
+#+begin_src shell
+python3.13.exe /path/to/tuifi
+#+end_src
 
 * Configuration
 

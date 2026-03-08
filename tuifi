@@ -6111,7 +6111,7 @@ class App:
 
         if self.tab == TAB_QUEUE:
             self.focus = "queue"
-        elif self.focus == "queue" and not self.queue_overlay:
+        elif self.focus == "queue":
             self.focus = "left"
 
         # tabs that fetch fresh network data reset cursor; others restore saved position

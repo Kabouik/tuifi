@@ -1268,7 +1268,11 @@ class App:
 
     def _extract_mix_id_from_payload(self, payload: Dict[str, Any]) -> Optional[str]:
         """Search common paths for any mix ID in an API payload (album, artist, track info)."""
-        for root in (payload.get("data") if isinstance(payload, dict) else None, payload):
+        if not isinstance(payload, dict):
+            return None
+        # Roots to search: payload["data"], payload["artist"], payload itself
+        roots = [payload.get("data"), payload.get("artist"), payload]
+        for root in roots:
             if not isinstance(root, dict):
                 continue
             mixes = root.get("mixes")
@@ -1341,6 +1345,10 @@ class App:
                     try:
                         payload = self.client.artist(int(artist.id))
                         mix_id = self._extract_mix_id_from_payload(payload)
+                        if not mix_id:
+                            # ?f= may omit mixes; try ?id= explicitly
+                            payload2 = http_get_json(self.client._u("/artist/", {"id": int(artist.id)}))
+                            mix_id = self._extract_mix_id_from_payload(payload2)
                     except Exception:
                         pass
                 if not mix_id:
@@ -3083,7 +3091,7 @@ class App:
             self._need_redraw = True
             self._redraw_status_only = False
 
-    def pick_from_list(self, title: str, options: List[str]) -> int:
+    def pick_from_list(self, title: str, options: List[str], simple: bool = False) -> int:
         """Pager-like selection popup.
 
         Normal mode: j/^n/^n/↓ navigate down; k/^k/^p/↑ navigate up;
@@ -3111,7 +3119,8 @@ class App:
 
         h, w = self.stdscr.getmaxyx()
         box_w = min(w - 6, max(52, max(len(s) for s in options) + 8))
-        box_h = min(h - 6, max(6, len(options) + 4))
+        extra_rows = 3 if simple else 4   # title + hint (simple: no filter bar)
+        box_h = min(h - 6, max(6, len(options) + extra_rows))
         y0 = (h - box_h) // 2
         x0 = (w - box_w) // 2
         for yy in range(y0, y0 + box_h):
@@ -3124,7 +3133,7 @@ class App:
         self.stdscr.nodelay(False)
         try:
             while True:
-                if filt_active and filt:
+                if not simple and filt_active and filt:
                     visible: List[Tuple[int, str]] = [
                         (i, s) for i, s in enumerate(options) if _fuzzy(filt.lower(), s)
                     ]
@@ -3136,27 +3145,32 @@ class App:
                 win.box()
                 win.addstr(0, 2, f" {title} "[:box_w - 2], self.C(4))
 
-                # filter bar
-                if filt_active:
-                    filt_disp = f"/{filt}_"
-                    filt_attr = self.C(5)
-                    hint = f" {len(visible)}/{len(options)}  ^n/^p: navigate  Enter: select  Esc: back "
-                else:
-                    filt_disp = "Type / to filter"
-                    filt_attr = self.C(10)
-                    hint = " j/k ^n/^p: navigate   /: filter   Esc/q: close "
-                win.addstr(1, 2, filt_disp[:box_w - 4], filt_attr)
+                if not simple:
+                    # filter bar
+                    if filt_active:
+                        filt_disp = f"/{filt}_"
+                        filt_attr = self.C(5)
+                        hint = f" {len(visible)}/{len(options)}  ^n/^p: navigate  Enter: select  Esc: back "
+                    else:
+                        filt_disp = "Type / to filter"
+                        filt_attr = self.C(10)
+                        hint = " j/k ^n/^p: navigate   /: filter   Esc/q: close "
+                    win.addstr(1, 2, filt_disp[:box_w - 4], filt_attr)
 
-                inner_h = box_h - 4
+                item_row = 1 if simple else 2
+                inner_h = box_h - (3 if simple else 4)
                 scroll = max(0, idx - inner_h + 1) if idx >= inner_h else 0
                 for row in range(inner_h):
                     fi = scroll + row
                     if fi >= len(visible):
                         break
                     attr = curses.A_REVERSE if fi == idx else 0
-                    win.addstr(2 + row, 2, visible[fi][1][:box_w - 4].ljust(box_w - 4), attr)
+                    win.addstr(item_row + row, 2, visible[fi][1][:box_w - 4].ljust(box_w - 4), attr)
 
-                win.addstr(box_h - 1, 2, hint[:box_w - 4], self.C(10))
+                if simple:
+                    win.addstr(box_h - 1, 2, " j/k ^n/^p: navigate   Enter: select   Esc/q: close "[:box_w - 4], self.C(10))
+                else:
+                    win.addstr(box_h - 1, 2, hint[:box_w - 4], self.C(10))
                 win.refresh()
 
                 ch = self.stdscr.get_wch()
@@ -3170,7 +3184,7 @@ class App:
                 if ch == 27:
                     return -1
 
-                if filt_active:
+                if not simple and filt_active:
                     # ^N(14)/↓ navigate down; ^P(16)/^K(11)/↑ navigate up; Enter confirms
                     nav_down = ch in (curses.KEY_DOWN, 14)
                     nav_up   = ch in (curses.KEY_UP, 11, 16)
@@ -3201,11 +3215,11 @@ class App:
                         return visible[idx][0] if visible else -1
                     elif ch in ("q", "c"):                          # close
                         return -1
-                    elif ch in ("/", ":", "!"):                     # enter filter mode
+                    elif not simple and ch in ("/", ":", "!"):      # enter filter mode
                         filt_active = True
                         filt = ""
                         idx = 0
-                    elif isinstance(ch, str) and ch not in ("j", "k", "/", ":", "!", "q", "c"):
+                    elif not simple and isinstance(ch, str) and ch not in ("j", "k", "/", ":", "!", "q", "c"):
                         # shortcut key [x] matching
                         for fi, (oi, label) in enumerate(visible):
                             sc = _shortcut(label)
@@ -3227,7 +3241,7 @@ class App:
             f"Album: {t.album}",
             "Store mix in playlist and like…",
         ]
-        choice = self.pick_from_list("Like/unlike", options)
+        choice = self.pick_from_list("Like/unlike", options, simple=True)
         if choice == 0:
             self.toggle_like_artist(artist_id, t.artist)
         elif choice == 1:
@@ -3348,6 +3362,7 @@ class App:
             options = [
                 "Go to Mix tab [4]",
                 "Go to Artist tab [5]",
+                "Go to Album tab [6]",
                 "Enqueue album [e]",
                 "Enqueue album next [E]",
                 f"{'Unlike' if liked_al else 'Like'} album [l]",
@@ -3365,14 +3380,16 @@ class App:
                 self.switch_tab(TAB_ARTIST, refresh=False)
                 self.fetch_artist_async(fake)
             elif choice == 2:
-                self.enqueue_album_async(it, insert_after_playing=False)
+                self.open_album_from_album_obj(it)
             elif choice == 3:
-                self.enqueue_album_async(it, insert_after_playing=True)
+                self.enqueue_album_async(it, insert_after_playing=False)
             elif choice == 4:
-                self.toggle_like_album(it)
+                self.enqueue_album_async(it, insert_after_playing=True)
             elif choice == 5:
-                self._add_album_to_playlist_async(it)
+                self.toggle_like_album(it)
             elif choice == 6:
+                self._add_album_to_playlist_async(it)
+            elif choice == 7:
                 def _dl_alb() -> None:
                     try:
                         aid = self._resolve_album_id_for_album(it)
@@ -3383,10 +3400,10 @@ class App:
                     except Exception:
                         self.toast("Error")
                 threading.Thread(target=_dl_alb, daemon=True).start()
-            elif choice == 7:
+            elif choice == 8:
                 ar_obj = Artist(id=0, name=it.artist, track_id=it.track_id)
                 self.show_similar_artists_dialog(ar_obj, album_id=it.id)
-            elif choice == 8:
+            elif choice == 9:
                 default_name = f"(Mix) {it.artist} - {it.title}"
                 name = self.prompt_text("Mix name:", default_name)
                 if name:
@@ -5002,7 +5019,7 @@ class App:
             hint = (
                 " A playing track is required to get recommendations\n"
                 "\n"
-                " If Autoplay is set to recommended, the queue will expand with recommended suggestions\n"
+                " If Autoplay is set to \"recommended\", the queue will expand with recommended suggestions\n"
                 " based on last queue items"
             )
             for i, line in enumerate(hint.splitlines()):
@@ -5016,13 +5033,13 @@ class App:
 
         if n == 0 and self.tab == TAB_MIX:
             hint = (
-                " Press 4 on a track in any tab to load its track mix\n"
+                " Press 4 on a track, album or artist in any tab to load its track mix\n"
                 "\n"
-                " If Autoplay is set to mix, the queue will expand with mix suggestions\n"
+                " If Autoplay is set to \"mix\", the queue will expand with mix suggestions\n"
                 " based on last queue items"
             )
             if self.mix_track:
-                hint = " No mix tracks loaded — press 4 with a track selected"
+                hint = " No mix tracks loaded — press 4 with a track, album or artist selected"
 
             for i, line in enumerate(hint.splitlines()):
                 if y + i < h - 1:
@@ -5430,7 +5447,7 @@ class App:
             " e/E       enqueue to end/next",
             " b         add selected to priority queue (play next)",
             " B         clear priority flags",
-            " 4         show mix based on selected track or album",
+            " 4         show mix based on selected track, album, or artist",
             " 5/6       show artist/album content relative to selected",
             " s         find similar artists",
             " D         download (selected, marked, album, all tracks of a playlist)",
@@ -5510,6 +5527,7 @@ class App:
             " tsv_max_artist_width     tsv_max_title_width     tsv_max_album_width",
             " tsv_max_year_width       tsv_max_duration_width",
             "",
+            f"\x01 tuifi v{VERSION}",
         ]
         box_h = 38
         h, _ = self.stdscr.getmaxyx()
@@ -6096,6 +6114,9 @@ class App:
                     elif isinstance(it, Artist):
                         self.switch_tab(TAB_MIX, refresh=False)
                         self.fetch_mix_from_artist_async(it)
+                    elif isinstance(it, tuple) and it[0] == "artist_header":
+                        self.switch_tab(TAB_MIX, refresh=False)
+                        self.fetch_mix_from_artist_async(Artist(id=it[1][0], name=it[1][1]))
                     elif ctx:
                         self.switch_tab(TAB_MIX, refresh=False)
                         self.fetch_mix_async(ctx)

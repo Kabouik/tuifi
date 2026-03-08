@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import base64
 import curses
+import hashlib
 import json
 import locale
 import os
 import random
 import re
+import shutil
 import signal
 import socket
 import subprocess
@@ -84,6 +86,7 @@ TAB_ALBUM       = 6
 TAB_LIKED       = 7
 TAB_PLAYLISTS   = 8
 TAB_HISTORY     = 9
+TAB_COVER       = 10
 
 TAB_NAMES = {
     TAB_QUEUE:       "Queue¹",
@@ -95,6 +98,7 @@ TAB_NAMES = {
     TAB_LIKED:       "Liked⁷",
     TAB_PLAYLISTS:   "Playlists⁸",
     TAB_HISTORY:     "History⁹",
+    TAB_COVER:       "Cover⁰",
 }
 
 # Autoplay modes
@@ -905,7 +909,7 @@ class App:
         self.focus = "left"
 
         self.tab = int(self.settings.get("initial_tab") or TAB_QUEUE)
-        self.tab = clamp(self.tab, TAB_QUEUE, TAB_HISTORY)
+        self.tab = clamp(self.tab, TAB_QUEUE, TAB_COVER)
 
         self.search_q = ""
         self.search_results: List[Track] = []
@@ -969,12 +973,25 @@ class App:
         self.lyrics_track_id: Optional[int] = None
         self.lyrics_track: Optional["Track"] = None
 
+        # Cover tab state
+        self.cover_track: Optional[Track] = None   # track whose cover is loaded
+        self.cover_path: Optional[str] = None      # local path to cached image file
+        self.cover_loading: bool = False
+        self._cover_backend_cache: Optional[str] = None   # "ueberzugpp"/"chafa"/"none"
+        self._cover_render_key: str = ""           # "path:WxH" to detect when re-render needed
+        self._cover_render_buf: Optional[bytes] = None    # cached chafa/ANSI output
+        self._cover_sixel_visible: bool = False    # True when image data is on the terminal
+        self._cover_ub_socket: Optional[str] = None       # ueberzugpp socket path
+        self._cover_ub_pid: Optional[int] = None          # ueberzugpp daemon PID
+
         self.filter_q: str = str(self.settings.get("initial_filter") or "")
         self.filter_hits: List[int] = []
         self.filter_pos: int = -1
 
         self._need_redraw = True
         self._redraw_status_only = False
+        self._queue_redraw_only = False    # fast path: only queue panel changed (cover tab)
+        self._suppress_cover_render = False  # suppress cover re-render during popup loops
         self._loading = False
         self._loading_key = ""
         self._liked_refresh_due: float = 0.0
@@ -1883,6 +1900,8 @@ class App:
             return ("tracks", self.playlist_view_tracks)
         if self.tab == TAB_HISTORY:
             return ("tracks", self.history_tracks)
+        if self.tab == TAB_COVER:
+            return ("cover_tab", [])
         return ("none", [])
 
     def _selected_left_item(self) -> Optional[Any]:
@@ -2249,6 +2268,8 @@ class App:
                 self._need_redraw = True
                 self._redraw_status_only = False
                 self._record_history(t)
+                # Pre-fetch cover art in the background so tab 0 is instant
+                self.fetch_cover_async(t)
                 # Trigger autoplay logic whenever a new track starts
                 self._autoplay_maybe_enqueue()
                 return
@@ -3117,6 +3138,8 @@ class App:
                 return label[-2]
             return None
 
+        # Erase any sixel cover image before drawing the popup on top.
+        self._cover_erase_terminal()
         h, w = self.stdscr.getmaxyx()
         box_w = min(w - 6, max(52, max(len(s) for s in options) + 8))
         extra_rows = 3 if simple else 4   # title + hint (simple: no filter bar)
@@ -3673,6 +3696,258 @@ class App:
             return f"https://resources.tidal.com/images/{path}/{size}x{size}.jpg"
         return None
 
+    # ---------------------------------------------------------------------------
+    # Cover tab
+    # ---------------------------------------------------------------------------
+
+    def _cover_backend(self) -> str:
+        """Detect the best available image rendering backend (cached)."""
+        if self._cover_backend_cache is None:
+            if shutil.which("ueberzugpp"):
+                self._cover_backend_cache = "ueberzugpp"
+            elif shutil.which("chafa"):
+                self._cover_backend_cache = "chafa"
+            else:
+                self._cover_backend_cache = "none"
+        return self._cover_backend_cache
+
+    def _cover_cache_path(self, url: str) -> str:
+        h = hashlib.md5(url.encode()).hexdigest()
+        cache_dir = os.path.join(STATE_DIR, "cover_cache")
+        os.makedirs(cache_dir, exist_ok=True)
+        return os.path.join(cache_dir, f"{h}.jpg")
+
+    def fetch_cover_async(self, t: Optional[Track]) -> None:
+        """Download cover art for track t. Called on playback start and when entering Cover tab."""
+        if not t:
+            return
+        if self.cover_track and self.cover_track.id == t.id and self.cover_path:
+            return  # already loaded for this track
+        self.cover_track = t
+        self.cover_path = None
+        self.cover_loading = True
+        self._cover_render_key = ""
+        self._cover_render_buf = None
+        if self.tab == TAB_COVER:
+            self._need_redraw = True
+
+        def worker() -> None:
+            try:
+                url = self._fetch_cover_url_for_track(t)
+                if not url:
+                    return
+                dest = self._cover_cache_path(url)
+                if not os.path.exists(dest):
+                    data = http_get_bytes(url, timeout=15.0)
+                    with open(dest, "wb") as f:
+                        f.write(data)
+                self.cover_path = dest
+                self._cover_render_key = ""   # force re-render for new image
+            except Exception as e:
+                debug_log(f"fetch_cover_async error: {e}")
+            finally:
+                self.cover_loading = False
+                if self.tab == TAB_COVER:
+                    self._need_redraw = True
+                    self._redraw_status_only = False
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _ueberzug_start(self) -> bool:
+        """Start the ueberzugpp daemon if not already running. Returns True on success."""
+        if self._cover_ub_socket and self._cover_ub_pid:
+            # Check daemon still alive
+            try:
+                os.kill(self._cover_ub_pid, 0)
+                return True
+            except OSError:
+                self._cover_ub_socket = None
+                self._cover_ub_pid = None
+
+        pid_file = os.path.join(STATE_DIR, "ueberzugpp.pid")
+        try:
+            subprocess.Popen(
+                ["ueberzugpp", "layer", "--no-stdin", "--silent",
+                 "--use-escape-codes", "--pid-file", pid_file],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            # Wait briefly for the daemon to write its PID
+            for _ in range(20):
+                time.sleep(0.05)
+                if os.path.exists(pid_file):
+                    break
+            with open(pid_file) as f:
+                pid = int(f.read().strip())
+            tmpdir = os.environ.get("TMPDIR", "/tmp")
+            socket_path = os.path.join(tmpdir, f"ueberzugpp-{pid}.socket")
+            self._cover_ub_pid = pid
+            self._cover_ub_socket = socket_path
+            return True
+        except Exception as e:
+            debug_log(f"ueberzugpp start error: {e}")
+            return False
+
+    def _ueberzug_show(self, path: str, x: int, y: int, w: int, h: int) -> None:
+        if not self._cover_ub_socket:
+            return
+        try:
+            subprocess.run(
+                ["ueberzugpp", "cmd", "-s", self._cover_ub_socket,
+                 "-i", "tuifi_cover", "-a", "add",
+                 "-x", str(x), "-y", str(y),
+                 "--max-width", str(w), "--max-height", str(h),
+                 "-f", path],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2,
+            )
+        except Exception as e:
+            debug_log(f"ueberzugpp show error: {e}")
+
+    def _ueberzug_remove(self) -> None:
+        if not self._cover_ub_socket:
+            return
+        try:
+            subprocess.run(
+                ["ueberzugpp", "cmd", "-s", self._cover_ub_socket,
+                 "-i", "tuifi_cover", "-a", "remove"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2,
+            )
+        except Exception:
+            pass
+
+    def _ueberzug_stop(self) -> None:
+        self._ueberzug_remove()
+        if self._cover_ub_pid:
+            try:
+                os.kill(self._cover_ub_pid, 15)  # SIGTERM
+            except OSError:
+                pass
+        self._cover_ub_pid = None
+        self._cover_ub_socket = None
+
+    def _draw_cover_hint(self, y: int, x: int, h: int, w: int) -> None:
+        """Draw status text in the cover tab area (image rendering happens after curses refresh)."""
+        backend = self._cover_backend()
+        if self.cover_loading:
+            self.stdscr.addstr(y, x, " Loading cover…"[:max(0, w - 1)], self.C(4))
+        elif not self.cover_path:
+            t = self._current_selection_track() or self.current_track
+            if not t:
+                self.stdscr.addstr(y, x, " Play or select a track to show its cover art"[:max(0, w - 1)], self.C(10))
+                return
+            if backend == "none":
+                lines = [
+                    " No image renderer found. Install one of:",
+                    "   chafa   — terminal image renderer (sixel/symbols, recommended)",
+                    "   ueberzugpp — overlay image renderer",
+                    " On Arch:   pacman -S chafa",
+                    " On Debian: apt install chafa",
+                    " On macOS:  brew install chafa",
+                    "",
+                    " Check sixel support: printf '\\033[c' in your terminal",
+                    " (look for '4;' in the response, e.g. foot, WezTerm, xterm -ti vt340)",
+                ]
+                for i, line in enumerate(lines):
+                    if y + i < h - 1:
+                        self.stdscr.addstr(y + i, x, line[:max(0, w - 1)], self.C(10))
+            else:
+                self.stdscr.addstr(y, x, " No cover art available for this track"[:max(0, w - 1)], self.C(10))
+
+    def _render_cover_image(self) -> None:
+        """Write cover image to the terminal after curses has refreshed.
+        Called only when self.tab == TAB_COVER and cover_path is set."""
+        if not self.cover_path or not os.path.exists(self.cover_path):
+            return
+        backend = self._cover_backend()
+        if backend == "none":
+            return
+
+        h, w = self.stdscr.getmaxyx()
+        top_h = 2           # tab bar rows
+        status_h = 2        # status bar rows
+        img_rows = h - top_h - status_h
+        # Respect queue overlay width
+        img_cols = w if not self.queue_overlay else max(20, w - 44)
+        if img_rows <= 0 or img_cols <= 0:
+            return
+
+        render_key = f"{self.cover_path}:{img_cols}x{img_rows}:{backend}"
+
+        if backend == "ueberzugpp":
+            if not self._ueberzug_start():
+                return
+            # ueberzugpp is idempotent — send on every render
+            self._ueberzug_show(self.cover_path, x=0, y=top_h,
+                                w=img_cols, h=img_rows)
+            self._cover_render_key = render_key
+            self._cover_sixel_visible = True
+            return
+
+        # chafa path: cache rendered bytes, re-run only on change
+        if render_key == self._cover_render_key and self._cover_render_buf:
+            self._write_image_to_terminal(top_h, self._cover_render_buf)
+            return
+
+        try:
+            result = subprocess.run(
+                ["chafa", "--format=sixel", f"--size={img_cols}x{img_rows}",
+                 self.cover_path],
+                capture_output=True, timeout=8,
+            )
+            if result.returncode != 0 or not result.stdout:
+                # Fallback: symbols work everywhere chafa is installed
+                result = subprocess.run(
+                    ["chafa", "--format=symbols",
+                     f"--size={img_cols}x{img_rows}", self.cover_path],
+                    capture_output=True, timeout=8,
+                )
+            if result.returncode == 0 and result.stdout:
+                self._cover_render_buf = result.stdout
+                self._cover_render_key = render_key
+                self._write_image_to_terminal(top_h, result.stdout)
+        except Exception as e:
+            debug_log(f"chafa render error: {e}")
+
+    def _write_image_to_terminal(self, top_row: int, data: bytes) -> None:
+        """Write image data (sixel or ANSI) directly to the terminal at the given row."""
+        # Save cursor, move to content area, write image, restore cursor
+        sys.stdout.buffer.write(
+            b"\0337"                                          # save cursor (VT100)
+            + f"\033[{top_row + 1};1H".encode()              # move to row, col 1
+            + data
+            + b"\0338"                                        # restore cursor
+        )
+        sys.stdout.buffer.flush()
+        self._cover_sixel_visible = True
+
+    def _cover_erase_terminal(self) -> None:
+        """Overwrite the image area with spaces before a full curses redraw.
+        Needed because some terminals don't clear sixel/ANSI pixels when curses
+        paints over them (e.g. during popup overlays or tab switches)."""
+        if not self._cover_sixel_visible:
+            return
+        h, w = self.stdscr.getmaxyx()
+        top_h = 2
+        status_h = 2
+        img_rows = h - top_h - status_h
+        img_cols = w if not self.queue_overlay else max(20, w - 44)
+        if img_rows > 0 and img_cols > 0:
+            blank_line = b" " * img_cols
+            buf = b"".join(
+                f"\033[{top_h + 1 + r};1H".encode() + blank_line
+                for r in range(img_rows)
+            )
+            sys.stdout.buffer.write(buf)
+            sys.stdout.buffer.flush()
+        self._cover_sixel_visible = False
+
+    def _cover_clear_image(self) -> None:
+        """Clear the displayed cover image (called when leaving cover tab or before full redraw)."""
+        if self._cover_backend_cache == "ueberzugpp":
+            self._ueberzug_remove()
+        self._cover_erase_terminal()
+        self._cover_render_key = ""
+        self._cover_render_buf = None
+
     def start_download_tracks(self, tracks: List[Track]) -> None:
         if not tracks:
             self.toast("Nothing to download")
@@ -4162,7 +4437,10 @@ class App:
         artists: List[Artist] = [Artist(id=int(a["id"]) if str(a["id"]).lstrip("-").isdigit() else 0,
                                         name=a["name"]) for a in cached]
 
-        # Redraw underlying screen before drawing dialog on top
+        # Redraw underlying screen before drawing dialog on top.
+        # Suppress cover re-render so the popup draws over a clean background.
+        self._suppress_cover_render = True
+        self._cover_erase_terminal()
         self._need_redraw = True
         self.draw()
 
@@ -4232,6 +4510,7 @@ class App:
                 elif ch in (27, ord("q"), ord("s"), ord("i"), ord("c")):
                     break
         finally:
+            self._suppress_cover_render = False
             self.stdscr.nodelay(True)
             self._need_redraw = True
             self._redraw_status_only = False
@@ -4757,7 +5036,7 @@ class App:
         return curses.color_pair(4)
 
     def _draw_tabs(self, y: int, x: int, w: int) -> None:
-        order = (1, 2, 3, 4, 5, 6, 7, 8, 9)
+        order = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
         s = "  ".join([TAB_NAMES[i] for i in order])[:max(0, w - 1)]
         self.stdscr.addstr(y, x, s, self.C(4))
         cur = TAB_NAMES.get(self.tab, "")
@@ -5007,6 +5286,11 @@ class App:
                         self.meta.want(it.id)
 
         pq_set = {qi: pos+1 for pos, qi in enumerate(self.priority_queue)}
+
+        # Cover tab: leave content area blank for image; show status/hint text only
+        if typ == "cover_tab":
+            self._draw_cover_hint(y, x, h, w)
+            return
 
         # Empty-tab hints
         if n == 0 and self.tab == TAB_QUEUE:
@@ -5429,7 +5713,7 @@ class App:
         lines = [
             "",
             "\x01 TABS",
-            " 1 Queue  2 Search  3 Recommended  4 Mix  5 Artist  6 Album  7 Liked  8 Playlists  9 History",
+            " 1 Queue  2 Search  3 Recommended  4 Mix  5 Artist  6 Album  7 Liked  8 Playlists  9 History  0 Cover",
             "",
             "\x01 PLAYBACK                                           PLAYLISTS (8)",
             " p         play/pause                               n     new list",
@@ -5448,6 +5732,7 @@ class App:
             " b         add selected to priority queue (play next)",
             " B         clear priority flags",
             " 4         show mix based on selected track, album, or artist",
+            " 0         show album cover art (requires chafa or ueberzugpp)",
             " 5/6       show artist/album content relative to selected",
             " s         find similar artists",
             " D         download (selected, marked, album, all tracks of a playlist)",
@@ -5659,8 +5944,25 @@ class App:
             self._redraw_status_only = False
             return
 
+        # Fast path for queue-overlay cursor navigation while cover tab is visible:
+        # skip cover erase/re-render since the queue panel doesn't overlap the cover.
+        if (self._queue_redraw_only and self.tab == TAB_COVER and self.queue_overlay
+                and self._cover_sixel_visible
+                and not self.show_help and not self.info_overlay and not self.lyrics_overlay):
+            self._queue_redraw_only = False
+            self._need_redraw = False
+            left_w = max(20, w - 44)
+            self._draw_queue(top_h, left_w, usable_h, w - left_w)
+            self._draw_status(h - status_h, 0, w)
+            self.stdscr.refresh()
+            return
+        self._queue_redraw_only = False
+
         self._redraw_status_only = False
         self._need_redraw = False
+        # Erase any terminal-rendered cover image before curses repaints, so
+        # sixel/ANSI pixels don't bleed through popup overlays or other tabs.
+        self._cover_erase_terminal()
         self.stdscr.erase()
 
         left_w = w if not self.queue_overlay else max(20, w - 44)
@@ -5684,6 +5986,11 @@ class App:
 
         self.stdscr.refresh()
 
+        # After curses has painted, overlay the cover image if on cover tab.
+        # Done here (after refresh) so sixel/ANSI data isn't erased by curses.
+        if self.tab == TAB_COVER and self.cover_path and not self.show_help and not self._suppress_cover_render:
+            self._render_cover_image()
+
     # ---------------------------------------------------------------------------
     # tab switching
     # ---------------------------------------------------------------------------
@@ -5692,6 +5999,8 @@ class App:
         self._tab_positions[self.tab] = (self.left_idx, self.left_scroll)
         if t != self.tab:
             self._prev_tab = self.tab
+            if self.tab == TAB_COVER:
+                self._cover_clear_image()
 
         self.tab = t
         self._loading = False
@@ -5729,6 +6038,8 @@ class App:
             self.playlist_view_tracks = []
         elif t == TAB_HISTORY:
             pass  # history_tracks always up to date
+        elif t == TAB_COVER:
+            self.fetch_cover_async(self.current_track)
 
         self._need_redraw = True
         self._redraw_status_only = False
@@ -5931,6 +6242,7 @@ class App:
                 continue
 
             if ch == ord("Q"):
+                self._ueberzug_stop()
                 break
 
             if ch == ord("?"):
@@ -6083,7 +6395,11 @@ class App:
                 self.focus = "queue" if self.focus == "left" else "left"
                 continue
 
-            # Tab switching: 1-9
+            # Tab switching: 0-9
+            if ch == ord("0"):
+                self.switch_tab(TAB_COVER)
+                continue
+
             if ch in (ord("1"), ord("2"), ord("3"), ord("4"),
                       ord("5"), ord("6"), ord("7"), ord("8"), ord("9")):
                 mapping = {
@@ -6664,19 +6980,29 @@ class App:
             # Navigation
             if ch == curses.KEY_PPAGE:
                 self.nav_page(-1)
+                if self._queue_context() and self.tab == TAB_COVER:
+                    self._queue_redraw_only = True
                 continue
             if ch == curses.KEY_NPAGE:
                 self.nav_page(+1)
+                if self._queue_context() and self.tab == TAB_COVER:
+                    self._queue_redraw_only = True
                 continue
             if ch in (curses.KEY_HOME, ord("g")):
                 self.nav_home()
+                if self._queue_context() and self.tab == TAB_COVER:
+                    self._queue_redraw_only = True
                 continue
             if ch in (curses.KEY_END, ord("G")):
                 self.nav_end()
+                if self._queue_context() and self.tab == TAB_COVER:
+                    self._queue_redraw_only = True
                 continue
             if ch in (curses.KEY_DOWN, ord("j")):
                 if self._queue_context():
                     self.queue_cursor = clamp(self.queue_cursor + 1, 0, max(0, len(self.queue_items) - 1))
+                    if self.tab == TAB_COVER:
+                        self._queue_redraw_only = True
                 else:
                     _typ, items = self._left_items()
                     new_idx = self.left_idx + 1
@@ -6687,6 +7013,8 @@ class App:
             if ch in (curses.KEY_UP, ord("k")):
                 if self._queue_context():
                     self.queue_cursor = clamp(self.queue_cursor - 1, 0, max(0, len(self.queue_items) - 1))
+                    if self.tab == TAB_COVER:
+                        self._queue_redraw_only = True
                 else:
                     _typ, items = self._left_items()
                     new_idx = self.left_idx - 1

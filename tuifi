@@ -77,8 +77,8 @@ def _default_downloads_dir() -> str:
 DOWNLOADS_DIR = _default_downloads_dir()
 QUALITY_ORDER = ["HI_RES_LOSSLESS", "LOSSLESS", "HIGH", "LOW"]
 
-TAB_QUEUE       = 1
-TAB_SEARCH      = 2
+TAB_SEARCH      = 1
+TAB_QUEUE       = 2
 TAB_RECOMMENDED = 3
 TAB_MIX         = 4
 TAB_ARTIST      = 5
@@ -89,8 +89,8 @@ TAB_HISTORY     = 9
 TAB_COVER       = 10
 
 TAB_NAMES = {
-    TAB_QUEUE:       "Queue¹",
-    TAB_SEARCH:      "Search²",
+    TAB_SEARCH:      "Search¹",
+    TAB_QUEUE:       "Queue²",
     TAB_RECOMMENDED: "Recommended³",
     TAB_MIX:         "Mix⁴",
     TAB_ARTIST:      "Artist⁵",
@@ -528,6 +528,8 @@ def load_settings() -> Dict[str, Any]:
     s.setdefault("download_dir", _default_downloads_dir())
     s.setdefault("download_structure", "{artist}/{artist} - {album} ({year})")
     s.setdefault("download_filename", "{track:02d}. {artist} - {title}")
+    s.setdefault("include_singles_and_eps_in_artist_tab", False)
+    s.setdefault("auto_resume_playback", False)
     return s
 
 
@@ -550,7 +552,7 @@ class MPV:
         self._mpv_stderr_path: Optional[str] = None
         self._mpv_stderr_fh = None
 
-    def start(self, url: str, resume: bool = False) -> None:
+    def start(self, url: str, resume: bool = False, start_pos: float = 0.0) -> None:
         self.stop()
         _tmp = os.environ.get("TMPDIR", "/tmp")
         self.sock_path = f"{_tmp}/{APP_NAME}-mpv-{os.getpid()}-{int(time.time()*1000)}.sock"
@@ -565,6 +567,8 @@ class MPV:
         ]
         if not resume:
             args.append("--no-resume-playback")
+        if start_pos > 0.0:
+            args.append(f"--start={start_pos:.1f}")
 
         is_mpd = isinstance(url, str) and url.endswith(".mpd") and os.path.isfile(url)
         if is_mpd:
@@ -986,13 +990,18 @@ class App:
         self._cover_ub_pid: Optional[int] = None          # ueberzugpp daemon PID
         self._cover_lyrics: bool = True                # show lyrics panel in cover tab
         self._cover_lyrics_max_scroll: int = 10_000   # updated each draw; prevents over-scrolling inline panel
+        self._show_singles_eps: bool = bool(self.settings.get("include_singles_and_eps_in_artist_tab", False))
+        self._last_artist_fetch_track: Optional["Track"] = None
 
         self._skip_delta: int = 0         # accumulated next/prev presses waiting to be applied
         self._skip_at: float = 0.0        # timestamp of last skip key press
 
-        self.filter_q: str = str(self.settings.get("initial_filter") or "")
+        self.filter_q: str = ""   # not persisted across sessions
         self.filter_hits: List[int] = []
         self.filter_pos: int = -1
+        self._lyrics_filter_q: str = ""
+        self._lyrics_filter_hits: List[int] = []
+        self._lyrics_filter_pos: int = -1
 
         self._need_redraw = True
         self._redraw_status_only = False
@@ -1004,9 +1013,6 @@ class App:
         self._last_mpd_path: Optional[str] = None
 
         self._init_curses()
-
-        if self.filter_q:
-            self._compute_filter_hits()
 
     # ---------------------------------------------------------------------------
     # Autoplay helpers
@@ -1121,7 +1127,7 @@ class App:
         """Called each time a new track starts playing.
 
         1. Record the new track in history.
-        2. Trigger a prefetch (if one isn't already running / buffer non-empty).
+        2. Trigger a prefetch (if one isn't already running/buffer non-empty).
         3. If the queue is running low AND we have buffered tracks, enqueue them.
         """
         t = self.current_track
@@ -1416,7 +1422,7 @@ class App:
         self._need_redraw = True
 
     # ---------------------------------------------------------------------------
-    # curses / colors
+    # curses/colors
     # ---------------------------------------------------------------------------
     def _name_to_curses_color(self, name: str) -> int:
         mapping = {
@@ -1715,7 +1721,7 @@ class App:
         return out
 
     def _extract_artist_albums_from_payload(self, payload: Dict[str, Any]) -> List[Album]:
-        include_singles = self.settings.get("include_singles_and_eps_in_artist_tab", False)
+        include_singles = self._show_singles_eps
         albums: List[Album] = []
         for path in (("albums", "items"), ("data", "albums", "items"), ("albums",), ("data", "albums")):
             cur: Any = payload
@@ -1875,7 +1881,8 @@ class App:
             if self.artist_ctx:
                 items.append(("artist_header", self.artist_ctx))
             if self.artist_albums:
-                alb_label = f"Albums ({len(self.artist_albums)}" + ("…)" if self._loading else ")")
+                _sep_hint = "), press # to exclude singles/EPs" if self._show_singles_eps else "), press # to include singles/EPs"
+                alb_label = f"Albums ({len(self.artist_albums)}" + ("…" if self._loading else "") + _sep_hint
                 items.append(("sep", alb_label))
                 items.extend(self.artist_albums)
             if self.artist_tracks:
@@ -1965,7 +1972,7 @@ class App:
     # ---------------------------------------------------------------------------
     def prompt_text(self, title: str, initial: str = "") -> Optional[str]:
         h, w = self.stdscr.getmaxyx()
-        box_w = clamp(max(34, len(title) + 8), 34, w - 6)
+        box_w = clamp(max(63, len(title) + 8), 34, w - 6)
         box_h = 5
         y0 = (h - box_h) // 2
         x0 = (w - box_w) // 2
@@ -1988,7 +1995,7 @@ class App:
         self.stdscr.nodelay(False)
         inner_w = max(1, box_w - 4 - label_len)
         input_x = 2 + label_len
-        hint_text = "^a/^e: home/end   ^u/^k: clear to left/right   ^w: del word"
+        hint_text = " ^a/^e: home/end  ^u/^k: clear to left/right  ^w: del word "
         while True:
             view_start = max(0, cur - inner_w + 1) if cur >= inner_w else 0
             display = s[view_start:view_start + inner_w]
@@ -1997,7 +2004,7 @@ class App:
             win.addstr(1, input_x, " " * inner_w)
             win.addstr(1, input_x, display)
             try:
-                win.addstr(3, 2, hint_text[:box_w - 4], self.C(10))
+                win.addstr(box_h - 1, 2, hint_text[:box_w - 4], self.C(10))
             except curses.error:
                 pass
             win.move(1, input_x + min(cur - view_start, inner_w))
@@ -2057,13 +2064,24 @@ class App:
     def prompt_yes_no(self, title: str) -> bool:
         h, w = self.stdscr.getmaxyx()
         box_w = clamp(max(30, len(title) + 8), 30, w - 6)
-        y0 = (h - 5) // 2
+        box_h = 5
+        y0 = (h - box_h) // 2
         x0 = (w - box_w) // 2
-        for yy in range(y0, y0 + 5):
-            self.stdscr.addstr(yy, x0, " " * box_w)
-        win = self.stdscr.derwin(5, box_w, y0, x0)
+        pad_y = max(0, y0 - 1)
+        pad_x = max(0, x0 - 2)
+        pad_h = min(h - pad_y, box_h + 2)
+        pad_w = min(w - pad_x, box_w + 4)
+        self._erase_popup_bg(pad_y, pad_x, pad_h, pad_w)
+        for yy in range(pad_y, pad_y + pad_h):
+            try:
+                self.stdscr.addstr(yy, pad_x, " " * pad_w)
+            except curses.error:
+                pass
+        win = self.stdscr.derwin(box_h, box_w, y0, x0)
+        win.erase()
         win.box()
         win.addstr(2, 2, title[:box_w - 4], self.C(4))
+        win.touchwin()
         win.refresh()
         while True:
             ch = self.stdscr.getch()
@@ -2267,7 +2285,7 @@ class App:
         except Exception:
             pass
 
-    def play_track(self, t: Track, resume: bool = False) -> None:
+    def play_track(self, t: Track, resume: bool = False, start_pos: float = 0.0) -> None:
         if self._last_mpd_path:
             try:
                 if os.path.exists(self._last_mpd_path):
@@ -2285,7 +2303,7 @@ class App:
                 url = self._resolve_stream_url_for_quality(t.id, quality)
                 is_mpd = url.endswith(".mpd") and os.path.isfile(url)
                 mpd_path = url if is_mpd else None
-                self.mp.start(url, resume=resume)
+                self.mp.start(url, resume=resume, start_pos=start_pos)
                 self._apply_mpv_prefs()
                 if is_mpd:
                     time.sleep(0.5)
@@ -2405,7 +2423,7 @@ class App:
     # ---------------------------------------------------------------------------
     # queue playback
     # ---------------------------------------------------------------------------
-    def play_queue_index(self, idx: int) -> None:
+    def play_queue_index(self, idx: int, start_pos: float = 0.0) -> None:
         if not self.queue_items:
             return
         idx = clamp(idx, 0, len(self.queue_items) - 1)
@@ -2414,7 +2432,7 @@ class App:
         self.queue_cursor = idx
         if idx in self.priority_queue:
             self.priority_queue.remove(idx)
-        self.play_track(self.queue_items[idx])
+        self.play_track(self.queue_items[idx], start_pos=start_pos)
         if self.last_error and (self.current_track is None or self.current_track.id != self.queue_items[idx].id):
             self.queue_play_idx = prev_play_idx
         self._need_redraw = True
@@ -3150,7 +3168,7 @@ class App:
             self._need_redraw = True
             self._redraw_status_only = False
 
-    def pick_from_list(self, title: str, options: List[str], simple: bool = False) -> int:
+    def pick_from_list(self, title: str, options: List[str], simple: bool = False, cancel_keys: tuple = ()) -> int:
         """Pager-like selection popup.
 
         Normal mode: j/^n/^n/↓ navigate down; k/^k/^p/↑ navigate up;
@@ -3281,7 +3299,7 @@ class App:
                         idx = max(idx - 1, 0)
                     elif ch in (10, 13):                            # Enter (CR or LF) = confirm
                         return visible[idx][0] if visible else -1
-                    elif ch in ("q", "c"):                          # close
+                    elif ch in ("q", "c") or (cancel_keys and ch in cancel_keys):  # close
                         return -1
                     elif not simple and ch in ("/", ":", "!"):      # enter filter mode
                         filt_active = True
@@ -3309,7 +3327,7 @@ class App:
             f"Album: {t.album}",
             "Store mix in playlist and like…",
         ]
-        choice = self.pick_from_list("Like/unlike", options, simple=True)
+        choice = self.pick_from_list("Like/unlike", options, simple=True, cancel_keys=("*",))
         if choice == 0:
             self.toggle_like_artist(artist_id, t.artist)
         elif choice == 1:
@@ -3935,7 +3953,7 @@ class App:
         if queue_panel_active:
             right_w = 44
         elif self._cover_lyrics:
-            right_w = self._lyrics_panel_w(w)
+            right_w = self._lyrics_panel_w(w) + 2  # +2 for gap between cover and lyrics
         else:
             right_w = 0
         img_cols = w - right_w
@@ -3984,7 +4002,7 @@ class App:
         if queue_panel_active:
             right_w = 44
         elif self._cover_lyrics:
-            right_w = self._lyrics_panel_w(w)
+            right_w = self._lyrics_panel_w(w) + 2  # +2 for gap between cover and lyrics
         else:
             right_w = 0
         img_cols = w - right_w
@@ -4074,7 +4092,8 @@ class App:
 
     def _lyrics_panel_w(self, w: int) -> int:
         """Width of the lyrics panel in the cover tab (adapts to terminal width)."""
-        return max(44, min(w // 3, w - 80))
+        # Give lyrics up to half the terminal; cover gets the rest (plus 2-col gap).
+        return max(44, min(w // 2, w - 50))
 
     def _erase_popup_bg(self, y0: int, x0: int, rows: int, cols: int) -> None:
         """Erase a popup area with raw ANSI writes to clear any sixel underneath."""
@@ -4092,28 +4111,43 @@ class App:
         """Draw lyrics as a right-side panel in the cover tab."""
         if w < 10:
             return
-        # Text colour: configurable via settings "cover_lyrics_color_pair" (int, default 0 = terminal default = white).
         lyr_attr = curses.color_pair(int(self.settings.get("cover_lyrics_color_pair", 0))) if self.color_mode and curses.has_colors() else 0
-        # Title bar
-        title = "Lyrics "
+        # Title bar: show filter state or navigation hint
+        if self._lyrics_filter_q and self._lyrics_filter_hits:
+            n = len(self._lyrics_filter_hits)
+            pos = self._lyrics_filter_pos + 1
+            title = f"[{self._lyrics_filter_q}] {pos}/{n}  (/): pref/next match  f: re-filter  Esc: clear"
+        elif self._lyrics_filter_q:
+            title = f"[{self._lyrics_filter_q}] no match  f: re-filter  Esc: clear"
+        else:
+            title = "Lyrics  j/k: scroll  f: filter  V: show/hide"
         self.stdscr.addstr(y, x, title[:w].ljust(w), self.C(4))
-        # Lyrics content
         lines = self.lyrics_lines or []
         inner_h = h - 1
         if not lines:
             if self.lyrics_loading:
-                self.stdscr.addstr(y + 1, x, " Loading…"[:w].ljust(w), self.C(4))
+                self.stdscr.addstr(y + 1, x, "Fetching lyrics…"[:w].ljust(w), self.C(4))
             else:
-                self.stdscr.addstr(y + 1, x, " No lyrics"[:w].ljust(w), lyr_attr)
+                self.stdscr.addstr(y + 1, x, "No lyrics"[:w].ljust(w), lyr_attr)
             return
         self._cover_lyrics_max_scroll = max(0, len(lines) - inner_h)
         scroll = max(0, min(self.lyrics_scroll, self._cover_lyrics_max_scroll))
+        hit_set = set(self._lyrics_filter_hits) if self._lyrics_filter_q else set()
+        current_hit = (self._lyrics_filter_hits[self._lyrics_filter_pos]
+                       if self._lyrics_filter_hits and 0 <= self._lyrics_filter_pos < len(self._lyrics_filter_hits)
+                       else -1)
         for row in range(inner_h):
             li = scroll + row
             if y + 1 + row >= y + h:
                 break
             text = lines[li].rstrip() if li < len(lines) else ""
-            self.stdscr.addstr(y + 1 + row, x, text[:w].ljust(w), lyr_attr)
+            if li == current_hit:
+                attr = curses.A_REVERSE
+            elif li in hit_set:
+                attr = self.C(5)
+            else:
+                attr = lyr_attr
+            self.stdscr.addstr(y + 1 + row, x, text[:w].ljust(w), attr)
 
     def _cover_clear_image(self) -> None:
         """Clear the displayed cover image (called when leaving cover tab or before full redraw)."""
@@ -4136,7 +4170,7 @@ class App:
         self.dl.enqueue(tracks, self._download_worker)
 
     # ---------------------------------------------------------------------------
-    # album resolve / fetch
+    # album resolve/fetch
     # ---------------------------------------------------------------------------
     def _resolve_album_id_for_album(self, album: Album) -> Optional[int]:
         if album.id and album.id > 0:
@@ -4270,12 +4304,19 @@ class App:
         if not ctx:
             self.toast("No context")
             return
+        self._last_artist_fetch_track = ctx
         self.artist_albums, self.artist_tracks = [], []
         self.artist_ctx = None
         key = f"artist:{ctx.id}:{time.time()}"
         self._set_loading(key)
 
         def worker() -> None:
+            # Show artist name immediately before any API call so the tab header
+            # is visible as soon as fetch_artist_async is called.
+            if ctx.artist_id:
+                self.artist_ctx = (ctx.artist_id, ctx.artist)
+                self._need_redraw = True
+                self._redraw_status_only = False
             try:
                 aid = ctx.artist_id or self.meta.artist_id.get(ctx.id)
                 if not aid:
@@ -4384,6 +4425,33 @@ class App:
         self._need_redraw = True
         self._redraw_status_only = False
 
+    def _update_info_for_selection(self) -> None:
+        """Refresh info content to match the current selection (used by show_info_dialog cursor nav)."""
+        if self._queue_context():
+            t = self._current_selection_track()
+            if t and (self.info_track is None or t.id != self.info_track.id):
+                self._request_info_refresh(t)
+        else:
+            it = self._selected_left_item()
+            if isinstance(it, Artist):
+                if self.info_artist is None or self.info_artist.id != it.id:
+                    self.open_info_artist(it, _dialog=False)
+            elif isinstance(it, tuple) and it[0] == "artist_header":
+                ar = Artist(id=it[1][0], name=it[1][1])
+                if self.info_artist is None or self.info_artist.id != ar.id:
+                    self.open_info_artist(ar, _dialog=False)
+            elif isinstance(it, Album):
+                if self.info_album is None or self.info_album.id != it.id:
+                    self.open_info_album(it, _dialog=False)
+            elif isinstance(it, tuple) and it[0] == "album_title" and isinstance(it[1], Album):
+                alb = it[1]
+                if self.info_album is None or self.info_album.id != alb.id:
+                    self.open_info_album(alb, _dialog=False)
+            else:
+                t = self._current_selection_track()
+                if t and (self.info_track is None or t.id != self.info_track.id):
+                    self._request_info_refresh(t)
+
     def show_info_dialog(self) -> None:
         """Inner-loop info popup (track/album/artist) — same pattern as show_similar_artists_dialog."""
         self._need_redraw = True
@@ -4405,7 +4473,7 @@ class App:
                 pass
         win = self.stdscr.derwin(box_h, box_w, y0, x0)
         win.keypad(True)
-        scroll = 0
+        info_scroll = 0
         self.stdscr.timeout(100)
         try:
             while True:
@@ -4497,8 +4565,8 @@ class App:
 
                 inner_h = box_h - 2
                 max_scroll = max(0, len(lines) - inner_h)
-                scroll = min(scroll, max_scroll)
-                start = clamp(scroll, 0, max_scroll)
+                info_scroll = min(info_scroll, max_scroll)
+                start = clamp(info_scroll, 0, max_scroll)
 
                 win.erase()
                 win.box()
@@ -4519,6 +4587,10 @@ class App:
                             win.addstr(1 + i, 2, line[:box_w - 4])
                         except curses.error:
                             pass
+                try:
+                    win.addstr(box_h - 1, 2, " j/k: cursor   PgUp/Dn: scroll info   g/G: top/bottom   q/i/ESC: close "[:box_w - 4], self.C(10))
+                except curses.error:
+                    pass
                 win.touchwin()
                 win.refresh()
 
@@ -4534,18 +4606,41 @@ class App:
 
                 if ch in (27, ord("q"), ord("i"), ord("I")):
                     break
-                elif ch in (ord("j"), curses.KEY_DOWN, 14):
-                    scroll = min(max_scroll, scroll + 1)
-                elif ch in (ord("k"), curses.KEY_UP, 16):
-                    scroll = max(0, scroll - 1)
+                elif ch in (ord("j"), curses.KEY_DOWN):
+                    # Move cursor in the main list and update info
+                    if self._queue_context():
+                        self.queue_cursor = clamp(self.queue_cursor + 1, 0, max(0, len(self.queue_items) - 1))
+                    else:
+                        _typ, _items = self._left_items()
+                        _ni = self.left_idx + 1
+                        while _ni < len(_items) and isinstance(_items[_ni], tuple) and _items[_ni][0] == "sep":
+                            _ni += 1
+                        self.left_idx = clamp(_ni, 0, max(0, len(_items) - 1))
+                    info_scroll = 0
+                    self._update_info_for_selection()
+                    self._need_redraw = True
+                    self._redraw_status_only = False
+                elif ch in (ord("k"), curses.KEY_UP):
+                    if self._queue_context():
+                        self.queue_cursor = clamp(self.queue_cursor - 1, 0, max(0, len(self.queue_items) - 1))
+                    else:
+                        _typ, _items = self._left_items()
+                        _ni = self.left_idx - 1
+                        while _ni >= 0 and isinstance(_items[_ni], tuple) and _items[_ni][0] == "sep":
+                            _ni -= 1
+                        self.left_idx = clamp(_ni, 0, max(0, len(_items) - 1))
+                    info_scroll = 0
+                    self._update_info_for_selection()
+                    self._need_redraw = True
+                    self._redraw_status_only = False
                 elif ch == curses.KEY_PPAGE:
-                    scroll = max(0, scroll - self._page_step())
+                    info_scroll = max(0, info_scroll - self._page_step())
                 elif ch == curses.KEY_NPAGE:
-                    scroll = min(max_scroll, scroll + self._page_step())
+                    info_scroll = min(max_scroll, info_scroll + self._page_step())
                 elif ch in (curses.KEY_HOME, ord("g")):
-                    scroll = 0
+                    info_scroll = 0
                 elif ch in (curses.KEY_END, ord("G")):
-                    scroll = max_scroll
+                    info_scroll = max_scroll
                 elif ch == ord("s") and self.info_artist:
                     break  # fall through to show similar artists after dialog
         finally:
@@ -4617,7 +4712,7 @@ class App:
         self._need_redraw = True
         self.show_info_dialog()
 
-    def open_info_album(self, album: Album) -> None:
+    def open_info_album(self, album: Album, _dialog: bool = True) -> None:
         self.info_scroll = 0
         self.info_track = None
         self.info_album = album
@@ -4642,9 +4737,10 @@ class App:
             self._need_redraw = True
 
         threading.Thread(target=worker, daemon=True).start()
-        self.show_info_dialog()
+        if _dialog:
+            self.show_info_dialog()
 
-    def open_info_artist(self, artist: Artist) -> None:
+    def open_info_artist(self, artist: Artist, _dialog: bool = True) -> None:
         self.info_scroll = 0
         self.info_track = None
         self.info_album = None
@@ -4703,7 +4799,8 @@ class App:
             self._need_redraw = True
 
         threading.Thread(target=worker, daemon=True).start()
-        self.show_info_dialog()
+        if _dialog:
+            self.show_info_dialog()
 
     def show_similar_artists_dialog(self, artist: Artist, album_id: int = 0) -> None:
         """Interactive dialog listing similar artists with action keys."""
@@ -5012,6 +5109,9 @@ class App:
         self.lyrics_track_id = t.id
         self.lyrics_lines = []
         self.lyrics_loading = True
+        self._lyrics_filter_q = ""
+        self._lyrics_filter_hits = []
+        self._lyrics_filter_pos = -1
 
         def worker() -> None:
             lines: List[str] = []
@@ -5115,6 +5215,10 @@ class App:
                         win.addstr(1 + i, 2, lines[idx][:box_w - 4])
                     except curses.error:
                         pass
+                try:
+                    win.addstr(box_h - 1, 2, " j/k: scroll   g/G: top/bottom   q/v/Esc: close "[:box_w - 4], self.C(10))
+                except curses.error:
+                    pass
                 win.touchwin()
                 win.refresh()
 
@@ -5152,10 +5256,10 @@ class App:
     # ---------------------------------------------------------------------------
     def do_search_prompt_anywhere(self) -> None:
         self.playlist_view_name = None
-        self.switch_tab(TAB_SEARCH, refresh=False)
         q = self.prompt_text("Search:", self.search_q)
         if q is None:
             return
+        self.switch_tab(TAB_SEARCH, refresh=False)
         self.search_q = q
         self.search_results = []
         self.left_idx = 0
@@ -5229,6 +5333,40 @@ class App:
         self.filter_pos = (self.filter_pos + delta) % len(self.filter_hits)
         self._set_filter_cursor(self.filter_hits[self.filter_pos])
         self.toast(f"{self.filter_pos+1}/{len(self.filter_hits)}")
+
+    def _compute_lyrics_filter_hits(self) -> None:
+        q = self._lyrics_filter_q.strip().lower()
+        self._lyrics_filter_hits = []
+        self._lyrics_filter_pos = -1
+        if not q:
+            return
+        for i, line in enumerate(self.lyrics_lines or []):
+            if q in line.lower():
+                self._lyrics_filter_hits.append(i)
+        if self._lyrics_filter_hits:
+            self._lyrics_filter_pos = 0
+
+    def lyrics_filter_prompt(self) -> None:
+        q = self.prompt_text("Lyrics filter:", self._lyrics_filter_q)
+        if q is None:
+            return
+        self._lyrics_filter_q = q
+        self._compute_lyrics_filter_hits()
+        if not self._lyrics_filter_hits:
+            self.toast("No match")
+            return
+        self._lyrics_filter_pos = 0
+        self.lyrics_scroll = self._lyrics_filter_hits[0]
+        self._need_redraw = True
+        self.toast(f"1/{len(self._lyrics_filter_hits)}")
+
+    def lyrics_filter_next(self, delta: int) -> None:
+        if not self._lyrics_filter_hits:
+            return
+        self._lyrics_filter_pos = (self._lyrics_filter_pos + delta) % len(self._lyrics_filter_hits)
+        self.lyrics_scroll = self._lyrics_filter_hits[self._lyrics_filter_pos]
+        self._need_redraw = True
+        self.toast(f"{self._lyrics_filter_pos+1}/{len(self._lyrics_filter_hits)}")
 
     # ---------------------------------------------------------------------------
     # playlists
@@ -5867,7 +6005,9 @@ class App:
                         self.stdscr.addstr(yy, px, "♥ "[:pw], base_attr | self.C(14))
                         px += 2; pw -= 2
                     if pw > 0:
-                        self.stdscr.addstr(yy, px, name[:pw].ljust(pw)[:pw],
+                        suffix = " (fetching data…)" if self._loading else ""
+                        display_name = (name + suffix)[:pw].ljust(pw)[:pw]
+                        self.stdscr.addstr(yy, px, display_name,
                                            base_attr | self.C(7) | curses.A_BOLD)
                     continue
                 if isinstance(it, tuple) and it[0] == "sep":
@@ -6114,6 +6254,8 @@ class App:
                 parts.append(f"pq: {len(self.priority_queue)}")
             if self.filter_q:
                 parts.append(f"filter: {self.filter_q}")
+            if self._show_singles_eps:
+                parts.append("singles/EPs: on")
             # Show buffer size when autoplay is active
             with self._autoplay_lock:
                 buf_n = len(self._autoplay_buffer)
@@ -6233,8 +6375,8 @@ class App:
             "",
             "\x01 GENERAL",
             " /         search TIDAL",
-            " f         filter term in current view",
-            " (/)       prev/next filter hit",
+            " f         filter term in current view (in cover tab: filter lyrics)",
+            " (/)       prev/next filter hit (in cover tab: prev/next lyrics match)",
             " Esc       close prompts",
             " Q         quit",
             "",
@@ -6260,6 +6402,7 @@ class App:
             " R         repeat mode (off, all, one)",
             " S         shuffle (off, on)",
             " F         file quality",
+            " #         show/hide singles and EPs in artist tab",
             "",
             "\x01 AUTOPLAY MODES",
             " off:         no automatic queue extension",
@@ -6277,6 +6420,12 @@ class App:
             "",
             " History tab:",
             " history_max: max history entries to keep (default 0 = unlimited)",
+            "",
+            " Playback:",
+            " auto_resume_playback: resume last position on startup (default false)",
+            "",
+            " Artist tab:",
+            " include_singles_and_eps_in_artist_tab: show singles/EPs (default false, toggle with #)",
             "",
             " Download file hierarchy:",
             " download_dir (Linux default /tmp/tuifi/)",
@@ -6616,6 +6765,15 @@ class App:
         if self.tab == TAB_LIKED:
             self.fetch_liked_async()
 
+        # Auto-resume playback from last session if enabled and queue is populated.
+        if self.settings.get("auto_resume_playback") and self.queue_items and not self.mp.alive():
+            _resume_idx = int(self.settings.get("_resume_queue_idx", self.queue_play_idx))
+            _resume_pos = float(self.settings.get("_resume_position", 0.0))
+            _resume_idx = clamp(_resume_idx, 0, len(self.queue_items) - 1)
+            self.play_queue_index(_resume_idx, start_pos=_resume_pos)
+            if _resume_pos > 1.0:
+                self.toast(f"Resumed from {fmt_time(_resume_pos)}")
+
         while True:
             now = time.time()
 
@@ -6670,8 +6828,8 @@ class App:
                     "show_track_duration": self.show_track_duration,
                     "quality": QUALITY_ORDER[self.quality_idx],
                     "autoplay": self.autoplay, "initial_tab": self.tab,
-                    "initial_filter": self.filter_q,
                     "tab_align": self.tab_align,
+                    "include_singles_and_eps_in_artist_tab": self._show_singles_eps,
                 })
                 try:
                     save_settings(self.settings)
@@ -6716,7 +6874,7 @@ class App:
                         _seq += chr(_c3)
                         if chr(_c3).isalpha() or chr(_c3) == '~':
                             break
-                    # Format 1 — CSI u: "N;Mu"  (kitty / foot / CSI u protocol)
+                    # Format 1 — CSI u: "N;Mu"  (kitty/foot/CSI u protocol)
                     #   modifier M: Ctrl bit = 4, so Ctrl-only = 5
                     _m = re.match(r'^(\d+);(\d+)u$', _seq)
                     if _m:
@@ -6768,6 +6926,10 @@ class App:
                 # Plain ESC: dismiss overlays
                 if self.show_help:
                     self.show_help = False
+                elif self.tab == TAB_COVER and self._lyrics_filter_q:
+                    self._lyrics_filter_q = ""
+                    self._lyrics_filter_hits = []
+                    self._lyrics_filter_pos = -1
                 elif self.filter_q:
                     self.filter_q = ""
                     self.filter_hits = []
@@ -6804,13 +6966,22 @@ class App:
                 self.do_search_prompt_anywhere()
                 continue
             if ch == ord("f"):
-                self.filter_prompt()
+                if self.tab == TAB_COVER and self._cover_lyrics and not self.queue_overlay:
+                    self.lyrics_filter_prompt()
+                else:
+                    self.filter_prompt()
                 continue
             if ch == ord("("):
-                self.filter_next(-1)
+                if self.tab == TAB_COVER and self._cover_lyrics and not self.queue_overlay:
+                    self.lyrics_filter_next(-1)
+                else:
+                    self.filter_next(-1)
                 continue
             if ch == ord(")"):
-                self.filter_next(+1)
+                if self.tab == TAB_COVER and self._cover_lyrics and not self.queue_overlay:
+                    self.lyrics_filter_next(1)
+                else:
+                    self.filter_next(+1)
                 continue
 
             # V in cover tab:
@@ -6833,20 +7004,11 @@ class App:
                 self._cover_render_buf = None
                 continue
 
-            # v: lyrics popup for the selected track.
-            # In the cover tab with the inline panel showing the playing track, no-op.
+            # v: lyrics popup for the selected or playing track.
             if ch == ord("v"):
-                if self.tab == TAB_COVER and self._cover_lyrics:
-                    t_sel = self._current_selection_track()
-                    if (t_sel is None
-                            or (self.current_track is not None
-                                and t_sel.id == self.current_track.id)):
-                        continue  # inline panel already shows this track
+                t_sel = self._current_selection_track() or self.current_track
+                if t_sel:
                     self.show_lyrics_dialog(t_sel)
-                else:
-                    t_sel = self._current_selection_track()
-                    if t_sel:
-                        self.show_lyrics_dialog(t_sel)
                 continue
             if ch == ord("V"):
                 _vt = self.current_track
@@ -6943,8 +7105,8 @@ class App:
             if ch in (ord("1"), ord("2"), ord("3"), ord("4"),
                       ord("5"), ord("6"), ord("7"), ord("8"), ord("9")):
                 mapping = {
-                    ord("1"): TAB_QUEUE,
-                    ord("2"): TAB_SEARCH,
+                    ord("1"): TAB_SEARCH,
+                    ord("2"): TAB_QUEUE,
                     ord("3"): TAB_RECOMMENDED,
                     ord("4"): TAB_MIX,
                     ord("5"): TAB_ARTIST,
@@ -7119,6 +7281,15 @@ class App:
                 self.quality_idx = (self.quality_idx + 1) % len(QUALITY_ORDER)
                 self.toast(f"Quality: {QUALITY_ORDER[self.quality_idx]}")
                 continue
+            if ch == ord("#"):
+                self._show_singles_eps = not self._show_singles_eps
+                self.settings["include_singles_and_eps_in_artist_tab"] = self._show_singles_eps
+                self.toast(f"Singles/EPs: {'on' if self._show_singles_eps else 'off'}")
+                if self.tab == TAB_ARTIST and self._last_artist_fetch_track:
+                    self.fetch_artist_async(self._last_artist_fetch_track)
+                self._need_redraw = True
+                self._redraw_status_only = False
+                continue
             if ch == ord("T"):
                 self.show_toggles = not self.show_toggles
                 self.toast("Toggles: on" if self.show_toggles else "Toggles: off")
@@ -7171,7 +7342,7 @@ class App:
                 self.toast(f"Liked: {_LIKED_FILTER_NAMES[self.liked_filter]}")
                 continue
 
-            # Ctrl+Left / Ctrl+Right: cycle through all tabs including Liked subtabs
+            # Ctrl+Left/Ctrl+Right: cycle through all tabs including Liked subtabs
             # Sequence: Queue Search Recommended Mix Artist Album
             #           Liked/All Liked/Tracks Liked/Artists Liked/Albums Liked/Playlists
             #           Playlists History  (wraps)
@@ -7215,7 +7386,7 @@ class App:
                 self._need_redraw = True
                 continue
 
-            # Ctrl+Down / Ctrl+Up: jump between album groups / sections
+            # Ctrl+Down/Ctrl+Up: jump between album groups/sections
             def _is_ctrl_down(c: int) -> bool:
                 try: return curses.keyname(c) in (b"kDN5", b"kDN3")
                 except Exception: return False
@@ -7631,7 +7802,7 @@ class App:
         except Exception:
             pass
         try:
-            self.settings.update({
+            _exit_settings: Dict[str, Any] = {
                 "volume": self.desired_volume, "mute": self.desired_mute,
                 "color_mode": self.color_mode, "queue_overlay": self.queue_overlay,
                 "show_toggles": self.show_toggles, "show_numbers": self.show_numbers,
@@ -7639,9 +7810,15 @@ class App:
                 "show_track_duration": self.show_track_duration,
                 "quality": QUALITY_ORDER[self.quality_idx],
                 "autoplay": self.autoplay, "initial_tab": self.tab,
-                "initial_filter": self.filter_q,
                 "tab_align": self.tab_align,
-            })
+                "include_singles_and_eps_in_artist_tab": self._show_singles_eps,
+            }
+            if self.current_track and self.mp.alive():
+                _tp, _du, _pa, _vo, _mu = self.mp.snapshot()
+                if _tp is not None and _tp > 1.0:
+                    _exit_settings["_resume_queue_idx"] = self.queue_play_idx
+                    _exit_settings["_resume_position"] = float(_tp)
+            self.settings.update(_exit_settings)
             save_settings(self.settings)
         except Exception:
             pass

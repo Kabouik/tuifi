@@ -981,9 +981,10 @@ class App:
         self._cover_render_key: str = ""           # "path:WxH" to detect when re-render needed
         self._cover_render_buf: Optional[bytes] = None    # cached chafa/ANSI output
         self._cover_sixel_visible: bool = False    # True when image data is on the terminal
+        self._cover_sixel_cols: int = 0            # width (columns) of the last rendered sixel
         self._cover_ub_socket: Optional[str] = None       # ueberzugpp socket path
         self._cover_ub_pid: Optional[int] = None          # ueberzugpp daemon PID
-        self._cover_lyrics: bool = False               # show lyrics panel in cover tab
+        self._cover_lyrics: bool = True                # show lyrics panel in cover tab
 
         self.filter_q: str = str(self.settings.get("initial_filter") or "")
         self.filter_hits: List[int] = []
@@ -3891,7 +3892,13 @@ class App:
         top_h = 2
         status_h = 2
         img_rows = h - top_h - status_h
-        img_cols = w - 44 if (self._cover_lyrics and not self.queue_overlay) else w   # lyrics panel narrows image
+        if self.queue_overlay:
+            right_w = 44
+        elif self._cover_lyrics:
+            right_w = self._lyrics_panel_w(w)
+        else:
+            right_w = 0
+        img_cols = w - right_w
         if img_rows <= 0 or img_cols <= 0:
             return
         render_key = f"{path}:{img_cols}x{img_rows}:chafa"
@@ -3925,9 +3932,15 @@ class App:
         top_h = 2           # tab bar rows
         status_h = 2        # status bar rows
         img_rows = h - top_h - status_h
-        # Always render at full terminal width; the queue panel draws its character
-        # cells on top of the sixel, naturally covering the right portion.
-        img_cols = w - 44 if (self._cover_lyrics and not self.queue_overlay) else w
+        # Don't render sixel over the queue panel or lyrics panel — those are
+        # drawn as character cells and must remain visible above the sixel.
+        if self.queue_overlay:
+            right_w = 44
+        elif self._cover_lyrics:
+            right_w = self._lyrics_panel_w(w)
+        else:
+            right_w = 0
+        img_cols = w - right_w
         if img_rows <= 0 or img_cols <= 0:
             return
 
@@ -3941,11 +3954,12 @@ class App:
                                 w=img_cols, h=img_rows)
             self._cover_render_key = render_key
             self._cover_sixel_visible = True
+            self._cover_sixel_cols = img_cols
             return
 
         # chafa path: cache rendered bytes, re-run only on change
         if render_key == self._cover_render_key and self._cover_render_buf:
-            self._write_image_to_terminal(top_h, self._cover_render_buf)
+            self._write_image_to_terminal(top_h, self._cover_render_buf, img_cols)
             return
 
         try:
@@ -3964,12 +3978,16 @@ class App:
             if result.returncode == 0 and result.stdout:
                 self._cover_render_buf = result.stdout
                 self._cover_render_key = render_key
-                self._write_image_to_terminal(top_h, result.stdout)
+                self._write_image_to_terminal(top_h, result.stdout, img_cols)
         except Exception as e:
             debug_log(f"chafa render error: {e}")
 
-    def _write_image_to_terminal(self, top_row: int, data: bytes) -> None:
+    def _write_image_to_terminal(self, top_row: int, data: bytes, cols: int = 0) -> None:
         """Write image data (sixel or ANSI) directly to the terminal at the given row."""
+        # Strip trailing newlines — chafa often appends one, and writing a newline
+        # when the cursor is near the bottom of the terminal causes the terminal to
+        # scroll, shifting the cover image and corrupting the layout.
+        data = data.rstrip(b"\r\n")
         # Save cursor, move to content area, write image, restore cursor
         sys.stdout.buffer.write(
             b"\0337"                                          # save cursor (VT100)
@@ -3979,6 +3997,8 @@ class App:
         )
         sys.stdout.buffer.flush()
         self._cover_sixel_visible = True
+        if cols:
+            self._cover_sixel_cols = cols
 
     def _cover_erase_terminal(self) -> None:
         """Overwrite the image area with spaces before a full curses redraw.
@@ -3990,7 +4010,8 @@ class App:
         top_h = 2
         status_h = 2
         img_rows = h - top_h - status_h
-        img_cols = w
+        # Only erase the columns that were actually covered by the last sixel.
+        img_cols = self._cover_sixel_cols if self._cover_sixel_cols > 0 else w
         if img_rows > 0 and img_cols > 0:
             blank_line = b" " * img_cols
             buf = b"".join(
@@ -4000,6 +4021,10 @@ class App:
             sys.stdout.buffer.write(buf)
             sys.stdout.buffer.flush()
         self._cover_sixel_visible = False
+
+    def _lyrics_panel_w(self, w: int) -> int:
+        """Width of the lyrics panel in the cover tab (adapts to terminal width)."""
+        return max(44, min(w // 3, w - 80))
 
     def _erase_popup_bg(self, y0: int, x0: int, rows: int, cols: int) -> None:
         """Erase a popup area with raw ANSI writes to clear any sixel underneath."""
@@ -4044,6 +4069,9 @@ class App:
         self._cover_erase_terminal()
         self._cover_render_key = ""
         self._cover_render_buf = None
+        # Force ncurses to do a full repaint on next refresh so sixel residue is
+        # overwritten even in cells with transparent background.
+        self.stdscr.clearok(True)
 
     def start_download_tracks(self, tracks: List[Track]) -> None:
         if not tracks:
@@ -4550,6 +4578,7 @@ class App:
         idx = 0
         hint = " j/k ^n/^p: navigate  Enter/5: go to  Esc/q: close "
         hint2 = " a: add to playlist   e/E: enqueue    l: like "
+        self._erase_popup_bg(y0, x0, box_h, box_w)
         try:
             while True:
                 if self._need_redraw:
@@ -6038,38 +6067,36 @@ class App:
             self._redraw_status_only = False
             return
 
-        # Fast path for queue-overlay cursor navigation while cover tab is visible:
-        # skip cover erase/re-render since the queue panel doesn't overlap the cover.
-        if (self._queue_redraw_only and self.tab == TAB_COVER and self.queue_overlay
-                and self._cover_sixel_visible
-                and not self.show_help and not self.info_overlay and not self.lyrics_overlay):
-            self._queue_redraw_only = False
-            self._need_redraw = False
-            left_w = max(20, w - 44)
-            self._draw_queue(top_h, left_w, usable_h, w - left_w)
-            self._draw_status(h - status_h, 0, w)
-            self.stdscr.refresh()
-            return
         self._queue_redraw_only = False
-
         self._redraw_status_only = False
         self._need_redraw = False
-        # On the cover tab with a valid cover, skip erasing — let the old sixel
-        # remain on screen while curses repaints the chrome and the new cover
-        # renders on top (avoids a blank gap between old and new covers).
-        # For all other tabs, erase any residual sixel before the curses repaint.
-        if not (self.tab == TAB_COVER and self.cover_path):
+
+        # Overlays (info/lyrics) take precedence over the cover image.
+        # When they are active we erase any existing sixel so they render cleanly.
+        cover_overlaid = self.info_overlay or self.lyrics_overlay
+
+        # On the cover tab with a valid cover (and no full-screen overlay), skip
+        # erasing — let the old sixel remain while curses repaints the chrome and
+        # the new cover renders on top (avoids a blank gap on track change).
+        if not (self.tab == TAB_COVER and self.cover_path and not cover_overlaid):
             self._cover_erase_terminal()
+        # When an overlay just closed on the cover tab, force a full ncurses repaint
+        # so any overlay remnants in the cover area are properly overwritten.
+        if self.tab == TAB_COVER and not cover_overlaid and not self._cover_sixel_visible:
+            self.stdscr.clearok(True)
         self.stdscr.erase()
 
-        left_w = w if not self.queue_overlay else max(20, w - 44)
+        # When TAB_QUEUE is active the queue fills the full left panel; don't also
+        # draw it as a right-side overlay (that would show the queue twice).
+        queue_panel = self.queue_overlay and self.tab != TAB_QUEUE
+        left_w = w if not queue_panel else max(20, w - 44)
 
         self._draw_tabs(0, 0, w)
         if self.tab == TAB_LIKED:
             self._draw_liked_filter_bar(2, 0, w)
         self._draw_left(top_h, 0, usable_h, left_w)
 
-        if self.queue_overlay:
+        if queue_panel:
             self._draw_queue(top_h, left_w, usable_h, w - left_w)
 
         self._draw_status(h - status_h, 0, w)
@@ -6081,15 +6108,20 @@ class App:
         if self.lyrics_overlay:
             self._draw_lyrics()
 
-        if self.tab == TAB_COVER and self._cover_lyrics and not self.queue_overlay:
-            lyrics_w = 44
-            self._draw_cover_lyrics_panel(top_h, w - lyrics_w, usable_h + 1, lyrics_w)
+        if self.tab == TAB_COVER and self._cover_lyrics and not queue_panel and not cover_overlaid:
+            # Auto-fetch lyrics for the playing track if not already loaded.
+            t_cov = self.current_track
+            if t_cov and not self.lyrics_loading and not (self.lyrics_track_id == t_cov.id and self.lyrics_lines):
+                self.toggle_lyrics(t_cov)
+                self.lyrics_overlay = False
+            lyrics_w = self._lyrics_panel_w(w)
+            self._draw_cover_lyrics_panel(top_h, w - lyrics_w, usable_h, lyrics_w)
 
         self.stdscr.refresh()
 
         # After curses has painted, overlay the cover image if on cover tab.
-        # Done here (after refresh) so sixel/ANSI data isn't erased by curses.
-        if self.tab == TAB_COVER and self.cover_path and not self.show_help:
+        # Skip when a full-screen overlay is active (it would draw under the overlay).
+        if self.tab == TAB_COVER and self.cover_path and not self.show_help and not cover_overlaid:
             self._render_cover_image()
 
     # ---------------------------------------------------------------------------
@@ -6141,6 +6173,8 @@ class App:
             pass  # history_tracks always up to date
         elif t == TAB_COVER:
             self.fetch_cover_async(self.current_track)
+            if self.queue_overlay:
+                self.jump_to_playing_in_queue()
 
         self._need_redraw = True
         self._redraw_status_only = False
@@ -6397,7 +6431,7 @@ class App:
                 self.filter_next(+1)
                 continue
 
-            if ch == ord("v") and self.tab == TAB_COVER and not self.queue_overlay:
+            if ch in (ord("v"), ord("V")) and self.tab == TAB_COVER:
                 self._cover_lyrics = not self._cover_lyrics
                 if self._cover_lyrics and self.current_track:
                     if not self.lyrics_lines and not self.lyrics_loading:
@@ -7106,32 +7140,46 @@ class App:
                 self.start_download_tracks([t for t in tracks if t])
                 continue
 
+            # In the cover tab with the inline lyrics panel (no queue overlay, no
+            # full-screen overlay), intercept navigation keys to scroll the panel.
+            if (self.tab == TAB_COVER and self._cover_lyrics
+                    and not self.queue_overlay
+                    and not self.info_overlay and not self.lyrics_overlay):
+                if ch in (curses.KEY_DOWN, ord("j"), 14):
+                    self.lyrics_scroll += 1
+                    continue
+                if ch in (curses.KEY_UP, ord("k"), 16):
+                    self.lyrics_scroll = max(0, self.lyrics_scroll - 1)
+                    continue
+                if ch == curses.KEY_PPAGE:
+                    self.lyrics_scroll = max(0, self.lyrics_scroll - self._page_step())
+                    continue
+                if ch == curses.KEY_NPAGE:
+                    self.lyrics_scroll += self._page_step()
+                    continue
+                if ch in (curses.KEY_HOME, ord("g")):
+                    self.lyrics_scroll = 0
+                    continue
+                if ch in (curses.KEY_END, ord("G")):
+                    self.lyrics_scroll = 10_000
+                    continue
+
             # Navigation
             if ch == curses.KEY_PPAGE:
                 self.nav_page(-1)
-                if self._queue_context() and self.tab == TAB_COVER:
-                    self._queue_redraw_only = True
                 continue
             if ch == curses.KEY_NPAGE:
                 self.nav_page(+1)
-                if self._queue_context() and self.tab == TAB_COVER:
-                    self._queue_redraw_only = True
                 continue
             if ch in (curses.KEY_HOME, ord("g")):
                 self.nav_home()
-                if self._queue_context() and self.tab == TAB_COVER:
-                    self._queue_redraw_only = True
                 continue
             if ch in (curses.KEY_END, ord("G")):
                 self.nav_end()
-                if self._queue_context() and self.tab == TAB_COVER:
-                    self._queue_redraw_only = True
                 continue
             if ch in (curses.KEY_DOWN, ord("j")):
                 if self._queue_context():
                     self.queue_cursor = clamp(self.queue_cursor + 1, 0, max(0, len(self.queue_items) - 1))
-                    if self.tab == TAB_COVER:
-                        self._queue_redraw_only = True
                 else:
                     _typ, items = self._left_items()
                     new_idx = self.left_idx + 1
@@ -7142,8 +7190,6 @@ class App:
             if ch in (curses.KEY_UP, ord("k")):
                 if self._queue_context():
                     self.queue_cursor = clamp(self.queue_cursor - 1, 0, max(0, len(self.queue_items) - 1))
-                    if self.tab == TAB_COVER:
-                        self._queue_redraw_only = True
                 else:
                     _typ, items = self._left_items()
                     new_idx = self.left_idx - 1

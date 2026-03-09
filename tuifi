@@ -30,7 +30,7 @@ from queue import Queue, Empty
 from typing import Any, Dict, List, Optional, Tuple
 
 APP_NAME = "tuifi"
-VERSION = "1.3.0"
+VERSION = "1.3.5"
 DEFAULT_API = "https://api.monochrome.tf" # See https://github.com/monochrome-music/monochrome/blob/main/INSTANCES.md#official--community-apis
 
 def print_version(prog: str) -> None:

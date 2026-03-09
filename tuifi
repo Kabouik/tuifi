@@ -985,6 +985,7 @@ class App:
         self._cover_ub_socket: Optional[str] = None       # ueberzugpp socket path
         self._cover_ub_pid: Optional[int] = None          # ueberzugpp daemon PID
         self._cover_lyrics: bool = True                # show lyrics panel in cover tab
+        self._cover_lyrics_max_scroll: int = 10_000   # updated each draw; prevents over-scrolling inline panel
 
         self.filter_q: str = str(self.settings.get("initial_filter") or "")
         self.filter_hits: List[int] = []
@@ -1669,27 +1670,38 @@ class App:
 
 
     def _dedupe_tracks(self, tracks: List[Track]) -> List[Track]:
-        seen: Set[int] = set()
+        seen_ids: Set[int] = set()
+        seen_ta: Set[Tuple[str, str]] = set()
         out: List[Track] = []
         for t in tracks:
-            if t.id not in seen:
-                seen.add(t.id)
-                out.append(t)
+            if t.id in seen_ids:
+                continue
+            # Also deduplicate by title+artist to collapse same track released
+            # under different IDs in multiple album editions.
+            ta = (t.title.strip().lower(), t.artist.strip().lower())
+            if ta in seen_ta:
+                continue
+            seen_ids.add(t.id)
+            seen_ta.add(ta)
+            out.append(t)
         return out
 
     def _dedupe_albums(self, albums: List[Album]) -> List[Album]:
-        best: Dict[Tuple[Any, str, str], Album] = {}
+        # Key by (artist, title, year) so that different-ID editions of the
+        # same album are collapsed into one entry (matching Monochrome.tf behaviour).
+        best: Dict[Tuple[str, str, str], Album] = {}
         for a in albums:
             k = (
-                a.id if a.id else 0,
                 a.artist.strip().lower(),
                 a.title.strip().lower(),
+                year_norm(a.year),
             )
             if k not in best:
                 best[k] = Album(id=a.id, title=a.title, artist=a.artist, year=a.year, track_id=a.track_id)
                 continue
             cur = best[k]
-            if cur.id == 0 and a.id:
+            # Prefer the lowest non-zero id (tends to be the primary/canonical release)
+            if a.id and (not cur.id or a.id < cur.id):
                 cur.id = a.id
             if year_norm(cur.year) == "????" and year_norm(a.year) != "????":
                 cur.year = a.year
@@ -1700,6 +1712,7 @@ class App:
         return out
 
     def _extract_artist_albums_from_payload(self, payload: Dict[str, Any]) -> List[Album]:
+        include_singles = self.settings.get("include_singles_and_eps_in_artist_tab", False)
         albums: List[Album] = []
         for path in (("albums", "items"), ("data", "albums", "items"), ("albums",), ("data", "albums")):
             cur: Any = payload
@@ -1714,6 +1727,10 @@ class App:
                 for it in cur:
                     if isinstance(it, dict):
                         x = it.get("item", it) if isinstance(it.get("item"), dict) else it
+                        if not include_singles:
+                            alb_type = str(x.get("type") or "").upper()
+                            if alb_type in ("SINGLE", "EP"):
+                                continue
                         aobj = self._parse_album_obj(x)
                         if aobj:
                             albums.append(aobj)
@@ -3892,9 +3909,10 @@ class App:
         top_h = 2
         status_h = 2
         img_rows = h - top_h - status_h
-        if self.queue_overlay:
+        queue_panel_active = self.queue_overlay and self.tab != TAB_QUEUE
+        if queue_panel_active:
             right_w = 44
-        elif self._cover_lyrics:
+        elif self._cover_lyrics and not self.lyrics_overlay:
             right_w = self._lyrics_panel_w(w)
         else:
             right_w = 0
@@ -3932,11 +3950,14 @@ class App:
         top_h = 2           # tab bar rows
         status_h = 2        # status bar rows
         img_rows = h - top_h - status_h
-        # Don't render sixel over the queue panel or lyrics panel — those are
-        # drawn as character cells and must remain visible above the sixel.
-        if self.queue_overlay:
+        # Don't render sixel over the queue panel or inline lyrics panel — those
+        # are drawn as character cells and must remain visible above the sixel.
+        # When the lyrics_overlay popup is open it is a centred box drawn on top
+        # of the sixel (after rendering), so no column reservation is needed.
+        queue_panel_active = self.queue_overlay and self.tab != TAB_QUEUE
+        if queue_panel_active:
             right_w = 44
-        elif self._cover_lyrics:
+        elif self._cover_lyrics and not self.lyrics_overlay:
             right_w = self._lyrics_panel_w(w)
         else:
             right_w = 0
@@ -3957,9 +3978,12 @@ class App:
             self._cover_sixel_cols = img_cols
             return
 
-        # chafa path: cache rendered bytes, re-run only on change
+        # chafa path: cache rendered bytes, re-run only on change.
+        # Skip the write entirely when the sixel is already on screen and nothing
+        # changed — avoids the visible flash on every progress-tick redraw.
         if render_key == self._cover_render_key and self._cover_render_buf:
-            self._write_image_to_terminal(top_h, self._cover_render_buf, img_cols)
+            if not self._cover_sixel_visible:
+                self._write_image_to_terminal(top_h, self._cover_render_buf, img_cols)
             return
 
         try:
@@ -4042,6 +4066,8 @@ class App:
         """Draw lyrics as a right-side panel in the cover tab."""
         if w < 10:
             return
+        # Text colour: configurable via settings "cover_lyrics_color_pair" (int, default 0 = terminal default = white).
+        lyr_attr = curses.color_pair(int(self.settings.get("cover_lyrics_color_pair", 0))) if self.color_mode and curses.has_colors() else 0
         # Title bar
         title = " Lyrics "
         self.stdscr.addstr(y, x, title[:w].ljust(w), self.C(4))
@@ -4052,15 +4078,16 @@ class App:
             if self.lyrics_loading:
                 self.stdscr.addstr(y + 1, x, " Loading…"[:w].ljust(w), self.C(4))
             else:
-                self.stdscr.addstr(y + 1, x, " No lyrics"[:w].ljust(w), self.C(10))
+                self.stdscr.addstr(y + 1, x, " No lyrics"[:w].ljust(w), lyr_attr)
             return
-        scroll = max(0, min(self.lyrics_scroll, max(0, len(lines) - inner_h)))
+        self._cover_lyrics_max_scroll = max(0, len(lines) - inner_h)
+        scroll = max(0, min(self.lyrics_scroll, self._cover_lyrics_max_scroll))
         for row in range(inner_h):
             li = scroll + row
             if y + 1 + row >= y + h:
                 break
             text = lines[li].rstrip() if li < len(lines) else ""
-            self.stdscr.addstr(y + 1 + row, x, text[:w].ljust(w), self.C(10))
+            self.stdscr.addstr(y + 1 + row, x, text[:w].ljust(w), lyr_attr)
 
     def _cover_clear_image(self) -> None:
         """Clear the displayed cover image (called when leaving cover tab or before full redraw)."""
@@ -4582,8 +4609,13 @@ class App:
         try:
             while True:
                 if self._need_redraw:
-                    self.draw()
-                    self._erase_popup_bg(y0, x0, box_h, box_w)
+                    # For status-only progress ticks, skip the full redraw so that
+                    # stdscr.refresh() doesn't overwrite the popup area with spaces.
+                    if not self._redraw_status_only:
+                        self.draw()
+                        self._erase_popup_bg(y0, x0, box_h, box_w)
+                    self._need_redraw = False
+                    self._redraw_status_only = False
 
                 idx = clamp(idx, 0, len(artists) - 1)
                 win.erase()
@@ -4599,6 +4631,7 @@ class App:
                     win.addstr(1 + row, 2, artists[fi].name[:box_w - 4].ljust(box_w - 4), attr)
                 win.addstr(box_h - 2, 2, hint[:box_w - 4], self.C(10))
                 win.addstr(box_h - 1, 2, hint2[:box_w - 4], self.C(10))
+                win.touchwin()  # force full resend so popup stays visible over sixel
                 win.refresh()
 
                 self.stdscr.timeout(100)
@@ -5807,14 +5840,19 @@ class App:
 
         self.stdscr.addstr(y + 1, x, line2, self._status_color_pair(pa, alive))
 
-    def _draw_overlay_box(self, title: str, lines: List[str], scroll: int, box_w: int, box_h: int) -> None:
+    def _draw_overlay_box(self, title: str, lines: List[str], scroll: int, box_w: int, box_h: int, _erase_bg: bool = True) -> None:
         h, w = self.stdscr.getmaxyx()
         box_w = min(w - 6, box_w)
         box_h = min(h - 6, box_h)
         y0 = (h - box_h) // 2
         x0 = (w - box_w) // 2
-        for yy in range(y0, y0 + box_h):
-            self.stdscr.addstr(yy, x0, " " * box_w)
+        # Erase any sixel pixels under the box before drawing so the popup is
+        # always visible even when a cover image occupies this area.
+        # Skip when _erase_bg=False (status-only fast path: sixel wasn't re-drawn).
+        if _erase_bg:
+            self._erase_popup_bg(y0, x0, box_h, box_w)
+            for yy in range(y0, y0 + box_h):
+                self.stdscr.addstr(yy, x0, " " * box_w)
         win = self.stdscr.derwin(box_h, box_w, y0, x0)
         win.box()
         win.addstr(0, 2, f" {title} ", self.C(4))
@@ -5830,6 +5868,7 @@ class App:
                 win.addstr(1 + i, 2, text, curses.color_pair(16))
             else:
                 win.addstr(1 + i, 2, line[:box_w - 4])
+        win.touchwin()  # force full resend so popup is visible over any sixel residue
         win.refresh()
 
     def _draw_help(self) -> None:
@@ -5943,7 +5982,7 @@ class App:
         self._help_max_scroll = max(0, len(lines) - inner_h)
         self._draw_overlay_box("Help  (? or q to close)", lines, self.help_scroll, box_w=97, box_h=box_h)
 
-    def _draw_info(self) -> None:
+    def _draw_info(self, _erase_bg: bool = True) -> None:
         if self.info_artist and not self.info_track and not self.info_album:
             ar = self.info_artist
             lines: List[str] = [f"Artist : {ar.name}", f"ID     : {ar.id}" if ar.id else "", ""]
@@ -5965,7 +6004,7 @@ class App:
                     if payload.get("_similar"):
                         lines.append(f"  [s] browse {len(payload['_similar'])} similar artists")
             lines = [l for l in lines if l is not None]
-            self._draw_overlay_box("Artist info", lines, self.info_scroll, box_w=76, box_h=20)
+            self._draw_overlay_box("Artist info", lines, self.info_scroll, box_w=76, box_h=20, _erase_bg=_erase_bg)
             return
         if self.info_album and not self.info_track:
             a = self.info_album
@@ -5990,12 +6029,12 @@ class App:
                             if k in data:
                                 lines.append(f"{k}: {data[k]}")
             lines = [l for l in lines if l is not None]
-            self._draw_overlay_box("Album info", lines, self.info_scroll, box_w=76, box_h=16)
+            self._draw_overlay_box("Album info", lines, self.info_scroll, box_w=76, box_h=16, _erase_bg=_erase_bg)
             return
 
         t = self.info_track
         if not t:
-            self._draw_overlay_box("Info", ["(no selection)"], 0, box_w=72, box_h=10)
+            self._draw_overlay_box("Info", ["(no selection)"], 0, box_w=72, box_h=10, _erase_bg=_erase_bg)
             return
         lines = [
             f"Title   : {t.title}",
@@ -6021,9 +6060,9 @@ class App:
                     for k in ("audioQuality", "explicit", "popularity", "streamReady"):
                         if k in data:
                             lines.append(f"{k}: {data.get(k)}")
-        self._draw_overlay_box("Track info", lines, self.info_scroll, box_w=76, box_h=16)
+        self._draw_overlay_box("Track info", lines, self.info_scroll, box_w=76, box_h=16, _erase_bg=_erase_bg)
 
-    def _draw_lyrics(self) -> None:
+    def _draw_lyrics(self, _erase_bg: bool = True) -> None:
         t_id = self.lyrics_track_id
         title = "Lyrics"
         t_ref = self.lyrics_track
@@ -6035,7 +6074,10 @@ class App:
             lines = ["Loading lyrics…"]
         else:
             lines = self.lyrics_lines or ["(empty)"]
-        self._draw_overlay_box(title[:80], lines, self.lyrics_scroll, box_w=84, box_h=30)
+        h, _ = self.stdscr.getmaxyx()
+        inner_h = min(h - 8, 30 - 2)
+        self._lyrics_overlay_max_scroll = max(0, len(lines) - inner_h)
+        self._draw_overlay_box(title[:80], lines, self.lyrics_scroll, box_w=84, box_h=30, _erase_bg=_erase_bg)
 
     def _draw_liked_filter_bar(self, y: int, x: int, w: int) -> None:
         FILTER_LABELS = ["Allᴹ⁻¹", "Tracksᴹ⁻²", "Artistsᴹ⁻³", "Albumsᴹ⁻⁴", "Playlistsᴹ⁻⁵"]
@@ -6060,9 +6102,19 @@ class App:
         status_h = 2
         usable_h = h - top_h - status_h
 
-        if self._redraw_status_only and not self.show_help and not self.info_overlay and not self.lyrics_overlay:
+        if self._redraw_status_only and not self.show_help:
+            # Status-only tick: update the status bar then restore any open overlay
+            # without re-rendering the sixel.  Using noutrefresh lets win.refresh()
+            # override the popup cells in the virtual screen so doupdate sends the
+            # popup content instead of the spaces that stdscr has for those cells.
             self._draw_status(h - status_h, 0, w)
-            self.stdscr.refresh()
+            self.stdscr.noutrefresh()
+            if self.info_overlay:
+                self._draw_info(_erase_bg=False)
+            elif self.lyrics_overlay:
+                self._draw_lyrics(_erase_bg=False)
+            else:
+                curses.doupdate()
             self._need_redraw = False
             self._redraw_status_only = False
             return
@@ -6071,19 +6123,16 @@ class App:
         self._redraw_status_only = False
         self._need_redraw = False
 
-        # Overlays (info/lyrics) take precedence over the cover image.
-        # When they are active we erase any existing sixel so they render cleanly.
-        cover_overlaid = self.info_overlay or self.lyrics_overlay
-
-        # On the cover tab with a valid cover (and no full-screen overlay), skip
-        # erasing — let the old sixel remain while curses repaints the chrome and
-        # the new cover renders on top (avoids a blank gap on track change).
-        if not (self.tab == TAB_COVER and self.cover_path and not cover_overlaid):
+        # On the cover tab with a valid cover, keep the existing sixel in place
+        # while curses repaints the UI chrome — the new cover is written after
+        # stdscr.refresh(), and overlays are drawn on top of it afterwards.
+        # On any other tab (or if cover_path is unset), erase any stale sixel first.
+        if not (self.tab == TAB_COVER and self.cover_path):
             self._cover_erase_terminal()
-        # When an overlay just closed on the cover tab, force a full ncurses repaint
-        # so any overlay remnants in the cover area are properly overwritten.
-        if self.tab == TAB_COVER and not cover_overlaid and not self._cover_sixel_visible:
-            self.stdscr.clearok(True)
+        # Full redraw: stdscr.erase()+refresh() will overwrite the sixel area with
+        # spaces, so mark it as no longer visible.  This ensures _render_cover_image
+        # re-writes it even if the render key is unchanged.
+        self._cover_sixel_visible = False
         self.stdscr.erase()
 
         # When TAB_QUEUE is active the queue fills the full left panel; don't also
@@ -6101,14 +6150,7 @@ class App:
 
         self._draw_status(h - status_h, 0, w)
 
-        if self.show_help:
-            self._draw_help()
-        if self.info_overlay:
-            self._draw_info()
-        if self.lyrics_overlay:
-            self._draw_lyrics()
-
-        if self.tab == TAB_COVER and self._cover_lyrics and not queue_panel and not cover_overlaid:
+        if self.tab == TAB_COVER and self._cover_lyrics and not queue_panel and not self.lyrics_overlay:
             # Auto-fetch lyrics for the playing track if not already loaded.
             t_cov = self.current_track
             if t_cov and not self.lyrics_loading and not (self.lyrics_track_id == t_cov.id and self.lyrics_lines):
@@ -6119,10 +6161,29 @@ class App:
 
         self.stdscr.refresh()
 
-        # After curses has painted, overlay the cover image if on cover tab.
-        # Skip when a full-screen overlay is active (it would draw under the overlay).
-        if self.tab == TAB_COVER and self.cover_path and not self.show_help and not cover_overlaid:
+        # After curses has refreshed, write the cover sixel.  Overlays (info,
+        # lyrics, help) are drawn AFTER the sixel so they appear on top of it.
+        # _draw_overlay_box calls _erase_popup_bg + win.touchwin() to ensure the
+        # popup area is clear and its content is fully resent over the sixel.
+        if self.tab == TAB_COVER and self.cover_path and not self.show_help:
+            # _cover_sixel_visible was cleared at the top of this full-redraw path
+            # (see below), so _render_cover_image will always re-write the sixel
+            # after a full stdscr.erase()+refresh().  The flag is only kept True
+            # during status-only redraws so those skip the expensive write.
             self._render_cover_image()
+            # Re-assert the tab-bar and status-bar rows so that any scroll
+            # artifacts written by the terminal sixel engine are overwritten.
+            if self._cover_sixel_visible:
+                self.stdscr.touchline(0, top_h, True)
+                self.stdscr.touchline(h - status_h, status_h, True)
+                self.stdscr.refresh()
+
+        if self.show_help:
+            self._draw_help()
+        if self.info_overlay:
+            self._draw_info()
+        if self.lyrics_overlay:
+            self._draw_lyrics()
 
     # ---------------------------------------------------------------------------
     # tab switching
@@ -6223,6 +6284,11 @@ class App:
     # ---------------------------------------------------------------------------
     def run(self) -> None:
         last_persist = 0.0
+        # Disable all scroll optimisations — ncurses may otherwise issue terminal
+        # scroll sequences when updating list panels, shifting the entire screen
+        # content including the sixel cover image.
+        self.stdscr.idlok(False)
+        self.stdscr.scrollok(False)
 
         if self.tab == TAB_LIKED:
             self.fetch_liked_async()
@@ -6405,17 +6471,17 @@ class App:
                 if ch in (27, ord("v"), ord("V"), ord("q")):
                     self.lyrics_overlay = False
                 elif ch in (curses.KEY_DOWN, ord("j")):
-                    self.lyrics_scroll += 1
+                    self.lyrics_scroll = min(self.lyrics_scroll + 1, getattr(self, "_lyrics_overlay_max_scroll", 10_000))
                 elif ch in (curses.KEY_UP, ord("k")):
                     self.lyrics_scroll = max(0, self.lyrics_scroll - 1)
                 elif ch == curses.KEY_PPAGE:
                     self.lyrics_scroll = max(0, self.lyrics_scroll - self._page_step())
                 elif ch == curses.KEY_NPAGE:
-                    self.lyrics_scroll += self._page_step()
+                    self.lyrics_scroll = min(self.lyrics_scroll + self._page_step(), getattr(self, "_lyrics_overlay_max_scroll", 10_000))
                 elif ch in (curses.KEY_HOME, ord("g")):
                     self.lyrics_scroll = 0
                 elif ch in (curses.KEY_END, ord("G")):
-                    self.lyrics_scroll = 10_000
+                    self.lyrics_scroll = getattr(self, "_lyrics_overlay_max_scroll", 10_000)
                 continue
 
             if ch == ord("/"):
@@ -6431,16 +6497,28 @@ class App:
                 self.filter_next(+1)
                 continue
 
-            if ch in (ord("v"), ord("V")) and self.tab == TAB_COVER:
-                self._cover_lyrics = not self._cover_lyrics
-                if self._cover_lyrics and self.current_track:
-                    if not self.lyrics_lines and not self.lyrics_loading:
+            # V in cover tab:
+            #   - If miniqueue is open → close it and show lyrics (one action, no toggle).
+            #   - If miniqueue is closed → toggle inline lyrics panel on/off.
+            if ch == ord("V") and self.tab == TAB_COVER:
+                if self.queue_overlay:
+                    # Always: close miniqueue and ensure lyrics are shown.
+                    self.queue_overlay = False
+                    self.focus = "left"
+                    self._cover_lyrics = True
+                else:
+                    self._cover_lyrics = not self._cover_lyrics
+                if self._cover_lyrics:
+                    # Fetch lyrics if not already loaded.
+                    if self.current_track and not self.lyrics_lines and not self.lyrics_loading:
                         self.toggle_lyrics(self.current_track)
                         self.lyrics_overlay = False
                 self._cover_render_key = ""   # force re-render at new width
                 self._cover_render_buf = None
                 continue
 
+            # v: standard lyrics popup — works the same in all tabs (cover-compatible
+            # because _draw_overlay_box now renders after the sixel and clears under itself).
             if ch == ord("v"):
                 if self.lyrics_overlay:
                     self.toggle_lyrics()
@@ -7145,8 +7223,9 @@ class App:
             if (self.tab == TAB_COVER and self._cover_lyrics
                     and not self.queue_overlay
                     and not self.info_overlay and not self.lyrics_overlay):
+                _lmax = self._cover_lyrics_max_scroll
                 if ch in (curses.KEY_DOWN, ord("j"), 14):
-                    self.lyrics_scroll += 1
+                    self.lyrics_scroll = min(self.lyrics_scroll + 1, _lmax)
                     continue
                 if ch in (curses.KEY_UP, ord("k"), 16):
                     self.lyrics_scroll = max(0, self.lyrics_scroll - 1)
@@ -7155,13 +7234,13 @@ class App:
                     self.lyrics_scroll = max(0, self.lyrics_scroll - self._page_step())
                     continue
                 if ch == curses.KEY_NPAGE:
-                    self.lyrics_scroll += self._page_step()
+                    self.lyrics_scroll = min(self.lyrics_scroll + self._page_step(), _lmax)
                     continue
                 if ch in (curses.KEY_HOME, ord("g")):
                     self.lyrics_scroll = 0
                     continue
                 if ch in (curses.KEY_END, ord("G")):
-                    self.lyrics_scroll = 10_000
+                    self.lyrics_scroll = _lmax
                     continue
 
             # Navigation

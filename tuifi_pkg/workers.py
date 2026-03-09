@@ -1,0 +1,123 @@
+"""Background workers: MetaFetcher and DownloadManager."""
+
+from __future__ import annotations
+
+import threading
+import time
+from queue import Queue, Empty
+from typing import Any, Dict, List, Optional
+
+from tuifi_pkg.models import Track, album_year_from_obj, debug_log
+from tuifi_pkg.client import HiFiClient
+
+
+class MetaFetcher:
+    def __init__(self, client: HiFiClient) -> None:
+        self.client = client
+        self.q: "Queue[int]" = Queue()
+        self.pending: set = set()
+        self.lock = threading.Lock()
+        self.year: Dict[int, str] = {}
+        self.album_id: Dict[int, int] = {}
+        self.artist_id: Dict[int, int] = {}
+        self.duration: Dict[int, int] = {}
+        self._stop = False
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop = True
+
+    def want(self, tid: int) -> None:
+        if tid <= 0:
+            return
+        with self.lock:
+            if tid in self.pending:
+                return
+            self.pending.add(tid)
+            self.q.put(tid)
+
+    def _run(self) -> None:
+        while not self._stop:
+            try:
+                tid = self.q.get(timeout=0.2)
+            except Empty:
+                continue
+            try:
+                info = self.client.info(tid)
+                data = info.get("data") if isinstance(info, dict) else None
+                if isinstance(data, dict):
+                    alb = data.get("album")
+                    if isinstance(alb, dict):
+                        y = album_year_from_obj(alb)
+                        if y != "????":
+                            self.year[tid] = y
+                        if str(alb.get("id", "")).isdigit():
+                            self.album_id[tid] = int(alb["id"])
+                    if tid not in self.year:
+                        y2 = album_year_from_obj(data)
+                        if y2 != "????":
+                            self.year[tid] = y2
+                    a = data.get("artist")
+                    if isinstance(a, dict) and str(a.get("id", "")).isdigit():
+                        self.artist_id[tid] = int(a["id"])
+                    dv = data.get("duration")
+                    if isinstance(dv, (int, float)) and dv > 0:
+                        self.duration[tid] = int(dv)
+            except Exception:
+                pass
+            finally:
+                with self.lock:
+                    self.pending.discard(tid)
+                self.q.task_done()
+
+
+class DownloadManager:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._queue: List[Track] = []
+        self._thread: Optional[threading.Thread] = None
+        self.active = False
+        self.progress_line = ""
+        self.progress_clear_at = 0.0
+        self.error: Optional[str] = None
+        self._total = 0
+        self._completed = 0
+
+    def enqueue(self, tracks: List[Track], worker_fn) -> None:
+        if not tracks:
+            return
+        with self._lock:
+            if not self._queue and not self.active:
+                self._total = len(tracks)
+                self._completed = 0
+            else:
+                self._total += len(tracks)
+            self._queue.extend(tracks)
+            if self._thread is None or not self._thread.is_alive():
+                self._thread = threading.Thread(target=self._run, args=(worker_fn,), daemon=True)
+                self._thread.start()
+
+    def _run(self, worker_fn) -> None:
+        self.active = True
+        self.error = None
+        while True:
+            with self._lock:
+                if not self._queue:
+                    break
+                t = self._queue.pop(0)
+                remaining = len(self._queue)
+                current = self._total - remaining
+                total = self._total
+            try:
+                worker_fn(t, remaining, current, total, self._set_progress)
+            except Exception as e:
+                self.error = str(e)
+            with self._lock:
+                self._completed += 1
+        self.active = False
+        self.progress_clear_at = time.time() + 2.0
+
+    def _set_progress(self, s: str) -> None:
+        with self._lock:
+            self.progress_line = s

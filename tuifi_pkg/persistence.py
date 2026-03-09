@@ -1,0 +1,224 @@
+"""Persistence: load/save JSON state files."""
+
+from __future__ import annotations
+
+import json
+import os
+import time
+import uuid
+from typing import Any, Dict, List, Optional, Tuple
+
+from tuifi_pkg import QUALITY_ORDER, TAB_QUEUE, AUTOPLAY_OFF
+from tuifi_pkg.models import (
+    Track, Album, Artist,
+    STATE_DIR, QUEUE_FILE, LIKED_FILE, PLAYLISTS_FILE, HISTORY_FILE, SETTINGS_FILE,
+    clamp, track_to_mono, mono_to_track, _default_downloads_dir,
+)
+
+
+# ---------------------------------------------------------------------------
+# Low-level JSON helpers
+# ---------------------------------------------------------------------------
+
+def load_json(path: str, default: Any) -> Any:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return default
+
+
+def save_json(path: str, obj: Any) -> None:
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+
+
+# ---------------------------------------------------------------------------
+# Queue
+# ---------------------------------------------------------------------------
+
+def load_queue() -> Tuple[List[Track], int]:
+    data = load_json(QUEUE_FILE, {})
+    if isinstance(data, dict) and data.get("version") == 2 and isinstance(data.get("items"), list):
+        items: List[Track] = []
+        for it in data["items"]:
+            if isinstance(it, dict):
+                try:
+                    t = Track.from_dict(it)
+                    if t.id > 0:
+                        items.append(t)
+                except Exception:
+                    pass
+        play_idx = int(data.get("idx", 0) or 0)
+        play_idx = clamp(play_idx, 0, max(0, len(items) - 1))
+        return items, play_idx
+    return [], 0
+
+
+def save_queue(items: List[Track], play_idx: int) -> None:
+    play_idx = clamp(play_idx, 0, max(0, len(items) - 1))
+    save_json(QUEUE_FILE, {"version": 2, "idx": play_idx, "items": [t.to_dict() for t in items]})
+
+
+# ---------------------------------------------------------------------------
+# Liked
+# ---------------------------------------------------------------------------
+
+def load_liked() -> Tuple[List[Dict[str, Any]], set, List[Dict[str, Any]], set, List[Dict[str, Any]], set, List[Dict[str, Any]], set]:
+    """Load liked.json. Returns (tracks, track_ids, albums, album_ids, artists, artist_ids, playlists, playlist_names).
+    Migrates from old likes.json if liked.json doesn't exist yet."""
+    data = load_json(LIKED_FILE, None)
+    if data is None:
+        old = load_json(os.path.join(STATE_DIR, "likes.json"), None)
+        if isinstance(old, dict):
+            old_ids = [int(x) for x in old.get("tracks", []) if str(x).isdigit()]
+            queue_items, _ = load_queue()
+            by_id = {t.id: t for t in queue_items}
+            now_ms = int(time.time() * 1000)
+            tracks = [track_to_mono(by_id[tid], now_ms) for tid in old_ids if tid in by_id]
+            save_json(LIKED_FILE, {"favorites_tracks": tracks})
+            return tracks, {t["id"] for t in tracks}, [], set(), [], set(), [], set()
+        return [], set(), [], set(), [], set(), [], set()
+    tracks = [d for d in data.get("favorites_tracks", []) if isinstance(d, dict) and d.get("id")]
+    albums = [d for d in data.get("favorites_albums", []) if isinstance(d, dict) and d.get("id")]
+    artists = [d for d in data.get("favorites_artists", []) if isinstance(d, dict) and d.get("id")]
+    playlists = [d for d in data.get("tuifi_liked_playlists", data.get("favorites_playlists", [])) if isinstance(d, dict) and d.get("name")]
+    return (
+        tracks, {int(d["id"]) for d in tracks},
+        albums, {int(d["id"]) for d in albums},
+        artists, {int(d["id"]) for d in artists},
+        playlists, {d["name"] for d in playlists},
+    )
+
+
+def save_liked(
+    tracks: List[Dict[str, Any]],
+    albums: List[Dict[str, Any]],
+    artists: List[Dict[str, Any]],
+    playlists: List[Dict[str, Any]],
+) -> None:
+    save_json(LIKED_FILE, {
+        "favorites_tracks": tracks,
+        "favorites_albums": albums,
+        "favorites_artists": artists,
+        "tuifi_liked_playlists": playlists,
+    })
+
+
+# ---------------------------------------------------------------------------
+# Playlists
+# ---------------------------------------------------------------------------
+
+def load_playlists() -> Tuple[Dict[str, List[Any]], Dict[str, Dict[str, Any]]]:
+    """Load playlists.json. Returns (name→List[Track], name→metadata dict)."""
+    data = load_json(PLAYLISTS_FILE, None)
+    playlists: Dict[str, List[Any]] = {}
+    meta: Dict[str, Dict[str, Any]] = {}
+    if data is None:
+        old = load_json(PLAYLISTS_FILE, {})
+        if isinstance(old, dict) and old:
+            first = next(iter(old.values()), None)
+            if isinstance(first, list) and (not first or isinstance(first[0], int)):
+                return {}, {}
+        return {}, {}
+    now_ms = int(time.time() * 1000)
+    for pl in data.get("user_playlists", []):
+        if not isinstance(pl, dict):
+            continue
+        name = str(pl.get("name", "") or "")
+        if not name:
+            continue
+        tracks = [t for t in (mono_to_track(d) for d in pl.get("tracks", [])) if t is not None]
+        playlists[name] = tracks
+        meta[name] = {
+            "id": str(pl.get("id") or uuid.uuid4()),
+            "createdAt": int(pl.get("createdAt") or now_ms),
+        }
+    return playlists, meta
+
+
+def save_playlists(playlists: Dict[str, List[Any]], meta: Dict[str, Dict[str, Any]]) -> None:
+    now_ms = int(time.time() * 1000)
+    user_playlists = []
+    for name, tracks in playlists.items():
+        m = meta.get(name, {})
+        user_playlists.append({
+            "id": m.get("id") or str(uuid.uuid4()),
+            "name": name,
+            "tracks": [track_to_mono(t) for t in tracks],
+            "numberOfTracks": len(tracks),
+            "createdAt": m.get("createdAt") or now_ms,
+            "updatedAt": now_ms,
+        })
+    save_json(PLAYLISTS_FILE, {"user_playlists": user_playlists})
+
+
+# ---------------------------------------------------------------------------
+# History
+# ---------------------------------------------------------------------------
+
+def load_history() -> List[Any]:
+    data = load_json(HISTORY_FILE, {})
+    return [t for t in (mono_to_track(d) for d in data.get("history_tracks", [])) if t is not None]
+
+
+def save_history(tracks: List[Any]) -> None:
+    save_json(HISTORY_FILE, {"history_tracks": [track_to_mono(t) for t in tracks]})
+
+
+# ---------------------------------------------------------------------------
+# Settings
+# ---------------------------------------------------------------------------
+
+def load_settings() -> Dict[str, Any]:
+    s = load_json(SETTINGS_FILE, {})
+    if not isinstance(s, dict):
+        s = {}
+    s.setdefault("volume", 100)
+    s.setdefault("mute", False)
+    s.setdefault("color_mode", True)
+    s.setdefault("queue_overlay", False)
+    s.setdefault("show_toggles", True)
+    s.setdefault("show_track_album", True)
+    s.setdefault("show_track_year", True)
+    s.setdefault("show_track_duration", True)
+    s.setdefault("quality", QUALITY_ORDER[0])
+    s.setdefault("autoplay", AUTOPLAY_OFF)
+    s.setdefault("autoplay_n", 3)
+    s.setdefault("history_max", 0)
+    s.setdefault("show_numbers", False)
+    s.setdefault("initial_tab", TAB_QUEUE)
+    s.setdefault("initial_filter", "")
+    s.setdefault("tab_align", True)
+    s.setdefault("tsv_max_col_width", 32)
+    s.setdefault("tsv_max_artist_width", 25)
+    s.setdefault("tsv_max_title_width", 0)
+    s.setdefault("tsv_max_album_width", 0)
+    s.setdefault("tsv_max_year_width", 6)
+    s.setdefault("tsv_max_duration_width", 6)
+    s.setdefault("color_playing",   "green")
+    s.setdefault("color_paused",    "yellow")
+    s.setdefault("color_error",     "red")
+    s.setdefault("color_chrome",    "blue")
+    s.setdefault("color_accent",    "magenta")
+    s.setdefault("color_artist",    "white")
+    s.setdefault("color_album",     "blue")
+    s.setdefault("color_year",      "blue")
+    s.setdefault("color_duration",  "blue")
+    s.setdefault("color_numbers",   "blue")
+    s.setdefault("color_title",     "white")
+    s.setdefault("color_separator", "white")
+    s.setdefault("color_liked",     "white")
+    s.setdefault("color_mark",      "red")
+    s.setdefault("download_dir", _default_downloads_dir())
+    s.setdefault("download_structure", "{artist}/{artist} - {album} ({year})")
+    s.setdefault("download_filename", "{track:02d}. {artist} - {title}")
+    s.setdefault("include_singles_and_eps_in_artist_tab", False)
+    s.setdefault("auto_resume_playback", False)
+    return s
+
+
+def save_settings(s: Dict[str, Any]) -> None:
+    save_json(SETTINGS_FILE, s)

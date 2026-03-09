@@ -1,0 +1,37 @@
+"""tuifi package — a TUI music player for TIDAL HiFi API."""
+
+APP_NAME = "tuifi"
+VERSION = "1.3.5"
+DEFAULT_API = "https://api.monochrome.tf"
+
+TAB_SEARCH      = 1
+TAB_QUEUE       = 2
+TAB_RECOMMENDED = 3
+TAB_MIX         = 4
+TAB_ARTIST      = 5
+TAB_ALBUM       = 6
+TAB_LIKED       = 7
+TAB_PLAYLISTS   = 8
+TAB_HISTORY     = 9
+TAB_COVER       = 10
+
+TAB_NAMES = {
+    TAB_SEARCH:      "Search\u00b9",
+    TAB_QUEUE:       "Queue\u00b2",
+    TAB_RECOMMENDED: "Recommended\u00b3",
+    TAB_MIX:         "Mix\u2074",
+    TAB_ARTIST:      "Artist\u2075",
+    TAB_ALBUM:       "Album\u2076",
+    TAB_LIKED:       "Liked\u2077",
+    TAB_PLAYLISTS:   "Playlists\u2078",
+    TAB_HISTORY:     "History\u2079",
+    TAB_COVER:       "Cover\u2070",
+}
+
+# Autoplay modes
+AUTOPLAY_OFF         = 0
+AUTOPLAY_MIX         = 1
+AUTOPLAY_RECOMMENDED = 2
+AUTOPLAY_NAMES       = ["off", "mix", "recommended"]
+
+QUALITY_ORDER = ["HI_RES_LOSSLESS", "LOSSLESS", "HIGH", "LOW"]

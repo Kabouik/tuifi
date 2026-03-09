@@ -987,6 +987,9 @@ class App:
         self._cover_lyrics: bool = True                # show lyrics panel in cover tab
         self._cover_lyrics_max_scroll: int = 10_000   # updated each draw; prevents over-scrolling inline panel
 
+        self._skip_delta: int = 0         # accumulated next/prev presses waiting to be applied
+        self._skip_at: float = 0.0        # timestamp of last skip key press
+
         self.filter_q: str = str(self.settings.get("initial_filter") or "")
         self.filter_hits: List[int] = []
         self.filter_pos: int = -1
@@ -3908,7 +3911,7 @@ class App:
             return
         top_h = 2
         status_h = 2
-        img_rows = h - top_h - status_h
+        img_rows = h - top_h - status_h - 1  # -1 matches _render_cover_image gap
         queue_panel_active = self.queue_overlay and self.tab != TAB_QUEUE
         if queue_panel_active:
             right_w = 44
@@ -3949,7 +3952,11 @@ class App:
         h, w = self.stdscr.getmaxyx()
         top_h = 2           # tab bar rows
         status_h = 2        # status bar rows
-        img_rows = h - top_h - status_h
+        # Leave a 1-row gap at the bottom so the sixel never reaches the terminal
+        # edge.  Writing a sixel that ends at the very last terminal row can cause
+        # some terminals to scroll the screen, shifting the image and corrupting
+        # the layout.
+        img_rows = h - top_h - status_h - 1
         # Don't render sixel over the queue panel or inline lyrics panel — those
         # are drawn as character cells and must remain visible above the sixel.
         # When the lyrics_overlay popup is open it is a centred box drawn on top
@@ -6172,10 +6179,14 @@ class App:
             # during status-only redraws so those skip the expensive write.
             self._render_cover_image()
             # Re-assert the tab-bar and status-bar rows so that any scroll
-            # artifacts written by the terminal sixel engine are overwritten.
+            # artifacts are overwritten.  redrawln tells ncurses the physical
+            # terminal content of those rows is corrupted (by the sixel write)
+            # and forces a full character-cell repaint on the next refresh —
+            # unlike touchline which ncurses may optimise away when it thinks
+            # curscr already has the right content.
             if self._cover_sixel_visible:
-                self.stdscr.touchline(0, top_h, True)
-                self.stdscr.touchline(h - status_h, status_h, True)
+                self.stdscr.redrawln(0, top_h)
+                self.stdscr.redrawln(h - status_h, status_h)
                 self.stdscr.refresh()
 
         if self.show_help:
@@ -6355,6 +6366,20 @@ class App:
                 except Exception:
                     pass
 
+            # Debounced prev/next skip: accumulate rapid keypresses and jump
+            # directly to the final target track after a 150 ms pause.
+            if self._skip_delta != 0 and now - self._skip_at >= 0.15:
+                n_q = len(self.queue_items)
+                if n_q > 0:
+                    target = self.queue_play_idx + self._skip_delta
+                    if self.repeat_mode == 1:
+                        target = target % n_q
+                    else:
+                        target = clamp(target, 0, n_q - 1)
+                self._skip_delta = 0
+                if n_q > 0:
+                    self.play_queue_index(target)
+
             self.draw()
 
             ch = self.stdscr.getch()
@@ -6472,16 +6497,22 @@ class App:
                     self.lyrics_overlay = False
                 elif ch in (curses.KEY_DOWN, ord("j")):
                     self.lyrics_scroll = min(self.lyrics_scroll + 1, getattr(self, "_lyrics_overlay_max_scroll", 10_000))
+                    self._redraw_status_only = True  # scroll-only: fast path, no sixel re-render
                 elif ch in (curses.KEY_UP, ord("k")):
                     self.lyrics_scroll = max(0, self.lyrics_scroll - 1)
+                    self._redraw_status_only = True
                 elif ch == curses.KEY_PPAGE:
                     self.lyrics_scroll = max(0, self.lyrics_scroll - self._page_step())
+                    self._redraw_status_only = True
                 elif ch == curses.KEY_NPAGE:
                     self.lyrics_scroll = min(self.lyrics_scroll + self._page_step(), getattr(self, "_lyrics_overlay_max_scroll", 10_000))
+                    self._redraw_status_only = True
                 elif ch in (curses.KEY_HOME, ord("g")):
                     self.lyrics_scroll = 0
+                    self._redraw_status_only = True
                 elif ch in (curses.KEY_END, ord("G")):
                     self.lyrics_scroll = getattr(self, "_lyrics_overlay_max_scroll", 10_000)
+                    self._redraw_status_only = True
                 continue
 
             if ch == ord("/"):
@@ -6517,9 +6548,12 @@ class App:
                 self._cover_render_buf = None
                 continue
 
-            # v: standard lyrics popup — works the same in all tabs (cover-compatible
-            # because _draw_overlay_box now renders after the sixel and clears under itself).
+            # v: standard lyrics popup.
+            # In the cover tab while the inline lyrics panel is already visible,
+            # v is a no-op — lyrics are shown; don't disturb that view.
             if ch == ord("v"):
+                if self.tab == TAB_COVER and self._cover_lyrics and not self.lyrics_overlay:
+                    continue
                 if self.lyrics_overlay:
                     self.toggle_lyrics()
                 else:
@@ -6545,9 +6579,11 @@ class App:
                     continue
                 if ch == ord("j"):
                     self.info_scroll += 1
+                    self._redraw_status_only = True  # scroll-only: fast path, no sixel re-render
                     continue
                 if ch == ord("k"):
                     self.info_scroll = max(0, self.info_scroll - 1)
+                    self._redraw_status_only = True
                     continue
 
             if ch == ord("s"):
@@ -6777,10 +6813,12 @@ class App:
                 continue
 
             if ch in (ord("<"), ord(",")):
-                self.prev_track()
+                self._skip_delta -= 1
+                self._skip_at = time.time()
                 continue
             if ch in (ord(">"), ord(".")):
-                self.next_track()
+                self._skip_delta += 1
+                self._skip_at = time.time()
                 continue
 
             if ch == ord("R"):

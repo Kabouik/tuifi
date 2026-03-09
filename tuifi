@@ -3171,15 +3171,22 @@ class App:
         box_h = min(h - 6, max(6, len(options) + extra_rows))
         y0 = (h - box_h) // 2
         x0 = (w - box_w) // 2
-        for yy in range(y0, y0 + box_h):
-            self.stdscr.addstr(yy, x0, " " * box_w)
+        pad_y = max(0, y0 - 1)
+        pad_x = max(0, x0 - 1)
+        pad_h = min(h - pad_y, box_h + 2)
+        pad_w = min(w - pad_x, box_w + 2)
+        self._erase_popup_bg(pad_y, pad_x, pad_h, pad_w)
+        for yy in range(pad_y, pad_y + pad_h):
+            try:
+                self.stdscr.addstr(yy, pad_x, " " * pad_w)
+            except curses.error:
+                pass
         win = self.stdscr.derwin(box_h, box_w, y0, x0)
         win.keypad(True)
         idx = 0
         filt = ""
         filt_active = False
         self.stdscr.nodelay(False)
-        self._erase_popup_bg(y0, x0, box_h, box_w)
         try:
             while True:
                 if not simple and filt_active and filt:
@@ -3220,6 +3227,7 @@ class App:
                     win.addstr(box_h - 1, 2, " j/k ^n/^p: navigate   Enter: select   Esc/q: close "[:box_w - 4], self.C(10))
                 else:
                     win.addstr(box_h - 1, 2, hint[:box_w - 4], self.C(10))
+                win.touchwin()
                 win.refresh()
 
                 ch = self.stdscr.get_wch()
@@ -4605,14 +4613,21 @@ class App:
         box_h = min(h - 6, max(8, len(artists) + 4))
         y0 = (h - box_h) // 2
         x0 = (w - box_w) // 2
-        for yy in range(y0, y0 + box_h):
-            self.stdscr.addstr(yy, x0, " " * box_w)
+        pad_y = max(0, y0 - 1)
+        pad_x = max(0, x0 - 1)
+        pad_h = min(h - pad_y, box_h + 2)
+        pad_w = min(w - pad_x, box_w + 2)
+        self._erase_popup_bg(pad_y, pad_x, pad_h, pad_w)
+        for yy in range(pad_y, pad_y + pad_h):
+            try:
+                self.stdscr.addstr(yy, pad_x, " " * pad_w)
+            except curses.error:
+                pass
         win = self.stdscr.derwin(box_h, box_w, y0, x0)
         win.keypad(True)
         idx = 0
         hint = " j/k ^n/^p: navigate  Enter/5: go to  Esc/q: close "
         hint2 = " a: add to playlist   e/E: enqueue    l: like "
-        self._erase_popup_bg(y0, x0, box_h, box_w)
         try:
             while True:
                 if self._need_redraw:
@@ -4620,7 +4635,12 @@ class App:
                     # stdscr.refresh() doesn't overwrite the popup area with spaces.
                     if not self._redraw_status_only:
                         self.draw()
-                        self._erase_popup_bg(y0, x0, box_h, box_w)
+                        self._erase_popup_bg(pad_y, pad_x, pad_h, pad_w)
+                        for yy in range(pad_y, pad_y + pad_h):
+                            try:
+                                self.stdscr.addstr(yy, pad_x, " " * pad_w)
+                            except curses.error:
+                                pass
                     self._need_redraw = False
                     self._redraw_status_only = False
 
@@ -5853,14 +5873,23 @@ class App:
         box_h = min(h - 6, box_h)
         y0 = (h - box_h) // 2
         x0 = (w - box_w) // 2
-        # Erase any sixel pixels under the box before drawing so the popup is
-        # always visible even when a cover image occupies this area.
-        # Skip when _erase_bg=False (status-only fast path: sixel wasn't re-drawn).
+        # Erase a 1-cell padding ring outside the box, clearing any sixel pixels
+        # and providing a visible blank margin that separates the popup from the
+        # background.  This is always done (even in the fast path) because
+        # _erase_popup_bg uses raw ANSI writes and doesn't disturb ncurses state.
+        pad_y = max(0, y0 - 1)
+        pad_x = max(0, x0 - 1)
+        pad_h = min(h - pad_y, box_h + 2)
+        pad_w = min(w - pad_x, box_w + 2)
+        self._erase_popup_bg(pad_y, pad_x, pad_h, pad_w)
         if _erase_bg:
-            self._erase_popup_bg(y0, x0, box_h, box_w)
-            for yy in range(y0, y0 + box_h):
-                self.stdscr.addstr(yy, x0, " " * box_w)
+            for yy in range(pad_y, pad_y + pad_h):
+                try:
+                    self.stdscr.addstr(yy, pad_x, " " * pad_w)
+                except curses.error:
+                    pass
         win = self.stdscr.derwin(box_h, box_w, y0, x0)
+        win.erase()
         win.box()
         win.addstr(0, 2, f" {title} ", self.C(4))
         inner_h = box_h - 2
@@ -6109,7 +6138,17 @@ class App:
         status_h = 2
         usable_h = h - top_h - status_h
 
-        if self._redraw_status_only and not self.show_help:
+        # When an overlay is open on the cover tab and the sixel is already on
+        # screen, always use the fast path — even if _redraw_status_only is False.
+        # The overlay covers the main content so a full redraw + sixel re-write
+        # would only cause a visible flash without adding any useful update.
+        # _cover_sixel_visible becomes False when the cover changes (new track or
+        # tab switch), which automatically falls through to the full draw path.
+        _overlay_cover_fast = (
+            self.tab == TAB_COVER and self._cover_sixel_visible
+            and (self.info_overlay or self.lyrics_overlay)
+        )
+        if (self._redraw_status_only or _overlay_cover_fast) and not self.show_help:
             # Status-only tick: update the status bar then restore any open overlay
             # without re-rendering the sixel.  Using noutrefresh lets win.refresh()
             # override the popup cells in the virtual screen so doupdate sends the
@@ -6166,6 +6205,14 @@ class App:
             lyrics_w = self._lyrics_panel_w(w)
             self._draw_cover_lyrics_panel(top_h, w - lyrics_w, usable_h, lyrics_w)
 
+        if self.tab == TAB_COVER and self.cover_path:
+            # Force ncurses to rewrite every cell individually instead of using
+            # terminal scroll sequences (ESC[S/ESC[T).  Scroll sequences shift
+            # the physical screen including the sixel image, causing it to appear
+            # displaced by one row when a panel scrolls.  touchwin() marks all
+            # cells dirty so ncurses falls back to cursor-position + character
+            # writes, eliminating the scroll optimisation entirely.
+            self.stdscr.touchwin()
         self.stdscr.refresh()
 
         # After curses has refreshed, write the cover sixel.  Overlays (info,
@@ -6186,7 +6233,12 @@ class App:
             # curscr already has the right content.
             if self._cover_sixel_visible:
                 self.stdscr.redrawln(0, top_h)
-                self.stdscr.redrawln(h - status_h, status_h)
+                # Cover includes a one-row gap at h-status_h-1 to prevent the
+                # sixel from touching the terminal's last few rows (some terminals
+                # auto-scroll when sixel data reaches the bottom edge).  When a
+                # panel scrolls UP the displaced sixel lands on that gap row, so
+                # include it (status_h+1 rows) to ensure it is fully repainted.
+                self.stdscr.redrawln(h - status_h - 1, status_h + 1)
                 self.stdscr.refresh()
 
         if self.show_help:
@@ -6549,11 +6601,17 @@ class App:
                 continue
 
             # v: standard lyrics popup.
-            # In the cover tab while the inline lyrics panel is already visible,
-            # v is a no-op — lyrics are shown; don't disturb that view.
+            # In the cover tab while the inline lyrics panel is already showing
+            # the *currently playing* track, v is a no-op — lyrics are already
+            # visible inline.  If the selected track differs from the playing
+            # track, open a transient popup for that other track instead.
             if ch == ord("v"):
                 if self.tab == TAB_COVER and self._cover_lyrics and not self.lyrics_overlay:
-                    continue
+                    t_sel = self._current_selection_track()
+                    if (t_sel is None
+                            or (self.current_track is not None
+                                and t_sel.id == self.current_track.id)):
+                        continue  # inline panel already shows this track
                 if self.lyrics_overlay:
                     self.toggle_lyrics()
                 else:

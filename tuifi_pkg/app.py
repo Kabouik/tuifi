@@ -475,44 +475,37 @@ class App:
         self._set_loading(key)
 
         def worker() -> None:
+            mix_payload = self._fetch_track_mix_payload_for_track(ctx)
+            if self._loading_key != key:
+                return
+
+            if not mix_payload:
+                self.mix_tracks = []
+                self.mix_title = ""
+                self.toast("No track mix")
+                return
+
+            tracks = self._extract_tracks_from_mix_payload(mix_payload)
+
+            # Prefer server-provided mix title if present
+            mix_title = ""
             try:
-                mix_payload = self._fetch_track_mix_payload_for_track(ctx)
-                if self._loading_key != key:
-                    return
+                m = mix_payload.get("mix")
+                if isinstance(m, dict):
+                    t_str = m.get("title")
+                    if isinstance(t_str, str) and t_str.strip():
+                        mix_title = t_str.strip()
+            except Exception:
+                pass
 
-                if not mix_payload:
-                    self.mix_tracks = []
-                    self.mix_title = ""
-                    self.toast("No track mix")
-                    return
+            if not mix_title:
+                mix_title = f"{ctx.artist} – {ctx.title} (Track Mix)"
 
-                tracks = self._extract_tracks_from_mix_payload(mix_payload)
+            self.mix_tracks = tracks
+            self.mix_title = mix_title
+            self.toast(f"Mix: {len(tracks)} tracks")
 
-                # Prefer server-provided mix title if present
-                mix_title = ""
-                try:
-                    m = mix_payload.get("mix")
-                    if isinstance(m, dict):
-                        t_str = m.get("title")
-                        if isinstance(t_str, str) and t_str.strip():
-                            mix_title = t_str.strip()
-                except Exception:
-                    pass
-
-                if not mix_title:
-                    mix_title = f"{ctx.artist} – {ctx.title} (Track Mix)"
-
-                self.mix_tracks = tracks
-                self.mix_title = mix_title
-                self.toast(f"Mix: {len(tracks)} tracks")
-            except Exception as e:
-                if self._loading_key == key:
-                    self.last_error = str(e)
-                    self.toast("Mix error")
-            finally:
-                self._clear_loading(key)
-                
-        threading.Thread(target=worker, daemon=True).start()
+        self._bg(worker, loading_key=key, on_error="Mix error", record_error=True)
 
     def _extract_mix_id_from_payload(self, payload: Dict[str, Any]) -> Optional[str]:
         """Search common paths for any mix ID in an API payload (album, artist, track info)."""
@@ -539,44 +532,37 @@ class App:
         self._set_loading(key)
 
         def worker() -> None:
-            try:
-                # Try mix ID embedded in album payload first
-                seed_track: Optional[Track] = None
-                mix_id: Optional[str] = None
-                if album.id and album.id > 0:
-                    try:
-                        payload = self.client.album(int(album.id))
-                        mix_id = self._extract_mix_id_from_payload(payload)
-                        if not mix_id:
-                            # Fall back: use first track from album as mix seed
-                            tracks = self._extract_tracks_from_album_payload(payload)
-                            if tracks:
-                                seed_track = tracks[0]
-                    except Exception:
-                        pass
-                if self._loading_key != key:
-                    return
-                if mix_id:
-                    mix_payload = self.client.mix(mix_id)
-                elif seed_track:
-                    mix_payload = self._fetch_track_mix_payload_for_track(seed_track)
-                else:
-                    self.toast("No mix for album")
-                    return
-                if not mix_payload or self._loading_key != key:
-                    return
-                tracks = self._extract_tracks_from_mix_payload(mix_payload)
-                self.mix_tracks = tracks
-                self.mix_title = f"{album.artist} — {album.title} (Mix)"
-                self.toast(f"Mix: {len(tracks)} tracks")
-            except Exception as e:
-                if self._loading_key == key:
-                    self.last_error = str(e)
-                    self.toast("Mix error")
-            finally:
-                self._clear_loading(key)
+            # Try mix ID embedded in album payload first
+            seed_track: Optional[Track] = None
+            mix_id: Optional[str] = None
+            if album.id and album.id > 0:
+                try:
+                    payload = self.client.album(int(album.id))
+                    mix_id = self._extract_mix_id_from_payload(payload)
+                    if not mix_id:
+                        # Fall back: use first track from album as mix seed
+                        tracks = self._extract_tracks_from_album_payload(payload)
+                        if tracks:
+                            seed_track = tracks[0]
+                except Exception:
+                    pass
+            if self._loading_key != key:
+                return
+            if mix_id:
+                mix_payload = self.client.mix(mix_id)
+            elif seed_track:
+                mix_payload = self._fetch_track_mix_payload_for_track(seed_track)
+            else:
+                self.toast("No mix for album")
+                return
+            if not mix_payload or self._loading_key != key:
+                return
+            tracks = self._extract_tracks_from_mix_payload(mix_payload)
+            self.mix_tracks = tracks
+            self.mix_title = f"{album.artist} — {album.title} (Mix)"
+            self.toast(f"Mix: {len(tracks)} tracks")
 
-        threading.Thread(target=worker, daemon=True).start()
+        self._bg(worker, loading_key=key, on_error="Mix error", record_error=True)
 
     def fetch_mix_from_artist_async(self, artist: Artist) -> None:
         """Load the Mix tab seeded from an artist."""
@@ -587,38 +573,31 @@ class App:
         self._set_loading(key)
 
         def worker() -> None:
-            try:
-                mix_id: Optional[str] = None
-                if artist.id and artist.id > 0:
-                    try:
-                        payload = self.client.artist(int(artist.id))
-                        mix_id = self._extract_mix_id_from_payload(payload)
-                        if not mix_id:
-                            # ?f= may omit mixes; try ?id= explicitly
-                            payload2 = http_get_json(self.client._u("/artist/", {"id": int(artist.id)}))
-                            mix_id = self._extract_mix_id_from_payload(payload2)
-                    except Exception:
-                        pass
-                if not mix_id:
-                    self.toast("No mix for artist")
-                    return
-                if self._loading_key != key:
-                    return
-                mix_payload = self.client.mix(mix_id)
-                tracks = self._extract_tracks_from_mix_payload(mix_payload)
-                if self._loading_key != key:
-                    return
-                self.mix_tracks = tracks
-                self.mix_title = f"{artist.name} (Mix)"
-                self.toast(f"Mix: {len(tracks)} tracks")
-            except Exception as e:
-                if self._loading_key == key:
-                    self.last_error = str(e)
-                    self.toast("Mix error")
-            finally:
-                self._clear_loading(key)
+            mix_id: Optional[str] = None
+            if artist.id and artist.id > 0:
+                try:
+                    payload = self.client.artist(int(artist.id))
+                    mix_id = self._extract_mix_id_from_payload(payload)
+                    if not mix_id:
+                        # ?f= may omit mixes; try ?id= explicitly
+                        payload2 = http_get_json(self.client._u("/artist/", {"id": int(artist.id)}))
+                        mix_id = self._extract_mix_id_from_payload(payload2)
+                except Exception:
+                    pass
+            if not mix_id:
+                self.toast("No mix for artist")
+                return
+            if self._loading_key != key:
+                return
+            mix_payload = self.client.mix(mix_id)
+            tracks = self._extract_tracks_from_mix_payload(mix_payload)
+            if self._loading_key != key:
+                return
+            self.mix_tracks = tracks
+            self.mix_title = f"{artist.name} (Mix)"
+            self.toast(f"Mix: {len(tracks)} tracks")
 
-        threading.Thread(target=worker, daemon=True).start()
+        self._bg(worker, loading_key=key, on_error="Mix error", record_error=True)
 
     # ---------------------------------------------------------------------------
     # mpv tick callback
@@ -720,7 +699,8 @@ class App:
             self._need_redraw = True
             self._redraw_status_only = False
 
-    def _bg(self, fn, *, loading_key: str = "", on_error: str = "Error") -> None:
+    def _bg(self, fn, *, loading_key: str = "", on_error: str = "Error",
+            record_error: bool = False) -> None:
         """Run fn() in a daemon thread. Manages loading state and error toasts."""
         if loading_key:
             self._set_loading(loading_key)
@@ -729,6 +709,8 @@ class App:
                 fn()
             except Exception as e:
                 debug_log(f"bg error ({loading_key or fn.__name__}): {e}")
+                if record_error and (not loading_key or self._loading_key == loading_key):
+                    self.last_error = str(e)
                 if on_error:
                     self.toast(on_error)
             finally:
@@ -2303,62 +2285,56 @@ class App:
         self._redraw_status_only = False
 
         def worker() -> None:
-            try:
-                tracks: List[Track] = []
-                if isinstance(seed, Track):
-                    mix_payload = self._fetch_track_mix_payload_for_track(seed)
-                    if mix_payload:
-                        tracks = self._extract_tracks_from_mix_payload(mix_payload)
-                elif isinstance(seed, Album):
-                    payload = None
-                    if seed.id and seed.id > 0:
-                        try:
-                            payload = self.client.album(int(seed.id))
-                        except Exception:
-                            pass
-                    mix_id = self._extract_mix_id_from_payload(payload) if payload else None
-                    if mix_id:
-                        tracks = self._extract_tracks_from_mix_payload(self.client.mix(mix_id))
-                    elif payload:
-                        album_tracks = self._extract_tracks_from_album_payload(payload)
-                        if album_tracks:
-                            mix_payload = self._fetch_track_mix_payload_for_track(album_tracks[0])
+            tracks: List[Track] = []
+            if isinstance(seed, Track):
+                mix_payload = self._fetch_track_mix_payload_for_track(seed)
+                if mix_payload:
+                    tracks = self._extract_tracks_from_mix_payload(mix_payload)
+            elif isinstance(seed, Album):
+                payload = None
+                if seed.id and seed.id > 0:
+                    try:
+                        payload = self.client.album(int(seed.id))
+                    except Exception:
+                        pass
+                mix_id = self._extract_mix_id_from_payload(payload) if payload else None
+                if mix_id:
+                    tracks = self._extract_tracks_from_mix_payload(self.client.mix(mix_id))
+                elif payload:
+                    album_tracks = self._extract_tracks_from_album_payload(payload)
+                    if album_tracks:
+                        mix_payload = self._fetch_track_mix_payload_for_track(album_tracks[0])
+                        if mix_payload:
+                            tracks = self._extract_tracks_from_mix_payload(mix_payload)
+            elif isinstance(seed, Artist):
+                artist_payload = None
+                if seed.id and seed.id > 0:
+                    try:
+                        artist_payload = self.client.artist(int(seed.id))
+                    except Exception:
+                        pass
+                mix_id = self._extract_mix_id_from_payload(artist_payload) if artist_payload else None
+                if mix_id:
+                    tracks = self._extract_tracks_from_mix_payload(self.client.mix(mix_id))
+                elif artist_payload:
+                    dicts: List[Dict[str, Any]] = []
+                    self._scan_for_track_dicts(artist_payload, dicts, limit=5)
+                    for d in dicts:
+                        t = self._parse_track_obj(d)
+                        if t:
+                            mix_payload = self._fetch_track_mix_payload_for_track(t)
                             if mix_payload:
                                 tracks = self._extract_tracks_from_mix_payload(mix_payload)
-                elif isinstance(seed, Artist):
-                    artist_payload = None
-                    if seed.id and seed.id > 0:
-                        try:
-                            artist_payload = self.client.artist(int(seed.id))
-                        except Exception:
-                            pass
-                    mix_id = self._extract_mix_id_from_payload(artist_payload) if artist_payload else None
-                    if mix_id:
-                        tracks = self._extract_tracks_from_mix_payload(self.client.mix(mix_id))
-                    elif artist_payload:
-                        dicts: List[Dict[str, Any]] = []
-                        self._scan_for_track_dicts(artist_payload, dicts, limit=5)
-                        for d in dicts:
-                            t = self._parse_track_obj(d)
-                            if t:
-                                mix_payload = self._fetch_track_mix_payload_for_track(t)
-                                if mix_payload:
-                                    tracks = self._extract_tracks_from_mix_payload(mix_payload)
-                                    break
-                if tracks:
-                    self.playlists[name] = tracks
-                    save_playlists(self.playlists, self.playlists_meta)
-                    self.playlist_names = sorted(self.playlists.keys())
-                    self.toast(f"Mix '{name}': {len(tracks)} tracks saved")
-                else:
-                    self.toast(f"Mix '{name}' saved (no tracks found)")
-                self._need_redraw = True
-                self._redraw_status_only = False
-            except Exception as e:
-                self.last_error = str(e)
-                self.toast("Mix save error")
+                                break
+            if tracks:
+                self.playlists[name] = tracks
+                save_playlists(self.playlists, self.playlists_meta)
+                self.playlist_names = sorted(self.playlists.keys())
+                self.toast(f"Mix '{name}': {len(tracks)} tracks saved")
+            else:
+                self.toast(f"Mix '{name}' saved (no tracks found)")
 
-        threading.Thread(target=worker, daemon=True).start()
+        self._bg(worker, on_error="Mix save error", record_error=True)
 
     def open_artist_by_id(self, artist_id: int, name: str) -> None:
         ctx = Track(id=0, title="", artist=name, album="", year="????",
@@ -3432,33 +3408,26 @@ class App:
         self._set_loading(key)
 
         def worker() -> None:
-            try:
-                aid = self._resolve_album_id_for_album(album)
-                if aid:
-                    tracks = self._fetch_album_tracks_by_album_id(aid)
-                    self.album_header = Album(id=aid, title=album.title, artist=album.artist, year=album.year)
-                else:
-                    payload = self.client.search_tracks(album.title, limit=280)
-                    al0 = album.title.strip().lower()
-                    tracks = sorted(
-                        [t for t in self._extract_tracks_from_search(payload) if t.album.strip().lower() == al0],
-                        key=lambda t: (t.track_no if t.track_no > 0 else 10_000, t.title.lower())
-                    )
-                if self._loading_key != key:
-                    return
-                self.album_tracks = tracks[:1500]
-                for t in self.album_tracks[:40]:
-                    if (self.show_track_year and year_norm(t.year) == "????") or (self.show_track_duration and not t.duration):
-                        self.meta.want(t.id)
-                self.toast(f"Album {len(self.album_tracks)}")
-            except Exception as e:
-                if self._loading_key == key:
-                    self.last_error = str(e)
-                    self.toast("Error")
-            finally:
-                self._clear_loading(key)
+            aid = self._resolve_album_id_for_album(album)
+            if aid:
+                tracks = self._fetch_album_tracks_by_album_id(aid)
+                self.album_header = Album(id=aid, title=album.title, artist=album.artist, year=album.year)
+            else:
+                payload = self.client.search_tracks(album.title, limit=280)
+                al0 = album.title.strip().lower()
+                tracks = sorted(
+                    [t for t in self._extract_tracks_from_search(payload) if t.album.strip().lower() == al0],
+                    key=lambda t: (t.track_no if t.track_no > 0 else 10_000, t.title.lower())
+                )
+            if self._loading_key != key:
+                return
+            self.album_tracks = tracks[:1500]
+            for t in self.album_tracks[:40]:
+                if (self.show_track_year and year_norm(t.year) == "????") or (self.show_track_duration and not t.duration):
+                    self.meta.want(t.id)
+            self.toast(f"Album {len(self.album_tracks)}")
 
-        threading.Thread(target=worker, daemon=True).start()
+        self._bg(worker, loading_key=key, on_error="Error", record_error=True)
 
     def open_album_from_track(self, t: Track) -> None:
         self.open_album_from_album_obj(Album(id=t.album_id or self.meta.album_id.get(t.id, 0),
@@ -3476,28 +3445,21 @@ class App:
         self._set_loading(key)
 
         def worker() -> None:
-            try:
-                payload = self.client.recommendations(ctx.id, limit=50)
-                if self._loading_key != key:
-                    return
-                tracks: List[Track] = []
-                data = payload.get("data") if isinstance(payload, dict) else None
-                if isinstance(data, dict) and isinstance(data.get("items"), list):
-                    for it in data["items"]:
-                        if isinstance(it, dict) and isinstance(it.get("track"), dict):
-                            t = self._parse_track_obj(it["track"])
-                            if t:
-                                tracks.append(t)
-                self.recommended_results = tracks
-                self.toast("Recommended")
-            except Exception as e:
-                if self._loading_key == key:
-                    self.last_error = str(e)
-                    self.toast("Error")
-            finally:
-                self._clear_loading(key)
+            payload = self.client.recommendations(ctx.id, limit=50)
+            if self._loading_key != key:
+                return
+            tracks: List[Track] = []
+            data = payload.get("data") if isinstance(payload, dict) else None
+            if isinstance(data, dict) and isinstance(data.get("items"), list):
+                for it in data["items"]:
+                    if isinstance(it, dict) and isinstance(it.get("track"), dict):
+                        t = self._parse_track_obj(it["track"])
+                        if t:
+                            tracks.append(t)
+            self.recommended_results = tracks
+            self.toast("Recommended")
 
-        threading.Thread(target=worker, daemon=True).start()
+        self._bg(worker, loading_key=key, on_error="Error", record_error=True)
 
     def fetch_liked_async(self) -> None:
         self.liked_cache = [t for t in (mono_to_track(d) for d in self.liked_tracks) if t is not None]
@@ -3530,100 +3492,93 @@ class App:
                 self.artist_ctx = (ctx.artist_id, ctx.artist)
                 self._need_redraw = True
                 self._redraw_status_only = False
-            try:
-                aid = ctx.artist_id or self.meta.artist_id.get(ctx.id)
-                if not aid:
-                    info = self.client.info(ctx.id)
-                    data = info.get("data") if isinstance(info, dict) else None
-                    if isinstance(data, dict):
-                        a = data.get("artist")
-                        if isinstance(a, dict) and str(a.get("id", "")).isdigit():
-                            aid = int(a["id"])
+            aid = ctx.artist_id or self.meta.artist_id.get(ctx.id)
+            if not aid:
+                info = self.client.info(ctx.id)
+                data = info.get("data") if isinstance(info, dict) else None
+                if isinstance(data, dict):
+                    a = data.get("artist")
+                    if isinstance(a, dict) and str(a.get("id", "")).isdigit():
+                        aid = int(a["id"])
 
-                albums: List[Album] = []
-                raw_tracks: List[Track] = []
+            albums: List[Album] = []
+            raw_tracks: List[Track] = []
 
-                def _yr(t: Track) -> int:
-                    y = year_norm(t.year)
-                    return int(y) if y.isdigit() else 9999
+            def _yr(t: Track) -> int:
+                y = year_norm(t.year)
+                return int(y) if y.isdigit() else 9999
 
-                def _commit_tracks() -> None:
-                    partial = self._dedupe_tracks(raw_tracks)
-                    partial.sort(key=lambda t: (_yr(t), t.album.lower(), t.track_no or 9999, t.title.lower()))
-                    self.artist_tracks = partial[:600]
-                    self._need_redraw = True
-                    self._redraw_status_only = False
+            def _commit_tracks() -> None:
+                partial = self._dedupe_tracks(raw_tracks)
+                partial.sort(key=lambda t: (_yr(t), t.album.lower(), t.track_no or 9999, t.title.lower()))
+                self.artist_tracks = partial[:600]
+                self._need_redraw = True
+                self._redraw_status_only = False
 
-                if aid:
-                    payload = self.client.artist(int(aid))
-                    if self._loading_key != key:
-                        return
-                    albums = self._extract_artist_albums_from_payload(payload)
-                    albums = self._dedupe_albums(albums)
-
-                    # Publish albums immediately so the UI fills in before track fetching starts
-                    self.artist_ctx = (int(aid), ctx.artist)
-                    self.artist_albums = albums[:500]
-                    self._need_redraw = True
-                    self._redraw_status_only = False
-
-                    # Fetch tracks album by album and update UI after each one
-                    for alb in albums:
-                        if self._loading_key != key:
-                            return
-                        if alb.id:
-                            try:
-                                new_tracks = self._fetch_album_tracks_by_album_id(alb.id)
-                                raw_tracks.extend(new_tracks)
-                                _commit_tracks()
-                            except Exception:
-                                pass
-
-                    # Fallback: scan artist payload for track dicts if album fetches yielded nothing
-                    if not raw_tracks:
-                        dicts: List[Dict[str, Any]] = []
-                        self._scan_for_track_dicts(payload, dicts, limit=2500)
-                        for d in dicts:
-                            t = self._parse_track_obj(d)
-                            if t:
-                                raw_tracks.append(t)
-
-                if not raw_tracks:
-                    payload2 = self.client.search_tracks(ctx.artist, limit=300)
-                    if self._loading_key != key:
-                        return
-                    a0 = ctx.artist.strip().lower()
-                    raw_tracks = [t for t in self._extract_tracks_from_search(payload2) if t.artist.strip().lower() == a0]
-
-                if not albums:
-                    best: Dict[Tuple, Album] = {}
-                    for t in raw_tracks:
-                        k2 = (t.artist.strip().lower(), t.album.strip().lower())
-                        if k2 not in best:
-                            best[k2] = Album(id=t.album_id or 0, title=t.album, artist=t.artist, year=t.year)
-                        else:
-                            cur = best[k2]
-                            if cur.id == 0 and t.album_id:
-                                cur.id = t.album_id
-                            if year_norm(cur.year) == "????" and year_norm(t.year) != "????":
-                                cur.year = t.year
-                    albums = sorted(best.values(), key=lambda a: (int(a.year) if year_norm(a.year) != "????" else 9999, a.title.lower()))
-
-                # Final commit with fully deduped/sorted results
+            if aid:
+                payload = self.client.artist(int(aid))
+                if self._loading_key != key:
+                    return
+                albums = self._extract_artist_albums_from_payload(payload)
                 albums = self._dedupe_albums(albums)
-                self.artist_albums = albums[:500]
-                if aid:
-                    self.artist_ctx = (int(aid), ctx.artist)
-                _commit_tracks()
-                self.toast("Artist")
-            except Exception as e:
-                if self._loading_key == key:
-                    self.last_error = str(e)
-                    self.toast("Error")
-            finally:
-                self._clear_loading(key)
 
-        threading.Thread(target=worker, daemon=True).start()
+                # Publish albums immediately so the UI fills in before track fetching starts
+                self.artist_ctx = (int(aid), ctx.artist)
+                self.artist_albums = albums[:500]
+                self._need_redraw = True
+                self._redraw_status_only = False
+
+                # Fetch tracks album by album and update UI after each one
+                for alb in albums:
+                    if self._loading_key != key:
+                        return
+                    if alb.id:
+                        try:
+                            new_tracks = self._fetch_album_tracks_by_album_id(alb.id)
+                            raw_tracks.extend(new_tracks)
+                            _commit_tracks()
+                        except Exception:
+                            pass
+
+                # Fallback: scan artist payload for track dicts if album fetches yielded nothing
+                if not raw_tracks:
+                    dicts: List[Dict[str, Any]] = []
+                    self._scan_for_track_dicts(payload, dicts, limit=2500)
+                    for d in dicts:
+                        t = self._parse_track_obj(d)
+                        if t:
+                            raw_tracks.append(t)
+
+            if not raw_tracks:
+                payload2 = self.client.search_tracks(ctx.artist, limit=300)
+                if self._loading_key != key:
+                    return
+                a0 = ctx.artist.strip().lower()
+                raw_tracks = [t for t in self._extract_tracks_from_search(payload2) if t.artist.strip().lower() == a0]
+
+            if not albums:
+                best: Dict[Tuple, Album] = {}
+                for t in raw_tracks:
+                    k2 = (t.artist.strip().lower(), t.album.strip().lower())
+                    if k2 not in best:
+                        best[k2] = Album(id=t.album_id or 0, title=t.album, artist=t.artist, year=t.year)
+                    else:
+                        cur = best[k2]
+                        if cur.id == 0 and t.album_id:
+                            cur.id = t.album_id
+                        if year_norm(cur.year) == "????" and year_norm(t.year) != "????":
+                            cur.year = t.year
+                albums = sorted(best.values(), key=lambda a: (int(a.year) if year_norm(a.year) != "????" else 9999, a.title.lower()))
+
+            # Final commit with fully deduped/sorted results
+            albums = self._dedupe_albums(albums)
+            self.artist_albums = albums[:500]
+            if aid:
+                self.artist_ctx = (int(aid), ctx.artist)
+            _commit_tracks()
+            self.toast("Artist")
+
+        self._bg(worker, loading_key=key, on_error="Error", record_error=True)
 
     # ---------------------------------------------------------------------------
     # info overlay

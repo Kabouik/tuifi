@@ -1,0 +1,6 @@
+tuifi_pkg/__pycache__/
+tuifi_pkg/app/__pycache__/
+__pycache__/
+*.pyc
+*.pyo
+*.bak

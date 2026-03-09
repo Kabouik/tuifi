@@ -1966,11 +1966,17 @@ class App:
     def prompt_text(self, title: str, initial: str = "") -> Optional[str]:
         h, w = self.stdscr.getmaxyx()
         box_w = clamp(max(34, len(title) + 8), 34, w - 6)
-        box_h = 3
+        box_h = 5
         y0 = (h - box_h) // 2
         x0 = (w - box_w) // 2
         for yy in range(y0, y0 + box_h):
             self.stdscr.addstr(yy, x0, " " * box_w)
+        self._erase_popup_bg(max(0, y0-1), max(0, x0-2), min(h-max(0,y0-1), box_h+2), min(w-max(0,x0-2), box_w+4))
+        for yy in range(max(0, y0-1), min(h, y0+box_h+1)):
+            try:
+                self.stdscr.addstr(yy, max(0, x0-2), " " * min(w-max(0,x0-2), box_w+4))
+            except curses.error:
+                pass
         win = self.stdscr.derwin(box_h, box_w, y0, x0)
         win.keypad(True)
         win.box()
@@ -1982,6 +1988,7 @@ class App:
         self.stdscr.nodelay(False)
         inner_w = max(1, box_w - 4 - label_len)
         input_x = 2 + label_len
+        hint_text = "^a/^e: home/end   ^u/^k: clear to left/right   ^w: del word"
         while True:
             view_start = max(0, cur - inner_w + 1) if cur >= inner_w else 0
             display = s[view_start:view_start + inner_w]
@@ -1989,6 +1996,10 @@ class App:
             win.addstr(1, 2 + len(label), " ")
             win.addstr(1, input_x, " " * inner_w)
             win.addstr(1, input_x, display)
+            try:
+                win.addstr(3, 2, hint_text[:box_w - 4], self.C(10))
+            except curses.error:
+                pass
             win.move(1, input_x + min(cur - view_start, inner_w))
             win.refresh()
             ch = self.stdscr.get_wch()
@@ -2032,7 +2043,7 @@ class App:
             elif ch == 11:
                 s = s[:cur]
             elif ch == 21:
-                s = ""
+                s = s[cur:]
                 cur = 0
             elif ch == 23:
                 i = cur
@@ -3172,9 +3183,9 @@ class App:
         y0 = (h - box_h) // 2
         x0 = (w - box_w) // 2
         pad_y = max(0, y0 - 1)
-        pad_x = max(0, x0 - 1)
+        pad_x = max(0, x0 - 2)
         pad_h = min(h - pad_y, box_h + 2)
-        pad_w = min(w - pad_x, box_w + 2)
+        pad_w = min(w - pad_x, box_w + 4)
         self._erase_popup_bg(pad_y, pad_x, pad_h, pad_w)
         for yy in range(pad_y, pad_y + pad_h):
             try:
@@ -3923,7 +3934,7 @@ class App:
         queue_panel_active = self.queue_overlay and self.tab != TAB_QUEUE
         if queue_panel_active:
             right_w = 44
-        elif self._cover_lyrics and not self.lyrics_overlay:
+        elif self._cover_lyrics:
             right_w = self._lyrics_panel_w(w)
         else:
             right_w = 0
@@ -3972,7 +3983,7 @@ class App:
         queue_panel_active = self.queue_overlay and self.tab != TAB_QUEUE
         if queue_panel_active:
             right_w = 44
-        elif self._cover_lyrics and not self.lyrics_overlay:
+        elif self._cover_lyrics:
             right_w = self._lyrics_panel_w(w)
         else:
             right_w = 0
@@ -4084,7 +4095,7 @@ class App:
         # Text colour: configurable via settings "cover_lyrics_color_pair" (int, default 0 = terminal default = white).
         lyr_attr = curses.color_pair(int(self.settings.get("cover_lyrics_color_pair", 0))) if self.color_mode and curses.has_colors() else 0
         # Title bar
-        title = " Lyrics "
+        title = "Lyrics "
         self.stdscr.addstr(y, x, title[:w].ljust(w), self.C(4))
         # Lyrics content
         lines = self.lyrics_lines or []
@@ -4373,8 +4384,177 @@ class App:
         self._need_redraw = True
         self._redraw_status_only = False
 
+    def show_info_dialog(self) -> None:
+        """Inner-loop info popup (track/album/artist) — same pattern as show_similar_artists_dialog."""
+        self._need_redraw = True
+        self.draw()
+        h, w = self.stdscr.getmaxyx()
+        box_h = min(h - 4, 24)
+        box_w = min(w - 8, 82)
+        y0 = (h - box_h) // 2
+        x0 = (w - box_w) // 2
+        pad_y = max(0, y0 - 1)
+        pad_x = max(0, x0 - 2)
+        pad_h = min(h - pad_y, box_h + 2)
+        pad_w = min(w - pad_x, box_w + 4)
+        self._erase_popup_bg(pad_y, pad_x, pad_h, pad_w)
+        for yy in range(pad_y, pad_y + pad_h):
+            try:
+                self.stdscr.addstr(yy, pad_x, " " * pad_w)
+            except curses.error:
+                pass
+        win = self.stdscr.derwin(box_h, box_w, y0, x0)
+        win.keypad(True)
+        scroll = 0
+        self.stdscr.timeout(100)
+        try:
+            while True:
+                if self._need_redraw:
+                    if not self._redraw_status_only:
+                        self.draw()
+                        self._erase_popup_bg(pad_y, pad_x, pad_h, pad_w)
+                        for yy in range(pad_y, pad_y + pad_h):
+                            try:
+                                self.stdscr.addstr(yy, pad_x, " " * pad_w)
+                            except curses.error:
+                                pass
+                    self._need_redraw = False
+                    self._redraw_status_only = False
+
+                self._do_info_fetch_if_due()
+
+                # Build title and lines from current info state
+                if self.info_artist and not self.info_track and not self.info_album:
+                    title = "Artist info"
+                    ar = self.info_artist
+                    lines: List[str] = [f"Artist : {ar.name}", f"ID     : {ar.id}" if ar.id else "", ""]
+                    if self.info_loading:
+                        lines.append("Loading artist info…")
+                    else:
+                        payload = self.info_payload or {}
+                        if "error" in payload:
+                            lines.append(f"Error: {payload.get('error')}")
+                        else:
+                            data = payload.get("data") if isinstance(payload, dict) else payload
+                            if not isinstance(data, dict):
+                                data = payload
+                            if isinstance(data, dict):
+                                for k in ("popularity", "numberOfAlbums", "numberOfTracks",
+                                          "artistTypes", "url"):
+                                    if k in data:
+                                        lines.append(f"{k}: {data[k]}")
+                            if payload.get("_similar"):
+                                lines.append(f"  [s] browse {len(payload['_similar'])} similar artists")
+                    lines = [l for l in lines if l is not None]
+                elif self.info_album and not self.info_track:
+                    title = "Album info"
+                    a = self.info_album
+                    lines = [f"Album  : {a.title}", f"Artist : {a.artist}",
+                             f"Year   : {year_norm(a.year)}", f"ID     : {a.id}" if a.id else "", ""]
+                    if self.info_loading:
+                        lines.append("Loading album info…")
+                    else:
+                        payload = self.info_payload or {}
+                        if "error" in payload:
+                            lines.append(f"Error: {payload.get('error')}")
+                        else:
+                            data = payload.get("data") if isinstance(payload, dict) else payload
+                            if isinstance(data, dict):
+                                for k in ("numberOfTracks", "numberOfVolumes", "releaseDate",
+                                          "audioQuality", "explicit", "upc", "popularity"):
+                                    if k in data:
+                                        lines.append(f"{k}: {data[k]}")
+                    lines = [l for l in lines if l is not None]
+                else:
+                    t = self.info_track
+                    if not t:
+                        title = "Info"
+                        lines = ["(no selection)"]
+                    else:
+                        title = "Track info"
+                        lines = [f"Title   : {t.title}",
+                                 f"Artist  : {t.artist}" + (f" (id {t.artist_id})" if t.artist_id else ""),
+                                 f"Album   : {t.album}" + (f" (id {t.album_id})" if t.album_id else "")]
+                        yv = self._track_year(t)
+                        if yv != "????":
+                            lines.append(f"Year    : {yv}")
+                        dv = self._track_duration(t)
+                        if dv:
+                            lines.append(f"Duration: {fmt_dur(dv)}")
+                        lines += [f"Track id: {t.id}", f"Liked   : {'yes' if self.is_liked(t.id) else 'no'}", ""]
+                        if self.info_loading:
+                            lines.append("Loading /info…")
+                        else:
+                            payload = self.info_payload or {}
+                            if "error" in payload:
+                                lines.append(f"Error: {payload.get('error')}")
+                            else:
+                                data = payload.get("data") if isinstance(payload, dict) else None
+                                if isinstance(data, dict):
+                                    for k in ("audioQuality", "explicit", "popularity", "streamReady"):
+                                        if k in data:
+                                            lines.append(f"{k}: {data.get(k)}")
+
+                inner_h = box_h - 2
+                max_scroll = max(0, len(lines) - inner_h)
+                scroll = min(scroll, max_scroll)
+                start = clamp(scroll, 0, max_scroll)
+
+                win.erase()
+                win.box()
+                win.addstr(0, 2, f" {title} "[:box_w - 2], self.C(4))
+                for i in range(inner_h):
+                    idx = start + i
+                    if idx >= len(lines):
+                        break
+                    line = lines[idx]
+                    if line.startswith("\x01"):
+                        text = line[1:][:box_w - 4].ljust(box_w - 4)
+                        try:
+                            win.addstr(1 + i, 2, text, curses.color_pair(16))
+                        except curses.error:
+                            pass
+                    else:
+                        try:
+                            win.addstr(1 + i, 2, line[:box_w - 4])
+                        except curses.error:
+                            pass
+                win.touchwin()
+                win.refresh()
+
+                try:
+                    ch = self.stdscr.get_wch()
+                except curses.error:
+                    continue
+                if isinstance(ch, str):
+                    try:
+                        ch = ord(ch)
+                    except Exception:
+                        continue
+
+                if ch in (27, ord("q"), ord("i"), ord("I")):
+                    break
+                elif ch in (ord("j"), curses.KEY_DOWN, 14):
+                    scroll = min(max_scroll, scroll + 1)
+                elif ch in (ord("k"), curses.KEY_UP, 16):
+                    scroll = max(0, scroll - 1)
+                elif ch == curses.KEY_PPAGE:
+                    scroll = max(0, scroll - self._page_step())
+                elif ch == curses.KEY_NPAGE:
+                    scroll = min(max_scroll, scroll + self._page_step())
+                elif ch in (curses.KEY_HOME, ord("g")):
+                    scroll = 0
+                elif ch in (curses.KEY_END, ord("G")):
+                    scroll = max_scroll
+                elif ch == ord("s") and self.info_artist:
+                    break  # fall through to show similar artists after dialog
+        finally:
+            self.stdscr.nodelay(True)
+            self._need_redraw = True
+            self._redraw_status_only = False
+
     def _do_info_fetch_if_due(self) -> None:
-        if not self.info_overlay or not self._info_target_id:
+        if not self._info_target_id:
             return
         if time.time() < self._info_refresh_due:
             return
@@ -4395,10 +4575,6 @@ class App:
         threading.Thread(target=worker, daemon=True).start()
 
     def toggle_info_selected(self) -> None:
-        if self.info_overlay:
-            self.info_overlay = False
-            self._need_redraw = True
-            return
         self.info_follow_selection = True
         if not self._queue_context():
             if self.tab == TAB_ALBUM and self._selected_album_title_line() and self.album_header:
@@ -4426,27 +4602,22 @@ class App:
         t = self._current_selection_track()
         if not t:
             return
-        self.info_overlay = True
         self.info_scroll = 0
         self._request_info_refresh(t)
         self._need_redraw = True
+        self.show_info_dialog()
 
     def toggle_info_playing(self) -> None:
-        if self.info_overlay:
-            self.info_overlay = False
-            self._need_redraw = True
-            return
         self.info_follow_selection = False
         t = self.current_track
         if not t:
             return
-        self.info_overlay = True
         self.info_scroll = 0
         self._request_info_refresh(t)
         self._need_redraw = True
+        self.show_info_dialog()
 
     def open_info_album(self, album: Album) -> None:
-        self.info_overlay = True
         self.info_scroll = 0
         self.info_track = None
         self.info_album = album
@@ -4471,9 +4642,9 @@ class App:
             self._need_redraw = True
 
         threading.Thread(target=worker, daemon=True).start()
+        self.show_info_dialog()
 
     def open_info_artist(self, artist: Artist) -> None:
-        self.info_overlay = True
         self.info_scroll = 0
         self.info_track = None
         self.info_album = None
@@ -4532,6 +4703,7 @@ class App:
             self._need_redraw = True
 
         threading.Thread(target=worker, daemon=True).start()
+        self.show_info_dialog()
 
     def show_similar_artists_dialog(self, artist: Artist, album_id: int = 0) -> None:
         """Interactive dialog listing similar artists with action keys."""
@@ -4614,9 +4786,9 @@ class App:
         y0 = (h - box_h) // 2
         x0 = (w - box_w) // 2
         pad_y = max(0, y0 - 1)
-        pad_x = max(0, x0 - 1)
+        pad_x = max(0, x0 - 2)
         pad_h = min(h - pad_y, box_h + 2)
-        pad_w = min(w - pad_x, box_w + 2)
+        pad_w = min(w - pad_x, box_w + 4)
         self._erase_popup_bg(pad_y, pad_x, pad_h, pad_w)
         for yy in range(pad_y, pad_y + pad_h):
             try:
@@ -4861,6 +5033,119 @@ class App:
             self._need_redraw = True
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def show_lyrics_dialog(self, track: "Track") -> None:
+        """Inner-loop lyrics popup — same pattern as show_similar_artists_dialog."""
+        # Ensure lyrics are available/being fetched for this track
+        if not (self.lyrics_track_id == track.id and (self.lyrics_lines or self.lyrics_loading)):
+            self.lyrics_track_id = track.id
+            self.lyrics_lines = []
+            self.lyrics_loading = True
+            self.lyrics_track = track
+
+            def _worker() -> None:
+                try:
+                    payload = self.client.lyrics(track.id)
+                    self.lyrics_lines = self._extract_lrc_from_payload(payload)
+                except Exception:
+                    self.lyrics_lines = []
+                self.lyrics_loading = False
+                self._need_redraw = True
+                self._redraw_status_only = False
+
+            threading.Thread(target=_worker, daemon=True).start()
+
+        self._need_redraw = True
+        self.draw()
+        h, w = self.stdscr.getmaxyx()
+        box_h = min(h - 4, 32)
+        box_w = min(w - 8, 86)
+        y0 = (h - box_h) // 2
+        x0 = (w - box_w) // 2
+        pad_y = max(0, y0 - 1)
+        pad_x = max(0, x0 - 2)
+        pad_h = min(h - pad_y, box_h + 2)
+        pad_w = min(w - pad_x, box_w + 4)
+        self._erase_popup_bg(pad_y, pad_x, pad_h, pad_w)
+        for yy in range(pad_y, pad_y + pad_h):
+            try:
+                self.stdscr.addstr(yy, pad_x, " " * pad_w)
+            except curses.error:
+                pass
+        win = self.stdscr.derwin(box_h, box_w, y0, x0)
+        win.keypad(True)
+        scroll = 0
+        self.stdscr.timeout(100)
+        try:
+            while True:
+                if self._need_redraw:
+                    if not self._redraw_status_only:
+                        self.draw()
+                        self._erase_popup_bg(pad_y, pad_x, pad_h, pad_w)
+                        for yy in range(pad_y, pad_y + pad_h):
+                            try:
+                                self.stdscr.addstr(yy, pad_x, " " * pad_w)
+                            except curses.error:
+                                pass
+                    self._need_redraw = False
+                    self._redraw_status_only = False
+
+                t_ref = track
+                title = f"Lyrics – {t_ref.artist} - {t_ref.title}"
+                if self.lyrics_loading and self.lyrics_track_id == track.id:
+                    lines: List[str] = ["Loading lyrics…"]
+                else:
+                    lines = self.lyrics_lines if self.lyrics_track_id == track.id else ["(empty)"]
+                    if not lines:
+                        lines = ["(empty)"]
+
+                inner_h = box_h - 2
+                max_scroll = max(0, len(lines) - inner_h)
+                scroll = min(scroll, max_scroll)
+                start = clamp(scroll, 0, max_scroll)
+
+                win.erase()
+                win.box()
+                win.addstr(0, 2, title[:box_w - 4], self.C(4))
+                for i in range(inner_h):
+                    idx = start + i
+                    if idx >= len(lines):
+                        break
+                    try:
+                        win.addstr(1 + i, 2, lines[idx][:box_w - 4])
+                    except curses.error:
+                        pass
+                win.touchwin()
+                win.refresh()
+
+                try:
+                    ch = self.stdscr.get_wch()
+                except curses.error:
+                    continue
+                if isinstance(ch, str):
+                    try:
+                        ch = ord(ch)
+                    except Exception:
+                        continue
+
+                if ch in (27, ord("v"), ord("V"), ord("q")):
+                    break
+                elif ch in (ord("j"), curses.KEY_DOWN, 14):
+                    scroll = min(max_scroll, scroll + 1)
+                elif ch in (ord("k"), curses.KEY_UP, 16):
+                    scroll = max(0, scroll - 1)
+                elif ch == curses.KEY_PPAGE:
+                    scroll = max(0, scroll - self._page_step())
+                elif ch == curses.KEY_NPAGE:
+                    scroll = min(max_scroll, scroll + self._page_step())
+                elif ch in (curses.KEY_HOME, ord("g")):
+                    scroll = 0
+                elif ch in (curses.KEY_END, ord("G")):
+                    scroll = max_scroll
+        finally:
+            self.stdscr.nodelay(True)
+            self._need_redraw = True
+            self._redraw_status_only = False
 
     # ---------------------------------------------------------------------------
     # search
@@ -5878,9 +6163,9 @@ class App:
         # background.  This is always done (even in the fast path) because
         # _erase_popup_bg uses raw ANSI writes and doesn't disturb ncurses state.
         pad_y = max(0, y0 - 1)
-        pad_x = max(0, x0 - 1)
+        pad_x = max(0, x0 - 2)
         pad_h = min(h - pad_y, box_h + 2)
-        pad_w = min(w - pad_x, box_w + 2)
+        pad_w = min(w - pad_x, box_w + 4)
         self._erase_popup_bg(pad_y, pad_x, pad_h, pad_w)
         if _erase_bg:
             for yy in range(pad_y, pad_y + pad_h):
@@ -6138,29 +6423,10 @@ class App:
         status_h = 2
         usable_h = h - top_h - status_h
 
-        # When an overlay is open on the cover tab and the sixel is already on
-        # screen, always use the fast path — even if _redraw_status_only is False.
-        # The overlay covers the main content so a full redraw + sixel re-write
-        # would only cause a visible flash without adding any useful update.
-        # _cover_sixel_visible becomes False when the cover changes (new track or
-        # tab switch), which automatically falls through to the full draw path.
-        _overlay_cover_fast = (
-            self.tab == TAB_COVER and self._cover_sixel_visible
-            and (self.info_overlay or self.lyrics_overlay)
-        )
-        if (self._redraw_status_only or _overlay_cover_fast) and not self.show_help:
-            # Status-only tick: update the status bar then restore any open overlay
-            # without re-rendering the sixel.  Using noutrefresh lets win.refresh()
-            # override the popup cells in the virtual screen so doupdate sends the
-            # popup content instead of the spaces that stdscr has for those cells.
+        if self._redraw_status_only and not self.show_help:
             self._draw_status(h - status_h, 0, w)
             self.stdscr.noutrefresh()
-            if self.info_overlay:
-                self._draw_info(_erase_bg=False)
-            elif self.lyrics_overlay:
-                self._draw_lyrics(_erase_bg=False)
-            else:
-                curses.doupdate()
+            curses.doupdate()
             self._need_redraw = False
             self._redraw_status_only = False
             return
@@ -6196,7 +6462,7 @@ class App:
 
         self._draw_status(h - status_h, 0, w)
 
-        if self.tab == TAB_COVER and self._cover_lyrics and not queue_panel and not self.lyrics_overlay:
+        if self.tab == TAB_COVER and self._cover_lyrics and not queue_panel:
             # Auto-fetch lyrics for the playing track if not already loaded.
             t_cov = self.current_track
             if t_cov and not self.lyrics_loading and not (self.lyrics_track_id == t_cov.id and self.lyrics_lines):
@@ -6206,13 +6472,11 @@ class App:
             self._draw_cover_lyrics_panel(top_h, w - lyrics_w, usable_h, lyrics_w)
 
         if self.tab == TAB_COVER and self.cover_path:
-            # Force ncurses to rewrite every cell individually instead of using
-            # terminal scroll sequences (ESC[S/ESC[T).  Scroll sequences shift
-            # the physical screen including the sixel image, causing it to appear
-            # displaced by one row when a panel scrolls.  touchwin() marks all
-            # cells dirty so ncurses falls back to cursor-position + character
-            # writes, eliminating the scroll optimisation entirely.
-            self.stdscr.touchwin()
+            # Prevent ncurses scroll-region optimisation for the content rows.
+            # redrawln marks those rows as physically corrupted so ncurses
+            # rewrites each cell individually on the next refresh instead of
+            # issuing ESC[S/ESC[T sequences that shift the sixel image.
+            self.stdscr.redrawln(top_h, usable_h)
         self.stdscr.refresh()
 
         # After curses has refreshed, write the cover sixel.  Overlays (info,
@@ -6243,10 +6507,6 @@ class App:
 
         if self.show_help:
             self._draw_help()
-        if self.info_overlay:
-            self._draw_info()
-        if self.lyrics_overlay:
-            self._draw_lyrics()
 
     # ---------------------------------------------------------------------------
     # tab switching
@@ -6506,11 +6766,7 @@ class App:
                         self._need_redraw = True
                     continue
                 # Plain ESC: dismiss overlays
-                if self.lyrics_overlay:
-                    self.lyrics_overlay = False
-                elif self.info_overlay:
-                    self.info_overlay = False
-                elif self.show_help:
+                if self.show_help:
                     self.show_help = False
                 elif self.filter_q:
                     self.filter_q = ""
@@ -6542,29 +6798,6 @@ class App:
                     self.help_scroll = 0
                 elif ch in (curses.KEY_END, ord("G")):
                     self.help_scroll = max(0, getattr(self, "_help_max_scroll", 10_000))
-                continue
-
-            if self.lyrics_overlay:
-                if ch in (27, ord("v"), ord("V"), ord("q")):
-                    self.lyrics_overlay = False
-                elif ch in (curses.KEY_DOWN, ord("j")):
-                    self.lyrics_scroll = min(self.lyrics_scroll + 1, getattr(self, "_lyrics_overlay_max_scroll", 10_000))
-                    self._redraw_status_only = True  # scroll-only: fast path, no sixel re-render
-                elif ch in (curses.KEY_UP, ord("k")):
-                    self.lyrics_scroll = max(0, self.lyrics_scroll - 1)
-                    self._redraw_status_only = True
-                elif ch == curses.KEY_PPAGE:
-                    self.lyrics_scroll = max(0, self.lyrics_scroll - self._page_step())
-                    self._redraw_status_only = True
-                elif ch == curses.KEY_NPAGE:
-                    self.lyrics_scroll = min(self.lyrics_scroll + self._page_step(), getattr(self, "_lyrics_overlay_max_scroll", 10_000))
-                    self._redraw_status_only = True
-                elif ch in (curses.KEY_HOME, ord("g")):
-                    self.lyrics_scroll = 0
-                    self._redraw_status_only = True
-                elif ch in (curses.KEY_END, ord("G")):
-                    self.lyrics_scroll = getattr(self, "_lyrics_overlay_max_scroll", 10_000)
-                    self._redraw_status_only = True
                 continue
 
             if ch == ord("/"):
@@ -6600,27 +6833,25 @@ class App:
                 self._cover_render_buf = None
                 continue
 
-            # v: standard lyrics popup.
-            # In the cover tab while the inline lyrics panel is already showing
-            # the *currently playing* track, v is a no-op — lyrics are already
-            # visible inline.  If the selected track differs from the playing
-            # track, open a transient popup for that other track instead.
+            # v: lyrics popup for the selected track.
+            # In the cover tab with the inline panel showing the playing track, no-op.
             if ch == ord("v"):
-                if self.tab == TAB_COVER and self._cover_lyrics and not self.lyrics_overlay:
+                if self.tab == TAB_COVER and self._cover_lyrics:
                     t_sel = self._current_selection_track()
                     if (t_sel is None
                             or (self.current_track is not None
                                 and t_sel.id == self.current_track.id)):
                         continue  # inline panel already shows this track
-                if self.lyrics_overlay:
-                    self.toggle_lyrics()
+                    self.show_lyrics_dialog(t_sel)
                 else:
                     t_sel = self._current_selection_track()
                     if t_sel:
-                        self.toggle_lyrics(t_sel)
+                        self.show_lyrics_dialog(t_sel)
                 continue
             if ch == ord("V"):
-                self.toggle_lyrics(self.current_track)
+                _vt = self.current_track
+                if _vt:
+                    self.show_lyrics_dialog(_vt)
                 continue
 
             if ch == ord("i"):
@@ -6629,20 +6860,6 @@ class App:
             if ch == ord("I"):
                 self.toggle_info_playing()
                 continue
-
-            if self.info_overlay:
-                if ch == ord("q"):
-                    self.info_overlay = False
-                    self._need_redraw = True
-                    continue
-                if ch == ord("j"):
-                    self.info_scroll += 1
-                    self._redraw_status_only = True  # scroll-only: fast path, no sixel re-render
-                    continue
-                if ch == ord("k"):
-                    self.info_scroll = max(0, self.info_scroll - 1)
-                    self._redraw_status_only = True
-                    continue
 
             if ch == ord("s"):
                 _sit = self._selected_left_item() if not self._queue_context() else None
@@ -7317,8 +7534,7 @@ class App:
             # In the cover tab with the inline lyrics panel (no queue overlay, no
             # full-screen overlay), intercept navigation keys to scroll the panel.
             if (self.tab == TAB_COVER and self._cover_lyrics
-                    and not self.queue_overlay
-                    and not self.info_overlay and not self.lyrics_overlay):
+                    and not self.queue_overlay):
                 _lmax = self._cover_lyrics_max_scroll
                 if ch in (curses.KEY_DOWN, ord("j"), 14):
                     self.lyrics_scroll = min(self.lyrics_scroll + 1, _lmax)

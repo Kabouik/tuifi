@@ -2072,101 +2072,89 @@ class App:
     def _download_marked_albums_async(self, albums: List[Album]) -> None:
         self.toast(f"Fetching {len(albums)} albums…")
         def worker() -> None:
-            try:
-                all_tracks: List[Track] = []
-                for album in albums:
-                    aid = self._resolve_album_id_for_album(album)
-                    if aid:
-                        all_tracks.extend(self._fetch_album_tracks_by_album_id(aid))
-                if all_tracks:
-                    self.start_download_tracks(all_tracks)
-                else:
-                    self.toast("No tracks")
-            except Exception:
-                self.toast("Error")
-        threading.Thread(target=worker, daemon=True).start()
+            all_tracks: List[Track] = []
+            for album in albums:
+                aid = self._resolve_album_id_for_album(album)
+                if aid:
+                    all_tracks.extend(self._fetch_album_tracks_by_album_id(aid))
+            if all_tracks:
+                self.start_download_tracks(all_tracks)
+            else:
+                self.toast("No tracks")
+        self._bg(worker)
 
     def _open_artist_from_album_async(self, album: Album) -> None:
         """Switch to Artist tab and load the artist, resolving artist_id via the album API."""
         self.switch_tab(TAB_ARTIST, refresh=False)
         self.toast("Loading artist…")
         def worker() -> None:
-            try:
-                ar_id: Optional[int] = None
-                ar_name = album.artist
-                aid = album.id if album.id else None
-                if not aid and album.track_id:
-                    aid = self._resolve_album_id_for_album(album)
-                if aid:
-                    payload = self.client.album(aid)
-                    data = payload.get("data") if isinstance(payload, dict) else None
-                    if isinstance(data, dict):
-                        ar = data.get("artist")
-                        if isinstance(ar, dict) and ar.get("id"):
-                            ar_id = int(ar["id"])
-                            ar_name = ar.get("name") or ar_name
-                        if not ar_id:
-                            ars = data.get("artists")
-                            if isinstance(ars, list) and ars and isinstance(ars[0], dict):
-                                if ars[0].get("id"):
-                                    ar_id = int(ars[0]["id"])
-                                    ar_name = ars[0].get("name") or ar_name
-                ctx = Track(id=album.track_id or 0, title="", artist=ar_name,
-                            album="", year="????", track_no=0, artist_id=ar_id or 0)
-                self.fetch_artist_async(ctx)
-            except Exception:
-                self.toast("Error")
-        threading.Thread(target=worker, daemon=True).start()
+            ar_id: Optional[int] = None
+            ar_name = album.artist
+            aid = album.id if album.id else None
+            if not aid and album.track_id:
+                aid = self._resolve_album_id_for_album(album)
+            if aid:
+                payload = self.client.album(aid)
+                data = payload.get("data") if isinstance(payload, dict) else None
+                if isinstance(data, dict):
+                    ar = data.get("artist")
+                    if isinstance(ar, dict) and ar.get("id"):
+                        ar_id = int(ar["id"])
+                        ar_name = ar.get("name") or ar_name
+                    if not ar_id:
+                        ars = data.get("artists")
+                        if isinstance(ars, list) and ars and isinstance(ars[0], dict):
+                            if ars[0].get("id"):
+                                ar_id = int(ars[0]["id"])
+                                ar_name = ars[0].get("name") or ar_name
+            ctx = Track(id=album.track_id or 0, title="", artist=ar_name,
+                        album="", year="????", track_no=0, artist_id=ar_id or 0)
+            self.fetch_artist_async(ctx)
+        self._bg(worker)
 
     def _enqueue_marked_artists_async(self, artists: List[Artist], insert_after_playing: bool) -> None:
         self.toast(f"Fetching {len(artists)} artists…")
         def worker() -> None:
-            try:
-                all_tracks: List[Track] = []
-                for artist in artists:
-                    aid = artist.id
-                    if not aid and artist.track_id:
-                        try:
-                            info = self.client.info(artist.track_id)
-                            data = info.get("data") if isinstance(info, dict) else None
-                            if isinstance(data, dict):
-                                a = data.get("artist")
-                                if isinstance(a, dict) and str(a.get("id", "")).isdigit():
-                                    aid = int(a["id"])
-                        except Exception:
-                            pass
-                    if aid:
-                        _albums, tracks = self._fetch_artist_catalog_by_artist_id(aid)
-                        all_tracks.extend(tracks)
-                    else:
-                        payload2 = self.client.search_tracks(artist.name, limit=200)
-                        a0 = artist.name.strip().lower()
-                        all_tracks.extend(t for t in self._extract_tracks_from_search(payload2)
-                                          if t.artist.strip().lower() == a0)
-                if all_tracks:
-                    self._enqueue_tracks(self._dedupe_tracks(all_tracks), insert_after_playing)
+            all_tracks: List[Track] = []
+            for artist in artists:
+                aid = artist.id
+                if not aid and artist.track_id:
+                    try:
+                        info = self.client.info(artist.track_id)
+                        data = info.get("data") if isinstance(info, dict) else None
+                        if isinstance(data, dict):
+                            a = data.get("artist")
+                            if isinstance(a, dict) and str(a.get("id", "")).isdigit():
+                                aid = int(a["id"])
+                    except Exception:
+                        pass
+                if aid:
+                    _albums, tracks = self._fetch_artist_catalog_by_artist_id(aid)
+                    all_tracks.extend(tracks)
                 else:
-                    self.toast("No tracks")
-            except Exception:
-                self.toast("Error")
-        threading.Thread(target=worker, daemon=True).start()
+                    payload2 = self.client.search_tracks(artist.name, limit=200)
+                    a0 = artist.name.strip().lower()
+                    all_tracks.extend(t for t in self._extract_tracks_from_search(payload2)
+                                      if t.artist.strip().lower() == a0)
+            if all_tracks:
+                self._enqueue_tracks(self._dedupe_tracks(all_tracks), insert_after_playing)
+            else:
+                self.toast("No tracks")
+        self._bg(worker)
 
     def _enqueue_marked_albums_async(self, albums: List[Album], insert_after_playing: bool) -> None:
         self.toast(f"Fetching {len(albums)} albums…")
         def worker() -> None:
-            try:
-                all_tracks: List[Track] = []
-                for album in albums:
-                    aid = self._resolve_album_id_for_album(album)
-                    if aid:
-                        all_tracks.extend(self._fetch_album_tracks_by_album_id(aid))
-                if all_tracks:
-                    self._enqueue_tracks(all_tracks, insert_after_playing)
-                else:
-                    self.toast("No tracks")
-            except Exception:
-                self.toast("Error")
-        threading.Thread(target=worker, daemon=True).start()
+            all_tracks: List[Track] = []
+            for album in albums:
+                aid = self._resolve_album_id_for_album(album)
+                if aid:
+                    all_tracks.extend(self._fetch_album_tracks_by_album_id(aid))
+            if all_tracks:
+                self._enqueue_tracks(all_tracks, insert_after_playing)
+            else:
+                self.toast("No tracks")
+        self._bg(worker)
 
     def enqueue_key(self, insert_after_playing: bool) -> None:
         if not self._queue_context():
@@ -2237,69 +2225,63 @@ class App:
     def _enqueue_artist_async(self, artist: Artist, insert_after_playing: bool) -> None:
         self.toast("Artist…")
         def worker() -> None:
-            try:
-                tracks: List[Track] = []
-                aid = artist.id
-                if not aid and artist.track_id:
-                    try:
-                        info = self.client.info(artist.track_id)
-                        data = info.get("data") if isinstance(info, dict) else None
-                        if isinstance(data, dict):
-                            a = data.get("artist")
-                            if isinstance(a, dict) and str(a.get("id", "")).isdigit():
-                                aid = int(a["id"])
-                    except Exception:
-                        pass
-                if aid:
-                    _albums, tracks = self._fetch_artist_catalog_by_artist_id(aid)
-                if not tracks:
-                    payload2 = self.client.search_tracks(artist.name, limit=300)
-                    a0 = artist.name.strip().lower()
-                    tracks = [t for t in self._extract_tracks_from_search(payload2)
-                              if t.artist.strip().lower() == a0]
-                if tracks:
-                    def _yr2(t: Track) -> int:
-                        y = year_norm(t.year)
-                        return int(y) if y.isdigit() else 9999
-                    tracks = self._dedupe_tracks(tracks)
-                    tracks = sorted(tracks, key=lambda t: (_yr2(t), t.album.lower(), t.track_no or 9999, t.title.lower()))
-                    self._enqueue_tracks(tracks, insert_after_playing)
-                else:
-                    self.toast("No tracks")
-            except Exception:
-                self.toast("Error")
-        threading.Thread(target=worker, daemon=True).start()
+            tracks: List[Track] = []
+            aid = artist.id
+            if not aid and artist.track_id:
+                try:
+                    info = self.client.info(artist.track_id)
+                    data = info.get("data") if isinstance(info, dict) else None
+                    if isinstance(data, dict):
+                        a = data.get("artist")
+                        if isinstance(a, dict) and str(a.get("id", "")).isdigit():
+                            aid = int(a["id"])
+                except Exception:
+                    pass
+            if aid:
+                _albums, tracks = self._fetch_artist_catalog_by_artist_id(aid)
+            if not tracks:
+                payload2 = self.client.search_tracks(artist.name, limit=300)
+                a0 = artist.name.strip().lower()
+                tracks = [t for t in self._extract_tracks_from_search(payload2)
+                          if t.artist.strip().lower() == a0]
+            if tracks:
+                def _yr2(t: Track) -> int:
+                    y = year_norm(t.year)
+                    return int(y) if y.isdigit() else 9999
+                tracks = self._dedupe_tracks(tracks)
+                tracks = sorted(tracks, key=lambda t: (_yr2(t), t.album.lower(), t.track_no or 9999, t.title.lower()))
+                self._enqueue_tracks(tracks, insert_after_playing)
+            else:
+                self.toast("No tracks")
+        self._bg(worker)
 
     def _download_artist_async(self, artist: Artist) -> None:
         self.toast("Artist DL…")
         def worker() -> None:
-            try:
-                tracks: List[Track] = []
-                aid = artist.id
-                if not aid and artist.track_id:
-                    try:
-                        info = self.client.info(artist.track_id)
-                        data = info.get("data") if isinstance(info, dict) else None
-                        if isinstance(data, dict):
-                            a = data.get("artist")
-                            if isinstance(a, dict) and str(a.get("id", "")).isdigit():
-                                aid = int(a["id"])
-                    except Exception:
-                        pass
-                if aid:
-                    _albums, tracks = self._fetch_artist_catalog_by_artist_id(aid)
-                if not tracks:
-                    payload2 = self.client.search_tracks(artist.name, limit=300)
-                    a0 = artist.name.strip().lower()
-                    tracks = [t for t in self._extract_tracks_from_search(payload2)
-                              if t.artist.strip().lower() == a0]
-                if tracks:
-                    self.start_download_tracks(self._dedupe_tracks(tracks))
-                else:
-                    self.toast("No tracks")
-            except Exception:
-                self.toast("Error")
-        threading.Thread(target=worker, daemon=True).start()
+            tracks: List[Track] = []
+            aid = artist.id
+            if not aid and artist.track_id:
+                try:
+                    info = self.client.info(artist.track_id)
+                    data = info.get("data") if isinstance(info, dict) else None
+                    if isinstance(data, dict):
+                        a = data.get("artist")
+                        if isinstance(a, dict) and str(a.get("id", "")).isdigit():
+                            aid = int(a["id"])
+                except Exception:
+                    pass
+            if aid:
+                _albums, tracks = self._fetch_artist_catalog_by_artist_id(aid)
+            if not tracks:
+                payload2 = self.client.search_tracks(artist.name, limit=300)
+                a0 = artist.name.strip().lower()
+                tracks = [t for t in self._extract_tracks_from_search(payload2)
+                          if t.artist.strip().lower() == a0]
+            if tracks:
+                self.start_download_tracks(self._dedupe_tracks(tracks))
+            else:
+                self.toast("No tracks")
+        self._bg(worker)
 
     def save_mix_as_playlist_async(self, name: str, seed: Any) -> None:
         """Create a playlist from a mix seed (Track/Album/Artist), save to tab 8 and liked."""
@@ -4702,19 +4684,16 @@ class App:
             return
         self.toast("Fetching album…")
         def worker() -> None:
-            try:
-                aid = self._resolve_album_id_for_album(album)
-                if not aid:
-                    self.toast("Album id?")
-                    return
-                tracks = self._fetch_album_tracks_by_album_id(aid)
-                if tracks:
-                    self._add_tracks_to_named_playlist(tracks, name)
-                else:
-                    self.toast("No tracks")
-            except Exception:
-                self.toast("Error")
-        threading.Thread(target=worker, daemon=True).start()
+            aid = self._resolve_album_id_for_album(album)
+            if not aid:
+                self.toast("Album id?")
+                return
+            tracks = self._fetch_album_tracks_by_album_id(aid)
+            if tracks:
+                self._add_tracks_to_named_playlist(tracks, name)
+            else:
+                self.toast("No tracks")
+        self._bg(worker)
 
     def _add_marked_artists_to_playlist_async(self, artists: List[Artist]) -> None:
         name = self.pick_playlist("Add to playlist")
@@ -4722,59 +4701,8 @@ class App:
             return
         self.toast(f"Fetching {len(artists)} artists…")
         def worker() -> None:
-            try:
-                all_tracks: List[Track] = []
-                for artist in artists:
-                    aid = artist.id
-                    if not aid and artist.track_id:
-                        try:
-                            info = self.client.info(artist.track_id)
-                            data = info.get("data") if isinstance(info, dict) else None
-                            if isinstance(data, dict):
-                                a = data.get("artist")
-                                if isinstance(a, dict) and str(a.get("id", "")).isdigit():
-                                    aid = int(a["id"])
-                        except Exception:
-                            pass
-                    if aid:
-                        _albums, tracks = self._fetch_artist_catalog_by_artist_id(aid)
-                        all_tracks.extend(tracks)
-                if all_tracks:
-                    self._add_tracks_to_named_playlist(all_tracks, name)
-                else:
-                    self.toast("No tracks")
-            except Exception:
-                self.toast("Error")
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _add_marked_albums_to_playlist_async(self, albums: List[Album]) -> None:
-        name = self.pick_playlist("Add to playlist")
-        if not name:
-            return
-        self.toast(f"Fetching {len(albums)} albums…")
-        def worker() -> None:
-            try:
-                all_tracks: List[Track] = []
-                for album in albums:
-                    aid = self._resolve_album_id_for_album(album)
-                    if aid:
-                        all_tracks.extend(self._fetch_album_tracks_by_album_id(aid))
-                if all_tracks:
-                    self._add_tracks_to_named_playlist(all_tracks, name)
-                else:
-                    self.toast("No tracks")
-            except Exception:
-                self.toast("Error")
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _add_artist_to_playlist_async(self, artist: Artist) -> None:
-        name = self.pick_playlist("Add to playlist")
-        if not name:
-            return
-        self.toast("Fetching artist…")
-        def worker() -> None:
-            try:
-                tracks: List[Track] = []
+            all_tracks: List[Track] = []
+            for artist in artists:
                 aid = artist.id
                 if not aid and artist.track_id:
                     try:
@@ -4788,23 +4716,65 @@ class App:
                         pass
                 if aid:
                     _albums, tracks = self._fetch_artist_catalog_by_artist_id(aid)
-                if not tracks:
-                    payload2 = self.client.search_tracks(artist.name, limit=300)
-                    a0 = artist.name.strip().lower()
-                    tracks = [t for t in self._extract_tracks_from_search(payload2)
-                              if t.artist.strip().lower() == a0]
-                if tracks:
-                    def _yr(t: Track) -> int:
-                        y = year_norm(t.year)
-                        return int(y) if y.isdigit() else 9999
-                    tracks = self._dedupe_tracks(tracks)
-                    tracks = sorted(tracks, key=lambda t: (_yr(t), t.album.lower(), t.track_no or 9999, t.title.lower()))
-                    self._add_tracks_to_named_playlist(tracks, name)
-                else:
-                    self.toast("No tracks")
-            except Exception:
-                self.toast("Error")
-        threading.Thread(target=worker, daemon=True).start()
+                    all_tracks.extend(tracks)
+            if all_tracks:
+                self._add_tracks_to_named_playlist(all_tracks, name)
+            else:
+                self.toast("No tracks")
+        self._bg(worker)
+
+    def _add_marked_albums_to_playlist_async(self, albums: List[Album]) -> None:
+        name = self.pick_playlist("Add to playlist")
+        if not name:
+            return
+        self.toast(f"Fetching {len(albums)} albums…")
+        def worker() -> None:
+            all_tracks: List[Track] = []
+            for album in albums:
+                aid = self._resolve_album_id_for_album(album)
+                if aid:
+                    all_tracks.extend(self._fetch_album_tracks_by_album_id(aid))
+            if all_tracks:
+                self._add_tracks_to_named_playlist(all_tracks, name)
+            else:
+                self.toast("No tracks")
+        self._bg(worker)
+
+    def _add_artist_to_playlist_async(self, artist: Artist) -> None:
+        name = self.pick_playlist("Add to playlist")
+        if not name:
+            return
+        self.toast("Fetching artist…")
+        def worker() -> None:
+            tracks: List[Track] = []
+            aid = artist.id
+            if not aid and artist.track_id:
+                try:
+                    info = self.client.info(artist.track_id)
+                    data = info.get("data") if isinstance(info, dict) else None
+                    if isinstance(data, dict):
+                        a = data.get("artist")
+                        if isinstance(a, dict) and str(a.get("id", "")).isdigit():
+                            aid = int(a["id"])
+                except Exception:
+                    pass
+            if aid:
+                _albums, tracks = self._fetch_artist_catalog_by_artist_id(aid)
+            if not tracks:
+                payload2 = self.client.search_tracks(artist.name, limit=300)
+                a0 = artist.name.strip().lower()
+                tracks = [t for t in self._extract_tracks_from_search(payload2)
+                          if t.artist.strip().lower() == a0]
+            if tracks:
+                def _yr(t: Track) -> int:
+                    y = year_norm(t.year)
+                    return int(y) if y.isdigit() else 9999
+                tracks = self._dedupe_tracks(tracks)
+                tracks = sorted(tracks, key=lambda t: (_yr(t), t.album.lower(), t.track_no or 9999, t.title.lower()))
+                self._add_tracks_to_named_playlist(tracks, name)
+            else:
+                self.toast("No tracks")
+        self._bg(worker)
 
     def _add_playlist_to_playlist_async(self, source_name: str) -> None:
         tracks = list(self.playlists.get(source_name, []))

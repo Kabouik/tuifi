@@ -35,3 +35,5 @@ AUTOPLAY_RECOMMENDED = 2
 AUTOPLAY_NAMES       = ["off", "mix", "recommended"]
 
 QUALITY_ORDER = ["HI_RES_LOSSLESS", "LOSSLESS", "HIGH", "LOW"]
+
+LIKED_FILTER_NAMES = ["All", "Tracks", "Artists", "Albums", "Playlists"]

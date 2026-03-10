@@ -27,6 +27,7 @@ from tuifi_pkg import (
     TAB_NAMES,
     AUTOPLAY_OFF, AUTOPLAY_MIX, AUTOPLAY_RECOMMENDED, AUTOPLAY_NAMES,
     QUALITY_ORDER,
+    LIKED_FILTER_NAMES,
 )
 from tuifi_pkg.models import (
     Track, Album, Artist,
@@ -52,6 +53,16 @@ from tuifi_pkg.workers import MetaFetcher, DownloadManager
 
 def print_version(prog: str) -> None:
     print(f"tuifi v{VERSION}")
+
+
+def _yr_int(t: "Track") -> int:
+    """Return track year as sortable int; unknown years sort last (9999)."""
+    y = year_norm(t.year)
+    return int(y) if y.isdigit() else 9999
+
+
+def _track_sort_key(t: "Track") -> tuple:
+    return (_yr_int(t), t.album.lower(), t.track_no or 9999, t.title.lower())
 
 
 class App:
@@ -100,13 +111,9 @@ class App:
         q0 = str(self.settings.get("quality") or QUALITY_ORDER[0])
         self.quality_idx = QUALITY_ORDER.index(q0) if q0 in QUALITY_ORDER else 0
 
-        # autoplay: 0=off 1=mix 2=recommended  (migrate old bool)
+        # autoplay: 0=off 1=mix 2=recommended  (migrate old bool True→recommended)
         raw_ap = self.settings.get("autoplay", AUTOPLAY_OFF)
-        if raw_ap is True:
-            raw_ap = AUTOPLAY_RECOMMENDED
-        elif raw_ap is False:
-            raw_ap = AUTOPLAY_OFF
-        self.autoplay: int = clamp(int(raw_ap), 0, 2)
+        self.autoplay: int = clamp(int(AUTOPLAY_RECOMMENDED if raw_ap is True else raw_ap), 0, 2)
         self.autoplay_n: int = max(1, int(self.settings.get("autoplay_n", 3) or 3))
 
         # ---- autoplay state ----
@@ -156,79 +163,41 @@ class App:
         self.playlist_view_name: Optional[str] = None
         self.playlist_view_tracks: List[Track] = []
 
-        self.left_idx = 0
-        self.left_scroll = 0
+        self._reset_left_cursor()
         self._tab_positions: Dict[int, Tuple[int, int]] = {}
         self._prev_tab: int = self.tab
 
-        self.marked_left_idx: set = set()
-        self.marked_queue_idx: set = set()
-
+        self.marked_left_idx: set = set(); self.marked_queue_idx: set = set()
         self.priority_queue: List[int] = []
+        self.repeat_mode = 0; self.shuffle_on = False
+        self.current_track: Optional[Track] = None; self.last_error: Optional[str] = None
+        self.toast_msg = ""; self.toast_until = 0.0
+        self.show_help = False; self.help_scroll = 0
 
-        self.repeat_mode = 0
-        self.shuffle_on = False
+        self.info_scroll = 0; self.info_loading = False; self.info_follow_selection = True; self._info_refresh_due = 0.0
+        self.info_track: Optional[Track] = None; self.info_album: Optional[Album] = None; self.info_artist: Optional[Artist] = None
+        self.info_payload: Optional[Dict[str, Any]] = None; self._info_target_id: Optional[int] = None; self._info_target_album_id: Optional[int] = None
 
-        self.current_track: Optional[Track] = None
-        self.last_error: Optional[str] = None
-
-        self.toast_msg = ""
-        self.toast_until = 0.0
-
-        self.show_help = False
-        self.help_scroll = 0
-
-        self.info_overlay = False
-        self.info_scroll = 0
-        self.info_track: Optional[Track] = None
-        self.info_album: Optional[Album] = None
-        self.info_artist: Optional[Artist] = None
-        self.info_payload: Optional[Dict[str, Any]] = None
-        self.info_loading = False
-        self.info_follow_selection = True
-        self._info_target_id: Optional[int] = None
-        self._info_target_album_id: Optional[int] = None
-        self._info_refresh_due = 0.0
-
-        self.lyrics_overlay = False
-        self.lyrics_scroll = 0
-        self.lyrics_lines: List[str] = []
-        self.lyrics_loading = False
-        self.lyrics_track_id: Optional[int] = None
-        self.lyrics_track: Optional["Track"] = None
+        self.lyrics_overlay = False; self.lyrics_scroll = 0; self.lyrics_loading = False
+        self.lyrics_lines: List[str] = []; self.lyrics_track_id: Optional[int] = None; self.lyrics_track: Optional["Track"] = None
 
         # Cover tab state
-        self.cover_track: Optional[Track] = None   # track whose cover is loaded
-        self.cover_path: Optional[str] = None      # local path to cached image file
-        self.cover_loading: bool = False
+        self.cover_track: Optional[Track] = None; self.cover_path: Optional[str] = None; self.cover_loading: bool = False
         self._cover_backend_cache: Optional[str] = None   # "ueberzugpp"/"chafa"/"none"
         self._cover_render_key: str = ""           # "path:WxH" to detect when re-render needed
         self._cover_render_buf: Optional[bytes] = None    # cached chafa/ANSI output
-        self._cover_sixel_visible: bool = False    # True when image data is on the terminal
-        self._cover_sixel_cols: int = 0            # width (columns) of the last rendered sixel
-        self._cover_ub_socket: Optional[str] = None       # ueberzugpp socket path
-        self._cover_ub_pid: Optional[int] = None          # ueberzugpp daemon PID
-        self._cover_lyrics: bool = True                # show lyrics panel in cover tab
-        self._cover_lyrics_max_scroll: int = 10_000   # updated each draw; prevents over-scrolling inline panel
+        self._cover_sixel_visible: bool = False; self._cover_sixel_cols: int = 0
+        self._cover_ub_socket: Optional[str] = None; self._cover_ub_pid: Optional[int] = None
+        self._cover_lyrics: bool = True; self._cover_lyrics_max_scroll: int = 10_000
         self._show_singles_eps: bool = bool(self.settings.get("include_singles_and_eps_in_artist_tab", False))
         self._last_artist_fetch_track: Optional["Track"] = None
 
-        self._skip_delta: int = 0         # accumulated next/prev presses waiting to be applied
-        self._skip_at: float = 0.0        # timestamp of last skip key press
+        self._skip_delta: int = 0; self._skip_at: float = 0.0
+        self.filter_q = ""; self.filter_hits: List[int] = []; self.filter_pos = -1  # not persisted
+        self._lyrics_filter_q = ""; self._lyrics_filter_hits: List[int] = []; self._lyrics_filter_pos = -1
 
-        self.filter_q: str = ""   # not persisted across sessions
-        self.filter_hits: List[int] = []
-        self.filter_pos: int = -1
-        self._lyrics_filter_q: str = ""
-        self._lyrics_filter_hits: List[int] = []
-        self._lyrics_filter_pos: int = -1
-
-        self._need_redraw = True
-        self._redraw_status_only = False
-        self._queue_redraw_only = False    # fast path: only queue panel changed (cover tab)
-        self._loading = False
-        self._loading_key = ""
-        self._liked_refresh_due: float = 0.0
+        self._full_redraw()
+        self._queue_redraw_only = False; self._loading = False; self._loading_key = ""; self._liked_refresh_due: float = 0.0
 
         self._last_mpd_path: Optional[str] = None
 
@@ -295,19 +264,16 @@ class App:
 
     def _autoplay_trigger_prefetch(self) -> None:
         """Kick off a background thread to fill _autoplay_buffer."""
-        if not self._autoplay_should_prefetch():
-            return
+        if not self._autoplay_should_prefetch(): return
 
         pool = self._autoplay_seed_pool()
-        if not pool:
-            return
+        if not pool: return
 
         seed = random.choice(pool)
 
         # Don't re-fetch if we already fetched from this seed recently
         with self._autoplay_lock:
-            if seed.id == self._autoplay_last_seed_id:
-                return
+            if seed.id == self._autoplay_last_seed_id: return
             self._autoplay_prefetch_running = True
             self._autoplay_last_seed_id = seed.id
 
@@ -354,8 +320,7 @@ class App:
         if t:
             self._autoplay_record_played(t)
 
-        if self.autoplay == AUTOPLAY_OFF:
-            return
+        if self.autoplay == AUTOPLAY_OFF: return
 
         remaining = self._autoplay_tracks_remaining()
 
@@ -376,16 +341,12 @@ class App:
 
     def _autoplay_buffer_drain(self, tracks: List[Track]) -> None:
         """Append buffered tracks to the end of the queue (thread-safe w.r.t. queue)."""
-        if not tracks:
-            return
+        if not tracks: return
         queue_ids = {t.id for t in self.queue_items}
         fresh = [t for t in tracks if t.id not in queue_ids]
-        if not fresh:
-            return
+        if not fresh: return
         self.queue_items.extend(fresh)
-        self.toast(f"Autoplay +{len(fresh)}")
-        self._need_redraw = True
-        self._redraw_status_only = False
+        self._toast_redraw(f"Autoplay +{len(fresh)}")
         debug_log(f"autoplay: enqueued {len(fresh)} tracks, queue now {len(self.queue_items)}")
 
     def _fetch_track_mix_payload_for_track(self, seed: Track) -> Optional[Dict[str, Any]]:
@@ -465,9 +426,7 @@ class App:
 
     def fetch_mix_async(self, ctx: Optional[Track]) -> None:
         """Load the artist mix for `ctx` into the Mix tab."""
-        if not ctx:
-            self.toast("No context track")
-            return
+        if not ctx: self.toast("No context track"); return
         self.mix_tracks = []
         self.mix_title = ""
         self.mix_track = ctx.artist
@@ -476,8 +435,7 @@ class App:
 
         def worker() -> None:
             mix_payload = self._fetch_track_mix_payload_for_track(ctx)
-            if self._loading_key != key:
-                return
+            if self._loading_key != key: return
 
             if not mix_payload:
                 self.mix_tracks = []
@@ -546,8 +504,7 @@ class App:
                             seed_track = tracks[0]
                 except Exception:
                     pass
-            if self._loading_key != key:
-                return
+            if self._loading_key != key: return
             if mix_id:
                 mix_payload = self.client.mix(mix_id)
             elif seed_track:
@@ -555,8 +512,7 @@ class App:
             else:
                 self.toast("No mix for album")
                 return
-            if not mix_payload or self._loading_key != key:
-                return
+            if not mix_payload or self._loading_key != key: return
             tracks = self._extract_tracks_from_mix_payload(mix_payload)
             self.mix_tracks = tracks
             self.mix_title = f"{album.artist} — {album.title} (Mix)"
@@ -584,15 +540,11 @@ class App:
                         mix_id = self._extract_mix_id_from_payload(payload2)
                 except Exception:
                     pass
-            if not mix_id:
-                self.toast("No mix for artist")
-                return
-            if self._loading_key != key:
-                return
+            if not mix_id: self.toast("No mix for artist"); return
+            if self._loading_key != key: return
             mix_payload = self.client.mix(mix_id)
             tracks = self._extract_tracks_from_mix_payload(mix_payload)
-            if self._loading_key != key:
-                return
+            if self._loading_key != key: return
             self.mix_tracks = tracks
             self.mix_title = f"{artist.name} (Mix)"
             self.toast(f"Mix: {len(tracks)} tracks")
@@ -656,21 +608,14 @@ class App:
             curses.start_color()
             curses.use_default_colors()
             s = self.settings
-            curses.init_pair(1,  self._name_to_curses_color(s.get("color_playing",   "green")),   -1)
-            curses.init_pair(2,  self._name_to_curses_color(s.get("color_paused",    "yellow")),  -1)
-            curses.init_pair(3,  self._name_to_curses_color(s.get("color_error",     "red")),     -1)
-            curses.init_pair(4,  self._name_to_curses_color(s.get("color_chrome",    "black")),   -1)
-            curses.init_pair(5,  self._name_to_curses_color(s.get("color_accent",    "magenta")), -1)
-            curses.init_pair(6,  self._name_to_curses_color(s.get("color_accent",    "magenta")), -1)
-            curses.init_pair(7,  self._name_to_curses_color(s.get("color_artist",    "white")),   -1)
-            curses.init_pair(8,  self._name_to_curses_color(s.get("color_album",     "blue")),    -1)
-            curses.init_pair(9,  self._name_to_curses_color(s.get("color_duration",  "black")),   -1)
-            curses.init_pair(10, self._name_to_curses_color(s.get("color_numbers",   "black")),   -1)
-            curses.init_pair(11, self._name_to_curses_color(s.get("color_title",     "white")),   -1)
-            curses.init_pair(12, self._name_to_curses_color(s.get("color_year",      "blue")),    -1)
-            curses.init_pair(13, self._name_to_curses_color(s.get("color_separator", "white")),   -1)
-            curses.init_pair(14, self._name_to_curses_color(s.get("color_liked",     "white")),   -1)
-            curses.init_pair(15, self._name_to_curses_color(s.get("color_mark",      "red")),     -1)
+            for _p, _k, _d in [
+                (1,"color_playing","green"), (2,"color_paused","yellow"), (3,"color_error","red"),
+                (4,"color_chrome","black"),  (5,"color_accent","magenta"),(6,"color_accent","magenta"),
+                (7,"color_artist","white"),  (8,"color_album","blue"),    (9,"color_duration","black"),
+                (10,"color_numbers","black"),(11,"color_title","white"),  (12,"color_year","blue"),
+                (13,"color_separator","white"),(14,"color_liked","white"),(15,"color_mark","red"),
+            ]:
+                curses.init_pair(_p, self._name_to_curses_color(s.get(_k, _d)), -1)
             curses.init_pair(16, curses.COLOR_WHITE, curses.COLOR_BLACK)
 
     def C(self, pair: int) -> int:
@@ -686,18 +631,71 @@ class App:
         self.toast_until = time.time() + sec
         self._need_redraw = True
 
+    def _full_redraw(self) -> None:
+        self._need_redraw = True
+        self._redraw_status_only = False
+
+    def _toast_redraw(self, msg: str) -> None:
+        self.toast(msg)
+        self._full_redraw()
+
+    def _persist_settings(self) -> None:
+        self.settings.update({
+            "volume": self.desired_volume, "mute": self.desired_mute,
+            "color_mode": self.color_mode, "queue_overlay": self.queue_overlay,
+            "show_toggles": self.show_toggles, "show_numbers": self.show_numbers,
+            "show_track_album": self.show_track_album, "show_track_year": self.show_track_year,
+            "show_track_duration": self.show_track_duration,
+            "quality": QUALITY_ORDER[self.quality_idx],
+            "autoplay": self.autoplay, "initial_tab": self.tab,
+            "tab_align": self.tab_align,
+            "include_singles_and_eps_in_artist_tab": self._show_singles_eps,
+        })
+        try:
+            save_settings(self.settings)
+        except Exception:
+            pass
+
+    def _reset_left_cursor(self) -> None:
+        self.left_idx = 0
+        self.left_scroll = 0
+
+    def _draw_hint(self, y: int, x: int, h: int, w: int, text: str) -> None:
+        """Draw a single-/multi-line hint in colour 10, clipped to the panel."""
+        for i, line in enumerate(text.splitlines()):
+            if y + i >= y + h:
+                break
+            self.stdscr.addstr(y + i, x, line[:max(0, w - 1)].ljust(max(0, w - 1)), self.C(10))
+
+    def _parse_similar_artists_payload(self, payload: Any) -> List[Dict[str, Any]]:
+        """Extract list of {id, name} dicts from an artist_similar API payload."""
+        sim_items: Any = None
+        if isinstance(payload, dict):
+            for key in ("artists", "items", "data"):
+                if isinstance(payload.get(key), list):
+                    sim_items = payload[key]
+                    break
+        elif isinstance(payload, list):
+            sim_items = payload
+        result: List[Dict[str, Any]] = []
+        if sim_items:
+            for a in sim_items:
+                if isinstance(a, dict):
+                    name = a.get("name") or a.get("artistName") or ""
+                    if name:
+                        result.append({"id": a.get("id") or 0, "name": name})
+        return result
+
     def _set_loading(self, key: str) -> None:
         self._loading = True
         self._loading_key = key
         self.last_error = None
-        self._need_redraw = True
-        self._redraw_status_only = False
+        self._full_redraw()
 
     def _clear_loading(self, key: str) -> None:
         if self._loading_key == key:
             self._loading = False
-            self._need_redraw = True
-            self._redraw_status_only = False
+            self._full_redraw()
 
     def _bg(self, fn, *, loading_key: str = "", on_error: str = "Error",
             record_error: bool = False) -> None:
@@ -718,6 +716,34 @@ class App:
                     self._clear_loading(loading_key)
                 self._need_redraw = True
         threading.Thread(target=_run, daemon=True).start()
+
+    def _with_album_tracks_async(self, album: "Album", on_tracks, init_toast: str = "") -> None:
+        """Resolve album id and fetch tracks in background, then call on_tracks(tracks)."""
+        if init_toast:
+            self.toast(init_toast)
+        def worker() -> None:
+            aid = self._resolve_album_id_for_album(album)
+            if not aid: self.toast("Album id?"); return
+            on_tracks(self._fetch_album_tracks_by_album_id(aid))
+        self._bg(worker)
+
+    def _bg_download_album(self, album: "Album") -> None:
+        self._with_album_tracks_async(album, self.start_download_tracks)
+
+    def _resolve_artist_id_via_track(self, artist: "Artist", aid: int = 0) -> int:
+        """Return aid; if 0 and artist has a track_id, try to resolve via track info API."""
+        if aid or not artist.track_id:
+            return aid
+        try:
+            info = self.client.info(artist.track_id)
+            data = info.get("data") if isinstance(info, dict) else None
+            if isinstance(data, dict):
+                a = data.get("artist")
+                if isinstance(a, dict) and str(a.get("id", "")).isdigit():
+                    return int(a["id"])
+        except Exception:
+            pass
+        return 0
 
     def is_liked(self, tid: int) -> bool:
         return tid in self.liked_ids
@@ -798,33 +824,27 @@ class App:
         except Exception:
             return None
 
+    def _parse_items_list(self, lst: List[Any]) -> List[Track]:
+        """Parse a list of API item dicts into Track objects."""
+        tracks = []
+        for it in lst:
+            if isinstance(it, dict):
+                x = it.get("item", it) if isinstance(it.get("item"), dict) else it
+                if isinstance(x.get("track"), dict):
+                    x = x["track"]
+                t = self._parse_track_obj(x)
+                if t:
+                    tracks.append(t)
+        return tracks
+
     def _extract_tracks_from_search(self, payload: Dict[str, Any]) -> List[Track]:
-        tracks: List[Track] = []
-
-        def scan_list(lst):
-            for it in lst:
-                if isinstance(it, dict):
-                    x = it.get("item", it) if isinstance(it.get("item"), dict) else it
-                    if isinstance(x.get("track"), dict):
-                        x = x["track"]
-                    t = self._parse_track_obj(x)
-                    if t:
-                        tracks.append(t)
-
         if isinstance(payload, dict):
             data = payload.get("data")
             if isinstance(data, dict) and isinstance(data.get("items"), list):
-                scan_list(data["items"])
-            elif isinstance(payload.get("items"), list):
-                scan_list(payload["items"])
-
-        seen = set()
-        out: List[Track] = []
-        for t in tracks:
-            if t.id not in seen:
-                seen.add(t.id)
-                out.append(t)
-        return out
+                return list({t.id: t for t in self._parse_items_list(data["items"])}.values())
+            if isinstance(payload.get("items"), list):
+                return list({t.id: t for t in self._parse_items_list(payload["items"])}.values())
+        return []
 
     def _looks_like_track_dict(self, d: Dict[str, Any]) -> bool:
         if "id" not in d or not (("title" in d) or ("name" in d)):
@@ -833,21 +853,24 @@ class App:
                                     "trackDuration", "isrc", "artists", "artist"))
 
     def _scan_for_track_dicts(self, root: Any, out: List[Dict[str, Any]], limit: int = 2500) -> None:
-        if len(out) >= limit:
-            return
+        if len(out) >= limit: return
         if isinstance(root, dict):
             if self._looks_like_track_dict(root):
                 out.append(root)
                 return
             for v in root.values():
                 self._scan_for_track_dicts(v, out, limit)
-                if len(out) >= limit:
-                    return
+                if len(out) >= limit: return
         elif isinstance(root, list):
             for v in root:
                 self._scan_for_track_dicts(v, out, limit)
-                if len(out) >= limit:
-                    return
+                if len(out) >= limit: return
+
+    def _scan_parse_tracks(self, payload: Any, limit: int = 2500) -> List[Track]:
+        """Scan payload for track dicts and parse each into a Track object."""
+        dicts: List[Dict[str, Any]] = []
+        self._scan_for_track_dicts(payload, dicts, limit=limit)
+        return [t for d in dicts if (t := self._parse_track_obj(d))]
 
     def _extract_tracks_from_album_payload(self, payload: Dict[str, Any]) -> List[Track]:
         candidates: List[Any] = []
@@ -868,31 +891,12 @@ class App:
                 candidates = cur
                 break
 
-        tracks: List[Track] = []
-        if candidates:
-            for it in candidates:
-                if isinstance(it, dict):
-                    x = it.get("item", it) if isinstance(it.get("item"), dict) else it
-                    if isinstance(x.get("track"), dict):
-                        x = x["track"]
-                    t = self._parse_track_obj(x)
-                    if t:
-                        tracks.append(t)
+        tracks = self._parse_items_list(candidates) if candidates else []
 
         if not tracks:
-            dicts: List[Dict[str, Any]] = []
-            self._scan_for_track_dicts(payload, dicts, limit=2500)
-            for d in dicts:
-                t = self._parse_track_obj(d)
-                if t:
-                    tracks.append(t)
+            tracks.extend(self._scan_parse_tracks(payload))
 
-        seen = set()
-        out: List[Track] = []
-        for t in tracks:
-            if t.id not in seen:
-                seen.add(t.id)
-                out.append(t)
+        out = list({t.id: t for t in tracks}.values())
         out.sort(key=lambda t: (t.track_no if t.track_no > 0 else 10_000, t.title.lower()))
         return out
 
@@ -902,13 +906,11 @@ class App:
         seen_ta: Set[Tuple[str, str]] = set()
         out: List[Track] = []
         for t in tracks:
-            if t.id in seen_ids:
-                continue
+            if t.id in seen_ids: continue
             # Also deduplicate by title+artist to collapse same track released
             # under different IDs in multiple album editions.
             ta = (t.title.strip().lower(), t.artist.strip().lower())
-            if ta in seen_ta:
-                continue
+            if ta in seen_ta: continue
             seen_ids.add(t.id)
             seen_ta.add(ta)
             out.append(t)
@@ -966,6 +968,21 @@ class App:
                     break
         return self._dedupe_albums(albums)
 
+    def _build_synthetic_albums(self, tracks: List[Track]) -> List[Album]:
+        """Build a deduplicated, sorted list of Album objects inferred from track metadata."""
+        best: Dict[Tuple[str, str], Album] = {}
+        for t in tracks:
+            k = (t.artist.strip().lower(), t.album.strip().lower())
+            if k not in best:
+                best[k] = Album(id=t.album_id or 0, title=t.album, artist=t.artist, year=t.year)
+            else:
+                cur = best[k]
+                if cur.id == 0 and t.album_id:
+                    cur.id = t.album_id
+                if year_norm(cur.year) == "????" and year_norm(t.year) != "????":
+                    cur.year = t.year
+        return self._dedupe_albums(list(best.values()))
+
     def _fetch_artist_catalog_by_artist_id(self, artist_id: int) -> Tuple[List[Album], List[Track]]:
         payload = self.client.artist(int(artist_id))
 
@@ -980,34 +997,14 @@ class App:
                     pass
 
         if not tracks:
-            dicts: List[Dict[str, Any]] = []
-            self._scan_for_track_dicts(payload, dicts, limit=2500)
-            for d in dicts:
-                t = self._parse_track_obj(d)
-                if t:
-                    tracks.append(t)
+            tracks.extend(self._scan_parse_tracks(payload))
 
         tracks = self._dedupe_tracks(tracks)
 
-        def _yr(t: Track) -> int:
-            y = year_norm(t.year)
-            return int(y) if y.isdigit() else 9999
-
-        tracks.sort(key=lambda t: (_yr(t), t.album.lower(), t.track_no or 9999, t.title.lower()))
+        tracks.sort(key=_track_sort_key)
 
         if not albums and tracks:
-            best: Dict[Tuple[str, str], Album] = {}
-            for t in tracks:
-                k = (t.artist.strip().lower(), t.album.strip().lower())
-                if k not in best:
-                    best[k] = Album(id=t.album_id or 0, title=t.album, artist=t.artist, year=t.year)
-                else:
-                    cur = best[k]
-                    if cur.id == 0 and t.album_id:
-                        cur.id = t.album_id
-                    if year_norm(cur.year) == "????" and year_norm(t.year) != "????":
-                        cur.year = t.year
-            albums = self._dedupe_albums(list(best.values()))
+            albums = self._build_synthetic_albums(tracks)
 
         return albums, tracks
 
@@ -1048,29 +1045,6 @@ class App:
                     dur = f"[{fmt_dur(dv)}]"
             return (t.artist, t.title, album_year, dur)  # type: ignore[return-value]
 
-    def fmt_track_line_bw(self, t: Track, width: int, liked: bool) -> str:
-        parts = self._make_track_parts(t)
-        a, title, album_year, dur = parts[0], parts[1], parts[2], parts[3]
-        head = "♥ " if liked else ""
-        if self.tab_align:
-            year_part = parts[4] if len(parts) > 4 else ""
-            bits = [f"{head}{a}", title]
-            if self.show_track_album:
-                bits.append(album_year)
-            if self.show_track_year and year_part:
-                bits.append(year_part)
-            if dur:
-                bits.append(dur)
-            s = "\t".join(bits)
-        else:
-            bits = [f"{head}{a} - {title}"]
-            if album_year:
-                bits.append(album_year)
-            if dur:
-                bits.append(dur)
-            s = " ".join(bits)
-        return s if len(s) <= width else (s[:max(0, width - 1)] + "…")
-
     def fmt_track_status(self, t: Track, width: int) -> str:
         yv = self._track_year(t)
         s = f"{t.artist} - {t.title} • {t.album}" + (f" • {yv}" if yv != "????" else "")
@@ -1087,14 +1061,11 @@ class App:
             # For the Artist tab, fall through to show partial data while loading
             if not (self.tab == TAB_ARTIST and (self.artist_ctx or self.artist_albums or self.artist_tracks)):
                 return ("loading", [])
-        if self.tab == TAB_QUEUE:
-            return ("queue_tab", self.queue_items)
-        if self.tab == TAB_SEARCH:
-            return ("tracks", self.search_results)
-        if self.tab == TAB_RECOMMENDED:
-            return ("tracks", self.recommended_results)
-        if self.tab == TAB_MIX:
-            return ("tracks", self.mix_tracks)
+        _simple_tabs = {TAB_QUEUE: ("queue_tab", self.queue_items), TAB_SEARCH: ("tracks", self.search_results),
+                        TAB_RECOMMENDED: ("tracks", self.recommended_results), TAB_MIX: ("tracks", self.mix_tracks),
+                        TAB_HISTORY: ("tracks", self.history_tracks), TAB_COVER: ("cover_tab", [])}
+        if self.tab in _simple_tabs:
+            return _simple_tabs[self.tab]
         if self.tab == TAB_ARTIST:
             items: List[Any] = []
             if self.artist_ctx:
@@ -1117,38 +1088,25 @@ class App:
             return ("album_mixed", items)
         if self.tab == TAB_LIKED:
             f = self.liked_filter
-            if f == 1:
-                return ("tracks", self.liked_cache)
-            if f == 2:
-                return ("liked_mixed", self.liked_artist_cache)
-            if f == 3:
-                return ("liked_mixed", self.liked_album_cache)
-            if f == 4:
-                return ("liked_mixed", self.liked_playlist_cache)
+            _liked_map = {1: ("tracks", self.liked_cache), 2: ("liked_mixed", self.liked_artist_cache),
+                          3: ("liked_mixed", self.liked_album_cache), 4: ("liked_mixed", self.liked_playlist_cache)}
+            if f in _liked_map:
+                return _liked_map[f]
             # f == 0: all categories with section separators
             # order: Playlists, Artists, Albums, Tracks
             items: List[Any] = []
-            if self.liked_playlist_cache:
-                items.append(("sep", "Playlists"))
-                items.extend(self.liked_playlist_cache)
-            if self.liked_artist_cache:
-                items.append(("sep", "Artists"))
-                items.extend(self.liked_artist_cache)
-            if self.liked_album_cache:
-                items.append(("sep", "Albums"))
-                items.extend(self.liked_album_cache)
-            if self.liked_cache:
-                items.append(("sep", "Tracks"))
-                items.extend(self.liked_cache)
+            for _lbl, _cache in [("Playlists", self.liked_playlist_cache),
+                                  ("Artists",   self.liked_artist_cache),
+                                  ("Albums",    self.liked_album_cache),
+                                  ("Tracks",    self.liked_cache)]:
+                if _cache:
+                    items.append(("sep", _lbl))
+                    items.extend(_cache)
             return ("liked_mixed", items)
         if self.tab == TAB_PLAYLISTS:
             if self.playlist_view_name is None:
                 return ("playlists", self.playlist_names)
             return ("tracks", self.playlist_view_tracks)
-        if self.tab == TAB_HISTORY:
-            return ("tracks", self.history_tracks)
-        if self.tab == TAB_COVER:
-            return ("cover_tab", [])
         return ("none", [])
 
     def _selected_left_item(self) -> Optional[Any]:
@@ -1193,18 +1151,7 @@ class App:
         h, w = self.stdscr.getmaxyx()
         box_w = clamp(max(63, len(title) + 8), 34, w - 6)
         box_h = 5
-        y0 = (h - box_h) // 2
-        x0 = (w - box_w) // 2
-        for yy in range(y0, y0 + box_h):
-            self.stdscr.addstr(yy, x0, " " * box_w)
-        self._erase_popup_bg(max(0, y0-1), max(0, x0-2), min(h-max(0,y0-1), box_h+2), min(w-max(0,x0-2), box_w+4))
-        for yy in range(max(0, y0-1), min(h, y0+box_h+1)):
-            try:
-                self.stdscr.addstr(yy, max(0, x0-2), " " * min(w-max(0,x0-2), box_w+4))
-            except curses.error:
-                pass
-        win = self.stdscr.derwin(box_h, box_w, y0, x0)
-        win.keypad(True)
+        y0, x0, win = self._popup_win(box_h, box_w)
         win.box()
         label = title[:box_w - 4]
         label_len = len(label) + 1
@@ -1242,14 +1189,12 @@ class App:
                 while self.stdscr.getch() != -1:
                     pass
                 curses.curs_set(0)
-                self._need_redraw = True
-                self._redraw_status_only = False
+                self._full_redraw()
                 return None
             elif ch in (10, 13):
                 curses.curs_set(0)
                 self.stdscr.nodelay(True)
-                self._need_redraw = True
-                self._redraw_status_only = False
+                self._full_redraw()
                 return s.strip()
             elif ch in (curses.KEY_BACKSPACE, 127, 8):
                 if cur > 0:
@@ -1281,22 +1226,9 @@ class App:
                 cur = i
 
     def prompt_yes_no(self, title: str) -> bool:
-        h, w = self.stdscr.getmaxyx()
+        _, w = self.stdscr.getmaxyx()
         box_w = clamp(max(30, len(title) + 8), 30, w - 6)
-        box_h = 5
-        y0 = (h - box_h) // 2
-        x0 = (w - box_w) // 2
-        pad_y = max(0, y0 - 1)
-        pad_x = max(0, x0 - 2)
-        pad_h = min(h - pad_y, box_h + 2)
-        pad_w = min(w - pad_x, box_w + 4)
-        self._erase_popup_bg(pad_y, pad_x, pad_h, pad_w)
-        for yy in range(pad_y, pad_y + pad_h):
-            try:
-                self.stdscr.addstr(yy, pad_x, " " * pad_w)
-            except curses.error:
-                pass
-        win = self.stdscr.derwin(box_h, box_w, y0, x0)
+        _, _, win = self._popup_win(5, box_w)
         win.erase()
         win.box()
         win.addstr(2, 2, title[:box_w - 4], self.C(4))
@@ -1314,50 +1246,8 @@ class App:
         if not names:
             self.toast("No playlists")
             return None
-        h, w = self.stdscr.getmaxyx()
-        box_w = min(w - 6, 56)
-        box_h = min(h - 6, max(10, min(18, len(names) + 4)))
-        y0 = (h - box_h) // 2
-        x0 = (w - box_w) // 2
-        idx = 0
-        self.stdscr.nodelay(False)
-        result: Optional[str] = None
-        try:
-            while True:
-                for yy in range(y0, y0 + box_h):
-                    self.stdscr.addstr(yy, x0, " " * box_w)
-                win = self.stdscr.derwin(box_h, box_w, y0, x0)
-                win.box()
-                win.addstr(0, 2, f" {title} ", self.C(4))
-                inner_h = box_h - 2
-                scroll = clamp(idx - inner_h // 2, 0, max(0, len(names) - inner_h))
-                for i in range(inner_h):
-                    j = scroll + i
-                    if j >= len(names):
-                        break
-                    attr = curses.A_REVERSE if j == idx else 0
-                    win.addstr(1 + i, 2, names[j][:box_w - 4].ljust(box_w - 4), attr)
-                win.refresh()
-                ch = self.stdscr.getch()
-                if ch in (27, ord("q"), ord("c")):
-                    result = None
-                    break
-                if ch in (10, 13):
-                    result = names[idx]
-                    break
-                if ch in (curses.KEY_DOWN, ord("j")):
-                    idx = clamp(idx + 1, 0, len(names) - 1)
-                if ch in (curses.KEY_UP, ord("k")):
-                    idx = clamp(idx - 1, 0, len(names) - 1)
-                if ch in (curses.KEY_HOME, ord("g")):
-                    idx = 0
-                if ch in (curses.KEY_END, ord("G")):
-                    idx = len(names) - 1
-        finally:
-            self.stdscr.nodelay(True)
-        self._need_redraw = True
-        self._redraw_status_only = False
-        return result
+        idx = self.pick_from_list(title, names, simple=True)
+        return names[idx] if idx >= 0 else None
 
     # ---------------------------------------------------------------------------
     # mpv controls
@@ -1490,19 +1380,13 @@ class App:
     )
 
     def _apply_mpv_prefs(self) -> None:
-        try:
-            self.mp.cmd("set_property", "volume", float(self.desired_volume))
-        except Exception:
-            pass
-        try:
-            self.mp.cmd("set_property", "mute", bool(self.desired_mute))
-        except Exception:
-            pass
-        try:
-            loop_file = "inf" if self.repeat_mode == 2 else "no"
-            self.mp.cmd("set_property", "loop-file", loop_file)
-        except Exception:
-            pass
+        for _prop, _val in [("volume", float(self.desired_volume)),
+                            ("mute", bool(self.desired_mute)),
+                            ("loop-file", "inf" if self.repeat_mode == 2 else "no")]:
+            try:
+                self.mp.cmd("set_property", _prop, _val)
+            except Exception:
+                pass
 
     def play_track(self, t: Track, resume: bool = False, start_pos: float = 0.0) -> None:
         if self._last_mpd_path:
@@ -1536,8 +1420,7 @@ class App:
                 self._last_mpd_path = mpd_path
                 self.current_track = t
                 self.last_error = None
-                self._need_redraw = True
-                self._redraw_status_only = False
+                self._full_redraw()
                 self._record_history(t)
                 # Pre-fetch cover art in the background so tab 0 is instant
                 self.fetch_cover_async(t)
@@ -1565,9 +1448,7 @@ class App:
             last_err = "stream unavailable"
         debug_log(f"play_track ERROR track_id={t.id}: {last_err}")
         self.last_error = last_err
-        self.toast(f"Error: {last_err[:60]}")
-        self._need_redraw = True
-        self._redraw_status_only = False
+        self._toast_redraw(f"Error: {last_err[:60]}")
 
     def toggle_pause(self) -> None:
         self.mp.cmd("cycle", "pause")
@@ -1590,9 +1471,7 @@ class App:
             self.toast("Resuming…")
             return
         t = self._current_selection_track() if not self.current_track else self.current_track
-        if not t:
-            self.toast("No track")
-            return
+        if not t: self.toast("No track"); return
         self.play_track(t, resume=True)
         self.toast("Resuming…")
 
@@ -1605,33 +1484,35 @@ class App:
         except ValueError:
             return 0
 
+    def _swap_queue_items(self, i: int, j: int) -> None:
+        """Swap two queue positions, preserving priority and play-idx references."""
+        self.queue_items[i], self.queue_items[j] = self.queue_items[j], self.queue_items[i]
+        pi, pj = self._priority_index_of(i), self._priority_index_of(j)
+        if pi > 0: self.priority_queue[pi - 1] = j
+        if pj > 0: self.priority_queue[pj - 1] = i
+        if self.queue_play_idx == i: self.queue_play_idx = j
+        elif self.queue_play_idx == j: self.queue_play_idx = i
+
     def toggle_priority(self, queue_idx: int) -> None:
         if queue_idx in self.priority_queue:
             self.priority_queue.remove(queue_idx)
             self.toast("Priority removed")
         else:
             self.priority_queue.append(queue_idx)
-            self.toast(f"Priority {len(self.priority_queue)}")
-        self._need_redraw = True
-        self._redraw_status_only = False
+            self._toast_redraw(f"Priority {len(self.priority_queue)}")
 
     def clear_priority_queue(self) -> None:
         n = len(self.priority_queue)
-        if not n:
-            self.toast("Priority queue empty")
-            return
+        if not n: self.toast("Priority queue empty"); return
         if self.prompt_yes_no(f"Clear {n} priority track(s)? (y/n)"):
             self.priority_queue.clear()
-            self.toast("Priority cleared")
-            self._need_redraw = True
-            self._redraw_status_only = False
+            self._toast_redraw("Priority cleared")
 
     def _remap_priority_after_delete(self, deleted_indices: List[int]) -> None:
         deleted_set = set(deleted_indices)
         new_pq = []
         for pi in self.priority_queue:
-            if pi in deleted_set:
-                continue
+            if pi in deleted_set: continue
             shift = sum(1 for d in deleted_indices if d < pi)
             new_pq.append(pi - shift)
         self.priority_queue = new_pq
@@ -1643,8 +1524,7 @@ class App:
     # queue playback
     # ---------------------------------------------------------------------------
     def play_queue_index(self, idx: int, start_pos: float = 0.0) -> None:
-        if not self.queue_items:
-            return
+        if not self.queue_items: return
         idx = clamp(idx, 0, len(self.queue_items) - 1)
         prev_play_idx = self.queue_play_idx
         self.queue_play_idx = idx
@@ -1654,12 +1534,10 @@ class App:
         self.play_track(self.queue_items[idx], start_pos=start_pos)
         if self.last_error and (self.current_track is None or self.current_track.id != self.queue_items[idx].id):
             self.queue_play_idx = prev_play_idx
-        self._need_redraw = True
-        self._redraw_status_only = False
+        self._full_redraw()
 
     def next_track(self) -> None:
-        if not self.queue_items:
-            return
+        if not self.queue_items: return
         if self.priority_queue:
             next_idx = self.priority_queue[0]
             self.play_queue_index(next_idx)
@@ -1680,8 +1558,7 @@ class App:
         self.play_queue_index(self.queue_play_idx)
 
     def prev_track(self) -> None:
-        if not self.queue_items:
-            return
+        if not self.queue_items: return
         self.queue_play_idx -= 1
         if self.queue_play_idx < 0:
             self.queue_play_idx = len(self.queue_items) - 1 if self.repeat_mode == 1 else 0
@@ -1704,6 +1581,23 @@ class App:
     def _save_liked(self) -> None:
         save_liked(self.liked_tracks, self.liked_albums, self.liked_artists, self.liked_playlists)
 
+    def _commit_liked(self) -> None:
+        self._save_liked()
+        self._schedule_liked_refresh()
+
+    def _get_wch_int(self) -> int:
+        """Read one character via get_wch() and return it as int; -1 on timeout/error."""
+        try:
+            ch = self.stdscr.get_wch()
+        except curses.error:
+            return -1
+        if isinstance(ch, str):
+            try:
+                return ord(ch)
+            except Exception:
+                return -1
+        return ch
+
     def toggle_like(self, t: Track, silent: bool = False) -> None:
         if t.id in self.liked_ids:
             self.liked_ids.discard(t.id)
@@ -1715,8 +1609,7 @@ class App:
             self.liked_tracks.insert(0, track_to_mono(t, int(time.time() * 1000)))
             if not silent:
                 self.toast("Liked")
-        self._save_liked()
-        self._schedule_liked_refresh()
+        self._commit_liked()
 
     def toggle_like_album(self, album: Album) -> None:
         if album.id in self.liked_album_ids:
@@ -1727,8 +1620,7 @@ class App:
             self.liked_album_ids.add(album.id)
             self.liked_albums.insert(0, {"id": album.id, "title": album.title, "artist": album.artist, "year": album.year})
             self.toast("Album liked")
-        self._save_liked()
-        self._schedule_liked_refresh()
+        self._commit_liked()
 
     def toggle_like_artist(self, artist_id: int, name: str) -> None:
         if artist_id in self.liked_artist_ids:
@@ -1739,8 +1631,7 @@ class App:
             self.liked_artist_ids.add(artist_id)
             self.liked_artists.insert(0, {"id": artist_id, "name": name})
             self.toast("Artist liked")
-        self._save_liked()
-        self._schedule_liked_refresh()
+        self._commit_liked()
 
     def toggle_like_playlist(self, name: str) -> None:
         if name in self.liked_playlist_ids:
@@ -1752,88 +1643,41 @@ class App:
             pl_id = (self.playlists_meta.get(name) or {}).get("id", str(uuid.uuid4()))
             self.liked_playlists.insert(0, {"name": name, "id": pl_id})
             self.toast("Playlist liked")
-        self._save_liked()
-        self._schedule_liked_refresh()
+        self._commit_liked()
 
     def like_selected(self) -> None:
         if not self._queue_context():
             if self.tab == TAB_COVER:
-                if self.current_track:
-                    self.toggle_like(self.current_track)
+                if self.current_track: self.toggle_like(self.current_track)
                 return
-            marked_albums = self._marked_albums_from_left()
-            marked_artists = self._marked_artists_from_left()
-            marked_playlists = self._marked_playlists_from_left()
-            marked_albums, marked_artists, marked_playlists, cancelled = \
-                self._resolve_batch_conflict(marked_albums, marked_artists, marked_playlists)
-            if cancelled:
-                return
-            if marked_albums:
-                for alb in marked_albums:
-                    self.toggle_like_album(alb)
-                self.toast(f"Liked/unliked {len(marked_albums)} albums")
-                self._need_redraw = True
-                self._redraw_status_only = False
-                return
-            if marked_artists:
-                for ar in marked_artists:
-                    self.toggle_like_artist(ar.id, ar.name)
-                self.toast(f"Liked/unliked {len(marked_artists)} artists")
-                self._need_redraw = True
-                self._redraw_status_only = False
-                return
-            if marked_playlists:
-                for pl in marked_playlists:
-                    self.toggle_like_playlist(pl)
-                self.toast(f"Liked/unliked {len(marked_playlists)} playlists")
-                self._need_redraw = True
-                self._redraw_status_only = False
-                return
+            marked_albums, marked_artists, marked_playlists, cancelled = self._marked_batch()
+            if cancelled: return
+            for items, fn, label in [
+                (marked_albums,    self.toggle_like_album,                             "albums"),
+                (marked_artists,   lambda ar: self.toggle_like_artist(ar.id, ar.name), "artists"),
+                (marked_playlists, self.toggle_like_playlist,                          "playlists"),
+            ]:
+                if items:
+                    for item in items: fn(item)
+                    self.toast(f"Liked/unliked {len(items)} {label}"); self._full_redraw(); return
             it = self._selected_left_item()
-            # Artist header row in artist_mixed view
             if isinstance(it, tuple) and it[0] == "artist_header":
-                if self.artist_ctx:
-                    self.toggle_like_artist(*self.artist_ctx)
+                if self.artist_ctx: self.toggle_like_artist(*self.artist_ctx)
                 return
-            # Album header tuple (album_mixed)
             if isinstance(it, tuple) and len(it) == 2 and it[0] == "album_title" and isinstance(it[1], Album):
-                self.toggle_like_album(it[1])
-                return
-            # Album object (in liked_mixed or artist view)
-            if isinstance(it, Album):
-                self.toggle_like_album(it)
-                return
-            # Artist object (in liked_mixed)
-            if isinstance(it, Artist):
-                self.toggle_like_artist(it.id, it.name)
-                return
-            # Playlist name string: in playlists list view or liked_mixed
+                self.toggle_like_album(it[1]); return
+            if isinstance(it, Album): self.toggle_like_album(it); return
+            if isinstance(it, Artist): self.toggle_like_artist(it.id, it.name); return
             if isinstance(it, str) and (
-                (self.tab == TAB_PLAYLISTS and self.playlist_view_name is None)
-                or self.tab == TAB_LIKED
+                (self.tab == TAB_PLAYLISTS and self.playlist_view_name is None) or self.tab == TAB_LIKED
             ):
-                self.toggle_like_playlist(it)
-                return
-            # Fall through: like marked or selected tracks
-            marked = self._marked_tracks_from_left()
-            if marked:
-                for t in marked:
-                    self.toggle_like(t, silent=True)
-                self.toast(f"Liked/unliked {len(marked)}")
-                return
-            t = self._selected_left_track()
-            if t:
-                self.toggle_like(t)
-            return
-        marked = self._marked_tracks_from_queue()
-        if marked:
-            for t in marked:
-                self.toggle_like(t, silent=True)
-            self.toast(f"Liked/unliked {len(marked)}")
-            return
-        t = self._queue_selected_track()
-        if t:
-            self.toggle_like(t)
+                self.toggle_like_playlist(it); return
+        tracks = self._target_tracks()
+        if len(tracks) > 1:
+            for t in tracks: self.toggle_like(t, silent=True)
+            self.toast(f"Liked/unliked {len(tracks)}")
+        elif tracks:
+            self.toggle_like(tracks[0])
 
     def like_playing(self) -> None:
         if self.current_track:
@@ -1846,46 +1690,26 @@ class App:
         if self._queue_context():
             self.marked_queue_idx = set(range(len(self.queue_items)))
         else:
-            typ, items = self._left_items()
+            _, items = self._left_items()
             sel = self._selected_left_item()
-            if isinstance(sel, Album):
-                self.marked_left_idx = {i for i, it in enumerate(items) if isinstance(it, Album)}
-            elif isinstance(sel, Artist):
-                self.marked_left_idx = {i for i, it in enumerate(items) if isinstance(it, Artist)}
-            elif isinstance(sel, str):
-                self.marked_left_idx = {i for i, it in enumerate(items) if isinstance(it, str)}
-            else:
-                self.marked_left_idx = {i for i, it in enumerate(items) if isinstance(it, Track)}
-        self.toast("Marked all")
-        self._need_redraw = True
-        self._redraw_status_only = False
+            _t = type(sel) if isinstance(sel, (Album, Artist, str)) else Track
+            self.marked_left_idx = {i for i, it in enumerate(items) if isinstance(it, _t)}
+        self._toast_redraw("Marked all")
 
     def unmark_all_current_view(self) -> None:
         if self._queue_context():
             self.marked_queue_idx.clear()
         else:
-            typ, items = self._left_items()
+            _, items = self._left_items()
             sel = self._selected_left_item()
-            if isinstance(sel, Album):
-                self.marked_left_idx = {i for i in self.marked_left_idx
-                                        if not (0 <= i < len(items) and isinstance(items[i], Album))}
-            elif isinstance(sel, Artist):
-                self.marked_left_idx = {i for i in self.marked_left_idx
-                                        if not (0 <= i < len(items) and isinstance(items[i], Artist))}
-            elif isinstance(sel, str):
-                self.marked_left_idx = {i for i in self.marked_left_idx
-                                        if not (0 <= i < len(items) and isinstance(items[i], str))}
-            else:
-                self.marked_left_idx = {i for i in self.marked_left_idx
-                                        if not (0 <= i < len(items) and isinstance(items[i], Track))}
-        self.toast("Unmarked")
-        self._need_redraw = True
-        self._redraw_status_only = False
+            _t = type(sel) if isinstance(sel, (Album, Artist, str)) else Track
+            self.marked_left_idx = {i for i in self.marked_left_idx
+                                    if not (0 <= i < len(items) and isinstance(items[i], _t))}
+        self._toast_redraw("Unmarked")
 
     def toggle_mark_and_advance(self) -> None:
         if self._queue_context():
-            if not self.queue_items:
-                return
+            if not self.queue_items: return
             i = clamp(self.queue_cursor, 0, len(self.queue_items) - 1)
             if i in self.marked_queue_idx:
                 self.marked_queue_idx.remove(i)
@@ -1894,8 +1718,7 @@ class App:
             self.queue_cursor = clamp(self.queue_cursor + 1, 0, len(self.queue_items) - 1)
         else:
             typ, items = self._left_items()
-            if not items:
-                return
+            if not items: return
             i = clamp(self.left_idx, 0, len(items) - 1)
             if isinstance(items[i], (Track, Album, Artist, str)):
                 if i in self.marked_left_idx:
@@ -1903,24 +1726,16 @@ class App:
                 else:
                     self.marked_left_idx.add(i)
                 self.left_idx = clamp(self.left_idx + 1, 0, len(items) - 1)
-        self._need_redraw = True
-        self._redraw_status_only = False
+        self._full_redraw()
 
-    def _marked_tracks_from_left(self) -> List[Track]:
-        typ, items = self._left_items()
-        return [items[i] for i in sorted(self.marked_left_idx) if 0 <= i < len(items) and isinstance(items[i], Track)]
+    def _marked_by_type(self, t) -> list:
+        _, items = self._left_items()
+        return [items[i] for i in sorted(self.marked_left_idx) if 0 <= i < len(items) and isinstance(items[i], t)]
 
-    def _marked_albums_from_left(self) -> List[Album]:
-        typ, items = self._left_items()
-        return [items[i] for i in sorted(self.marked_left_idx) if 0 <= i < len(items) and isinstance(items[i], Album)]
-
-    def _marked_artists_from_left(self) -> List[Artist]:
-        typ, items = self._left_items()
-        return [items[i] for i in sorted(self.marked_left_idx) if 0 <= i < len(items) and isinstance(items[i], Artist)]
-
-    def _marked_playlists_from_left(self) -> List[str]:
-        typ, items = self._left_items()
-        return [items[i] for i in sorted(self.marked_left_idx) if 0 <= i < len(items) and isinstance(items[i], str)]
+    def _marked_tracks_from_left(self)    -> List[Track]:  return self._marked_by_type(Track)
+    def _marked_albums_from_left(self)    -> List[Album]:  return self._marked_by_type(Album)
+    def _marked_artists_from_left(self)   -> List[Artist]: return self._marked_by_type(Artist)
+    def _marked_playlists_from_left(self) -> List[str]:    return self._marked_by_type(str)
 
     def _cursor_item_type(self) -> str:
         """Returns 'album', 'artist', 'playlist', 'track', or '' for the left panel cursor."""
@@ -1980,15 +1795,27 @@ class App:
                 break
         return marked_albums, marked_artists, marked_playlists, False
 
+    def _marked_batch(self):
+        """Return (albums, artists, playlists, cancelled) from marked items, resolving conflicts."""
+        a = self._marked_albums_from_left()
+        ar = self._marked_artists_from_left()
+        pl = self._marked_playlists_from_left()
+        return self._resolve_batch_conflict(a, ar, pl)
+
     def _marked_tracks_from_queue(self) -> List[Track]:
         return [self.queue_items[i] for i in sorted(self.marked_queue_idx) if 0 <= i < len(self.queue_items)]
+
+    def _target_tracks(self) -> List[Track]:
+        """Return marked or cursor tracks from the active context (queue or left panel)."""
+        if self._queue_context():
+            return self._marked_tracks_from_queue() or ([t] if (t := self._queue_selected_track()) else [])
+        return self._marked_tracks_from_left() or ([t] if (t := self._selected_left_track()) else [])
 
     # ---------------------------------------------------------------------------
     # enqueue
     # ---------------------------------------------------------------------------
     def _enqueue_tracks(self, tracks: List[Track], insert_after_playing: bool) -> None:
-        if not tracks:
-            return
+        if not tracks: return
         if not insert_after_playing:
             self.queue_items.extend(tracks)
             if len(self.queue_items) == len(tracks):
@@ -2011,59 +1838,41 @@ class App:
                 if len(self.queue_items) == len(tracks):
                     self.queue_play_idx = 0
                     self.queue_cursor = 0
-                self.toast(f"Enqueued+ {len(tracks)}")
-        self._need_redraw = True
-        self._redraw_status_only = False
+                self._toast_redraw(f"Enqueued+ {len(tracks)}")
 
     def enqueue_album_async(self, album: Album, insert_after_playing: bool) -> None:
-        self.toast("Album…")
+        self._with_album_tracks_async(album, lambda t: self._enqueue_tracks(t, insert_after_playing), "Album…")
+
+    def _process_marked_batch_async(self, items, label: str, fetch_one, on_tracks, dedupe: bool = False) -> None:
+        """Fetch tracks for each item in background, then call on_tracks(combined_tracks)."""
+        self.toast(f"Fetching {len(items)} {label}…")
         def worker() -> None:
-            aid = self._resolve_album_id_for_album(album)
-            if not aid:
-                self.toast("Album id?")
-                return
-            tracks = self._fetch_album_tracks_by_album_id(aid)
-            self._enqueue_tracks(tracks, insert_after_playing)
+            all_tracks: List[Track] = []
+            for item in items:
+                all_tracks.extend(fetch_one(item))
+            if all_tracks:
+                on_tracks(self._dedupe_tracks(all_tracks) if dedupe else all_tracks)
+            else:
+                self.toast("No tracks")
         self._bg(worker)
+
+    def _process_marked_artists_async(self, artists: List[Artist], on_tracks) -> None:
+        def _f(a):
+            aid = self._resolve_artist_id_via_track(a, a.id)
+            return self._fetch_artist_catalog_by_artist_id(aid)[1] if aid else []
+        self._process_marked_batch_async(artists, "artists", _f, on_tracks, dedupe=True)
 
     def _download_marked_artists_async(self, artists: List[Artist]) -> None:
-        self.toast(f"Fetching {len(artists)} artists…")
-        def worker() -> None:
-            all_tracks: List[Track] = []
-            for artist in artists:
-                aid = artist.id
-                if not aid and artist.track_id:
-                    try:
-                        info = self.client.info(artist.track_id)
-                        data = info.get("data") if isinstance(info, dict) else None
-                        if isinstance(data, dict):
-                            a = data.get("artist")
-                            if isinstance(a, dict) and str(a.get("id", "")).isdigit():
-                                aid = int(a["id"])
-                    except Exception:
-                        pass
-                if aid:
-                    _albums, tracks = self._fetch_artist_catalog_by_artist_id(aid)
-                    all_tracks.extend(tracks)
-            if all_tracks:
-                self.start_download_tracks(self._dedupe_tracks(all_tracks))
-            else:
-                self.toast("No tracks")
-        self._bg(worker)
+        self._process_marked_artists_async(artists, self.start_download_tracks)
+
+    def _process_marked_albums_async(self, albums: List[Album], on_tracks) -> None:
+        def _f(a):
+            aid = self._resolve_album_id_for_album(a)
+            return self._fetch_album_tracks_by_album_id(aid) if aid else []
+        self._process_marked_batch_async(albums, "albums", _f, on_tracks)
 
     def _download_marked_albums_async(self, albums: List[Album]) -> None:
-        self.toast(f"Fetching {len(albums)} albums…")
-        def worker() -> None:
-            all_tracks: List[Track] = []
-            for album in albums:
-                aid = self._resolve_album_id_for_album(album)
-                if aid:
-                    all_tracks.extend(self._fetch_album_tracks_by_album_id(aid))
-            if all_tracks:
-                self.start_download_tracks(all_tracks)
-            else:
-                self.toast("No tracks")
-        self._bg(worker)
+        self._process_marked_albums_async(albums, self.start_download_tracks)
 
     def _open_artist_from_album_async(self, album: Album) -> None:
         """Switch to Artist tab and load the artist, resolving artist_id via the album API."""
@@ -2099,17 +1908,7 @@ class App:
         def worker() -> None:
             all_tracks: List[Track] = []
             for artist in artists:
-                aid = artist.id
-                if not aid and artist.track_id:
-                    try:
-                        info = self.client.info(artist.track_id)
-                        data = info.get("data") if isinstance(info, dict) else None
-                        if isinstance(data, dict):
-                            a = data.get("artist")
-                            if isinstance(a, dict) and str(a.get("id", "")).isdigit():
-                                aid = int(a["id"])
-                    except Exception:
-                        pass
+                aid = self._resolve_artist_id_via_track(artist, artist.id)
                 if aid:
                     _albums, tracks = self._fetch_artist_catalog_by_artist_id(aid)
                     all_tracks.extend(tracks)
@@ -2125,28 +1924,12 @@ class App:
         self._bg(worker)
 
     def _enqueue_marked_albums_async(self, albums: List[Album], insert_after_playing: bool) -> None:
-        self.toast(f"Fetching {len(albums)} albums…")
-        def worker() -> None:
-            all_tracks: List[Track] = []
-            for album in albums:
-                aid = self._resolve_album_id_for_album(album)
-                if aid:
-                    all_tracks.extend(self._fetch_album_tracks_by_album_id(aid))
-            if all_tracks:
-                self._enqueue_tracks(all_tracks, insert_after_playing)
-            else:
-                self.toast("No tracks")
-        self._bg(worker)
+        self._process_marked_albums_async(albums, lambda t: self._enqueue_tracks(t, insert_after_playing))
 
     def enqueue_key(self, insert_after_playing: bool) -> None:
         if not self._queue_context():
-            marked_albums = self._marked_albums_from_left()
-            marked_artists = self._marked_artists_from_left()
-            marked_playlists = self._marked_playlists_from_left()
-            marked_albums, marked_artists, marked_playlists, cancelled = \
-                self._resolve_batch_conflict(marked_albums, marked_artists, marked_playlists)
-            if cancelled:
-                return
+            marked_albums, marked_artists, marked_playlists, cancelled = self._marked_batch()
+            if cancelled: return
             if marked_albums:
                 self._enqueue_marked_albums_async(marked_albums, insert_after_playing)
                 return
@@ -2154,10 +1937,7 @@ class App:
                 self._enqueue_marked_artists_async(marked_artists, insert_after_playing)
                 return
             if marked_playlists:
-                all_tracks: List[Track] = []
-                for pl in marked_playlists:
-                    all_tracks.extend(self.playlists.get(pl, []))
-                self._enqueue_tracks(all_tracks, insert_after_playing)
+                self._enqueue_tracks(self._tracks_from_playlists(marked_playlists), insert_after_playing)
                 return
             it = self._selected_left_item()
             # Artist header row in Artist tab
@@ -2197,73 +1977,38 @@ class App:
                 self._enqueue_tracks(list(self.playlist_view_tracks), insert_after_playing)
                 return
 
-        if self._queue_context():
-            tracks = self._marked_tracks_from_queue() or ([self._queue_selected_track()] if self._queue_selected_track() else [])
-        else:
-            tracks = self._marked_tracks_from_left() or ([self._selected_left_track()] if self._selected_left_track() else [])
-            tracks = [t for t in tracks if t is not None]
-        self._enqueue_tracks(tracks, insert_after_playing)
+        self._enqueue_tracks(self._target_tracks(), insert_after_playing)
+
+    def _fetch_artist_tracks(self, artist: Artist) -> List[Track]:
+        """Blocking: fetch and dedupe all tracks for a single artist (catalog then search fallback)."""
+        tracks: List[Track] = []
+        aid = self._resolve_artist_id_via_track(artist, artist.id)
+        if aid:
+            _albums, tracks = self._fetch_artist_catalog_by_artist_id(aid)
+        if not tracks:
+            payload2 = self.client.search_tracks(artist.name, limit=300)
+            a0 = artist.name.strip().lower()
+            tracks = [t for t in self._extract_tracks_from_search(payload2)
+                      if t.artist.strip().lower() == a0]
+        return self._dedupe_tracks(tracks)
+
+    def _with_artist_tracks_async(self, artist: Artist, on_tracks, init_toast: str = "", sort: bool = True) -> None:
+        """Fetch all artist tracks in background, then call on_tracks(tracks)."""
+        if init_toast:
+            self.toast(init_toast)
+        def worker() -> None:
+            tracks = self._fetch_artist_tracks(artist)
+            if tracks:
+                on_tracks(sorted(tracks, key=_track_sort_key) if sort else tracks)
+            else:
+                self.toast("No tracks")
+        self._bg(worker)
 
     def _enqueue_artist_async(self, artist: Artist, insert_after_playing: bool) -> None:
-        self.toast("Artist…")
-        def worker() -> None:
-            tracks: List[Track] = []
-            aid = artist.id
-            if not aid and artist.track_id:
-                try:
-                    info = self.client.info(artist.track_id)
-                    data = info.get("data") if isinstance(info, dict) else None
-                    if isinstance(data, dict):
-                        a = data.get("artist")
-                        if isinstance(a, dict) and str(a.get("id", "")).isdigit():
-                            aid = int(a["id"])
-                except Exception:
-                    pass
-            if aid:
-                _albums, tracks = self._fetch_artist_catalog_by_artist_id(aid)
-            if not tracks:
-                payload2 = self.client.search_tracks(artist.name, limit=300)
-                a0 = artist.name.strip().lower()
-                tracks = [t for t in self._extract_tracks_from_search(payload2)
-                          if t.artist.strip().lower() == a0]
-            if tracks:
-                def _yr2(t: Track) -> int:
-                    y = year_norm(t.year)
-                    return int(y) if y.isdigit() else 9999
-                tracks = self._dedupe_tracks(tracks)
-                tracks = sorted(tracks, key=lambda t: (_yr2(t), t.album.lower(), t.track_no or 9999, t.title.lower()))
-                self._enqueue_tracks(tracks, insert_after_playing)
-            else:
-                self.toast("No tracks")
-        self._bg(worker)
+        self._with_artist_tracks_async(artist, lambda t: self._enqueue_tracks(t, insert_after_playing), "Artist…")
 
     def _download_artist_async(self, artist: Artist) -> None:
-        self.toast("Artist DL…")
-        def worker() -> None:
-            tracks: List[Track] = []
-            aid = artist.id
-            if not aid and artist.track_id:
-                try:
-                    info = self.client.info(artist.track_id)
-                    data = info.get("data") if isinstance(info, dict) else None
-                    if isinstance(data, dict):
-                        a = data.get("artist")
-                        if isinstance(a, dict) and str(a.get("id", "")).isdigit():
-                            aid = int(a["id"])
-                except Exception:
-                    pass
-            if aid:
-                _albums, tracks = self._fetch_artist_catalog_by_artist_id(aid)
-            if not tracks:
-                payload2 = self.client.search_tracks(artist.name, limit=300)
-                a0 = artist.name.strip().lower()
-                tracks = [t for t in self._extract_tracks_from_search(payload2)
-                          if t.artist.strip().lower() == a0]
-            if tracks:
-                self.start_download_tracks(self._dedupe_tracks(tracks))
-            else:
-                self.toast("No tracks")
-        self._bg(worker)
+        self._with_artist_tracks_async(artist, self.start_download_tracks, "Artist DL…", sort=False)
 
     def save_mix_as_playlist_async(self, name: str, seed: Any) -> None:
         """Create a playlist from a mix seed (Track/Album/Artist), save to tab 8 and liked."""
@@ -2273,16 +2018,13 @@ class App:
             return
         self.playlists[name] = []
         self.playlists_meta[name] = {"id": str(uuid.uuid4()), "createdAt": now_ms}
-        save_playlists(self.playlists, self.playlists_meta)
-        self.playlist_names = sorted(self.playlists.keys())
+        self._save_playlists()
         # Also mark as liked so it appears in Liked → Playlists & mixes
         if name not in self.liked_playlist_ids:
             self.liked_playlist_ids.add(name)
             self.liked_playlists.insert(0, {"name": name, "id": self.playlists_meta[name]["id"]})
             self._save_liked()
-        self.toast("Mix saved (loading tracks…)")
-        self._need_redraw = True
-        self._redraw_status_only = False
+        self._toast_redraw("Mix saved (loading tracks…)")
 
         def worker() -> None:
             tracks: List[Track] = []
@@ -2328,8 +2070,7 @@ class App:
                                 break
             if tracks:
                 self.playlists[name] = tracks
-                save_playlists(self.playlists, self.playlists_meta)
-                self.playlist_names = sorted(self.playlists.keys())
+                self._save_playlists()
                 self.toast(f"Mix '{name}': {len(tracks)} tracks saved")
             else:
                 self.toast(f"Mix '{name}' saved (no tracks found)")
@@ -2345,8 +2086,7 @@ class App:
     def playlists_open_by_name(self, name: str) -> None:
         self.switch_tab(TAB_PLAYLISTS, refresh=False)
         self.playlist_names = sorted(self.playlists.keys())
-        self.left_idx = 0
-        self.left_scroll = 0
+        self._reset_left_cursor()
         if name in self.playlists:
             self.playlist_view_name = name
             self.playlist_view_tracks = []
@@ -2354,8 +2094,7 @@ class App:
         else:
             self.playlist_view_name = None
             self.playlist_view_tracks = []
-            self._need_redraw = True
-            self._redraw_status_only = False
+            self._full_redraw()
 
     def pick_from_list(self, title: str, options: List[str], simple: bool = False, cancel_keys: tuple = ()) -> int:
         """Pager-like selection popup.
@@ -2387,20 +2126,7 @@ class App:
         box_w = min(w - 6, max(52, max(len(s) for s in options) + 8))
         extra_rows = 3 if simple else 4   # title + hint (simple: no filter bar)
         box_h = min(h - 6, max(6, len(options) + extra_rows))
-        y0 = (h - box_h) // 2
-        x0 = (w - box_w) // 2
-        pad_y = max(0, y0 - 1)
-        pad_x = max(0, x0 - 2)
-        pad_h = min(h - pad_y, box_h + 2)
-        pad_w = min(w - pad_x, box_w + 4)
-        self._erase_popup_bg(pad_y, pad_x, pad_h, pad_w)
-        for yy in range(pad_y, pad_y + pad_h):
-            try:
-                self.stdscr.addstr(yy, pad_x, " " * pad_w)
-            except curses.error:
-                pass
-        win = self.stdscr.derwin(box_h, box_w, y0, x0)
-        win.keypad(True)
+        y0, x0, win = self._popup_win(box_h, box_w)
         idx = 0
         filt = ""
         filt_active = False
@@ -2442,7 +2168,7 @@ class App:
                     win.addstr(item_row + row, 2, visible[fi][1][:box_w - 4].ljust(box_w - 4), attr)
 
                 if simple:
-                    win.addstr(box_h - 1, 2, " j/k ^n/^p: navigate   Enter: select   Esc/q: close "[:box_w - 4], self.C(10))
+                    win.addstr(box_h - 1, 2, " j/k ^n/^p: navigate   Esc/q: close "[:box_w - 4], self.C(10))
                 else:
                     win.addstr(box_h - 1, 2, hint[:box_w - 4], self.C(10))
                 win.touchwin()
@@ -2486,6 +2212,10 @@ class App:
                         idx = min(idx + 1, max(0, len(visible) - 1))
                     elif nav_up:
                         idx = max(idx - 1, 0)
+                    elif ch in (curses.KEY_HOME, "g"): idx = 0
+                    elif ch in (curses.KEY_END, "G"): idx = max(0, len(visible) - 1)
+                    elif ch == curses.KEY_PPAGE: idx = max(0, idx - max(1, inner_h - 1))
+                    elif ch == curses.KEY_NPAGE: idx = min(max(0, len(visible) - 1), idx + max(1, inner_h - 1))
                     elif ch in (10, 13):                            # Enter (CR or LF) = confirm
                         return visible[idx][0] if visible else -1
                     elif ch in ("q", "c") or (cancel_keys and ch in cancel_keys):  # close
@@ -2502,14 +2232,11 @@ class App:
                                 return oi
         finally:
             self.stdscr.nodelay(True)
-            self._need_redraw = True
-            self._redraw_status_only = False
+            self._full_redraw()
 
     def like_popup_from_playing(self) -> None:
         t = self._current_selection_track()
-        if not t:
-            self.toast("No track selected")
-            return
+        if not t: self.toast("No track selected"); return
         artist_id = t.artist_id or self.meta.artist_id.get(t.id, 0) or 0
         options = [
             f"Artist: {t.artist}",
@@ -2531,6 +2258,11 @@ class App:
             if name:
                 self.save_mix_as_playlist_async(name, t)
 
+    def _run_actions(self, title: str, actions) -> None:
+        choice = self.pick_from_list(title, [a[0] for a in actions])
+        if choice >= 0:
+            actions[choice][1]()
+
     def context_actions_popup(self) -> None:
         """Show a context-sensitive actions popup for the current selection."""
         if self._queue_context():
@@ -2548,204 +2280,87 @@ class App:
         elif isinstance(it, tuple) and it[0] == "album_title" and isinstance(it[1], Album):
             it = it[1]
 
-        # Determine context label and build action list
+        # Build (label, action) list based on selection type
         if isinstance(it, Track):
             artist_id = it.artist_id or self.meta.artist_id.get(it.id, 0) or 0
             album_id = it.album_id or self.meta.album_id.get(it.id, 0) or 0
-            liked_t = self.is_liked(it.id)
-            liked_ar = artist_id in self.liked_artist_ids
             album_obj = Album(id=album_id, title=it.album, artist=it.artist, year=it.year,
                               track_id=it.id if not album_id else None)
-            liked_al = album_obj.id in self.liked_album_ids
-            title = f"{it.artist} — {it.title}"
             artist_obj = Artist(id=artist_id, name=it.artist,
                                 track_id=it.id if not artist_id else None)
-            options = [
-                "Go to Recommended tab [3]",
-                "Go to Mix tab [4]",
-                "Go to Artist tab [5]",
-                "Go to Album tab [6]",
-                "Enqueue [e]",
-                "Enqueue next [E]",
-                "Enqueue album [a]",
-                "Enqueue album next [A]",
-                "Enqueue all artist' tracks",
-                "Enqueue all artist' tracks next",
-                f"{'Unlike' if liked_t else 'Like'} track [l]",
-                f"{'Unlike' if liked_ar else 'Like'} artist",
-                f"{'Unlike' if liked_al else 'Like'} album",
-                "Add to playlist [p]",
-                "Download [d]",
-                "Download album [D]",
-                "Download artist",
-                "Similar artists [s]",
-                "Like & save corresponding mix…",
+            liked_t  = self.is_liked(it.id)
+            liked_ar = artist_id in self.liked_artist_ids
+            liked_al = album_obj.id in self.liked_album_ids
+            actions = [
+                ("Go to Recommended tab [3]", lambda: (self.switch_tab(TAB_RECOMMENDED, refresh=False), self.fetch_recommended_async(it))),
+                ("Go to Mix tab [4]",         lambda: (self.switch_tab(TAB_MIX, refresh=False), self.fetch_mix_async(it))),
+                ("Go to Artist tab [5]",      lambda: (self.switch_tab(TAB_ARTIST, refresh=False), self.fetch_artist_async(it))),
+                ("Go to Album tab [6]",       lambda: self.open_album_from_track(it)),
+                ("Enqueue [e]",               lambda: self._enqueue_tracks([it], insert_after_playing=False)),
+                ("Enqueue next [E]",          lambda: self._enqueue_tracks([it], insert_after_playing=True)),
+                ("Enqueue album [a]",         lambda: self.enqueue_album_async(album_obj, insert_after_playing=False)),
+                ("Enqueue album next [A]",    lambda: self.enqueue_album_async(album_obj, insert_after_playing=True)),
+                ("Enqueue all artist' tracks",      lambda: self._enqueue_artist_async(artist_obj, insert_after_playing=False)),
+                ("Enqueue all artist' tracks next", lambda: self._enqueue_artist_async(artist_obj, insert_after_playing=True)),
+                (f"{'Unlike' if liked_t  else 'Like'} track [l]",  lambda: self.toggle_like(it)),
+                (f"{'Unlike' if liked_ar else 'Like'} artist",     lambda: self.toggle_like_artist(artist_id, it.artist)),
+                (f"{'Unlike' if liked_al else 'Like'} album",      lambda: self.toggle_like_album(album_obj)),
+                ("Add to playlist [p]",       lambda: self.playlists_add_tracks([it])),
+                ("Download [d]",              lambda: self.start_download_tracks([it])),
+                ("Download album [D]",        lambda: self._bg_download_album(album_obj)),
+                ("Download artist",           lambda: self._download_artist_async(artist_obj)),
+                ("Similar artists [s]",       lambda: self.show_similar_artists_dialog(artist_obj)),
+                ("Like & save corresponding mix…", lambda: (
+                    self.save_mix_as_playlist_async(n, it)
+                    if (n := self.prompt_text("Mix name:", f"(Mix) {it.artist} - {it.title}")) else None)),
             ]
-            choice = self.pick_from_list(title, options)
-            if choice == 0:
-                self.switch_tab(TAB_RECOMMENDED, refresh=False)
-                self.fetch_recommended_async(it)
-            elif choice == 1:
-                self.switch_tab(TAB_MIX, refresh=False)
-                self.fetch_mix_async(it)
-            elif choice == 2:
-                self.switch_tab(TAB_ARTIST, refresh=False)
-                self.fetch_artist_async(it)
-            elif choice == 3:
-                self.open_album_from_track(it)
-            elif choice == 4:
-                self._enqueue_tracks([it], insert_after_playing=False)
-            elif choice == 5:
-                self._enqueue_tracks([it], insert_after_playing=True)
-            elif choice == 6:
-                self.enqueue_album_async(album_obj, insert_after_playing=False)
-            elif choice == 7:
-                self.enqueue_album_async(album_obj, insert_after_playing=True)
-            elif choice == 8:
-                self._enqueue_artist_async(artist_obj, insert_after_playing=False)
-            elif choice == 9:
-                self._enqueue_artist_async(artist_obj, insert_after_playing=True)
-            elif choice == 10:
-                self.toggle_like(it)
-            elif choice == 11:
-                self.toggle_like_artist(artist_id, it.artist)
-            elif choice == 12:
-                self.toggle_like_album(album_obj)
-            elif choice == 13:
-                self.playlists_add_tracks([it])
-            elif choice == 14:
-                self.start_download_tracks([it])
-            elif choice == 15:
-                def _dl_album() -> None:
-                    try:
-                        aid = self._resolve_album_id_for_album(album_obj)
-                        if aid:
-                            self.start_download_tracks(self._fetch_album_tracks_by_album_id(aid))
-                        else:
-                            self.toast("Album id?")
-                    except Exception:
-                        self.toast("Error")
-                threading.Thread(target=_dl_album, daemon=True).start()
-            elif choice == 16:
-                self._download_artist_async(artist_obj)
-            elif choice == 17:
-                self.show_similar_artists_dialog(artist_obj)
-            elif choice == 18:
-                default_name = f"(Mix) {it.artist} - {it.title}"
-                name = self.prompt_text("Mix name:", default_name)
-                if name:
-                    self.save_mix_as_playlist_async(name, it)
+            self._run_actions(f"{it.artist} — {it.title}", actions)
 
         elif isinstance(it, Album):
             liked_al = it.id in self.liked_album_ids
-            title = f"{it.artist} — {it.title}"
-            options = [
-                "Go to Mix tab [4]",
-                "Go to Artist tab [5]",
-                "Go to Album tab [6]",
-                "Enqueue album [e]",
-                "Enqueue album next [E]",
-                f"{'Unlike' if liked_al else 'Like'} album [l]",
-                "Add to playlist [a]",
-                "Download album [d]",
-                "Similar artists [s]",
-                "Like & save corresponding mix…",
+            ar_obj = Artist(id=0, name=it.artist, track_id=it.track_id)
+            actions = [
+                ("Go to Mix tab [4]",    lambda: (self.switch_tab(TAB_MIX, refresh=False), self.fetch_mix_from_album_async(it))),
+                ("Go to Artist tab [5]", lambda: (self.switch_tab(TAB_ARTIST, refresh=False),
+                                                  self.fetch_artist_async(Track(id=0, title="", artist=it.artist, album="", year="????", track_no=0)))),
+                ("Go to Album tab [6]",  lambda: self.open_album_from_album_obj(it)),
+                ("Enqueue album [e]",    lambda: self.enqueue_album_async(it, insert_after_playing=False)),
+                ("Enqueue album next [E]", lambda: self.enqueue_album_async(it, insert_after_playing=True)),
+                (f"{'Unlike' if liked_al else 'Like'} album [l]", lambda: self.toggle_like_album(it)),
+                ("Add to playlist [a]",  lambda: self._add_album_to_playlist_async(it)),
+                ("Download album [d]",   lambda: self._bg_download_album(it)),
+                ("Similar artists [s]",  lambda: self.show_similar_artists_dialog(ar_obj, album_id=it.id)),
+                ("Like & save corresponding mix…", lambda: (
+                    self.save_mix_as_playlist_async(n, it)
+                    if (n := self.prompt_text("Mix name:", f"(Mix) {it.artist} - {it.title}")) else None)),
             ]
-            choice = self.pick_from_list(title, options)
-            if choice == 0:
-                self.switch_tab(TAB_MIX, refresh=False)
-                self.fetch_mix_from_album_async(it)
-            elif choice == 1:
-                fake = Track(id=0, title="", artist=it.artist, album="", year="????", track_no=0)
-                self.switch_tab(TAB_ARTIST, refresh=False)
-                self.fetch_artist_async(fake)
-            elif choice == 2:
-                self.open_album_from_album_obj(it)
-            elif choice == 3:
-                self.enqueue_album_async(it, insert_after_playing=False)
-            elif choice == 4:
-                self.enqueue_album_async(it, insert_after_playing=True)
-            elif choice == 5:
-                self.toggle_like_album(it)
-            elif choice == 6:
-                self._add_album_to_playlist_async(it)
-            elif choice == 7:
-                def _dl_alb() -> None:
-                    try:
-                        aid = self._resolve_album_id_for_album(it)
-                        if aid:
-                            self.start_download_tracks(self._fetch_album_tracks_by_album_id(aid))
-                        else:
-                            self.toast("Album id?")
-                    except Exception:
-                        self.toast("Error")
-                threading.Thread(target=_dl_alb, daemon=True).start()
-            elif choice == 8:
-                ar_obj = Artist(id=0, name=it.artist, track_id=it.track_id)
-                self.show_similar_artists_dialog(ar_obj, album_id=it.id)
-            elif choice == 9:
-                default_name = f"(Mix) {it.artist} - {it.title}"
-                name = self.prompt_text("Mix name:", default_name)
-                if name:
-                    self.save_mix_as_playlist_async(name, it)
+            self._run_actions(f"{it.artist} — {it.title}", actions)
 
         elif isinstance(it, Artist):
             liked_ar = it.id in self.liked_artist_ids
-            title = it.name
-            options = [
-                "Go to Mix tab [4]",
-                "Go to Artist tab [5]",
-                "Enqueue all artist' tracks [e]",
-                "Enqueue all artist' tracks next [E]",
-                f"{'Unlike' if liked_ar else 'Like'} artist [l]",
-                "Add to playlist [a]",
-                "Download artist [d]",
-                "Similar artists [s]",
+            actions = [
+                ("Go to Mix tab [4]",                lambda: (self.switch_tab(TAB_MIX, refresh=False), self.fetch_mix_from_artist_async(it))),
+                ("Go to Artist tab [5]",             lambda: self.open_artist_by_id(it.id, it.name)),
+                ("Enqueue all artist' tracks [e]",   lambda: self._enqueue_artist_async(it, insert_after_playing=False)),
+                ("Enqueue all artist' tracks next [E]", lambda: self._enqueue_artist_async(it, insert_after_playing=True)),
+                (f"{'Unlike' if liked_ar else 'Like'} artist [l]", lambda: self.toggle_like_artist(it.id, it.name)),
+                ("Add to playlist [a]",              lambda: self._add_artist_to_playlist_async(it)),
+                ("Download artist [d]",              lambda: self._download_artist_async(it)),
+                ("Similar artists [s]",              lambda: self.show_similar_artists_dialog(it)),
             ]
-            choice = self.pick_from_list(title, options)
-            if choice == 0:
-                self.switch_tab(TAB_MIX, refresh=False)
-                self.fetch_mix_from_artist_async(it)
-            elif choice == 1:
-                self.open_artist_by_id(it.id, it.name)
-            elif choice == 2:
-                self._enqueue_artist_async(it, insert_after_playing=False)
-            elif choice == 3:
-                self._enqueue_artist_async(it, insert_after_playing=True)
-            elif choice == 4:
-                self.toggle_like_artist(it.id, it.name)
-            elif choice == 5:
-                self._add_artist_to_playlist_async(it)
-            elif choice == 6:
-                self._download_artist_async(it)
-            elif choice == 7:
-                self.show_similar_artists_dialog(it)
+            self._run_actions(it.name, actions)
 
         elif isinstance(it, str):
-            # playlist name
             liked_pl = it in self.liked_playlist_ids
-            title = it
-            options = [
-                "Open",
-                "Enqueue [e]",
-                f"{'Unlike' if liked_pl else 'Like'} playlist [l]",
-                "Add to playlist [a]",
-                "Download with subfolders [d]",
-                "Download flat [D]",
+            actions = [
+                ("Open",                                            lambda: self.playlists_open_by_name(it)),
+                ("Enqueue [e]",                                     lambda: self._enqueue_playlist_async(it, insert_after_playing=False)),
+                (f"{'Unlike' if liked_pl else 'Like'} playlist [l]", lambda: self.toggle_like_playlist(it)),
+                ("Add to playlist [a]",                            lambda: self._add_playlist_to_playlist_async(it)),
+                ("Download with subfolders [d]",                   lambda: self._download_playlist_async(it, flat=False)),
+                ("Download flat [D]",                              lambda: self._download_playlist_async(it, flat=True)),
             ]
-            choice = self.pick_from_list(title, options)
-            if choice == 0:
-                self.playlists_open_by_name(it)
-            elif choice == 1:
-                self._enqueue_playlist_async(it, insert_after_playing=False)
-            elif choice == 2:
-                self.toggle_like_playlist(it)
-            elif choice == 3:
-                self._add_playlist_to_playlist_async(it)
-            elif choice == 4:
-                self._download_playlist_async(it, flat=False)
-            elif choice == 5:
-                self._download_playlist_async(it, flat=True)
+            self._run_actions(it, actions)
 
         else:
             self.toast("No selection")
@@ -2774,15 +2389,44 @@ class App:
 
     def _download_playlist_async(self, name: str, flat: bool) -> None:
         tracks = list(self.playlists.get(name, []))
-        if not tracks:
-            self.toast("Nothing to download")
-            return
+        if not tracks: self.toast("Nothing to download"); return
         self.toast(f"DL playlist {'flat' if flat else 'structured'}…")
         worker = self._make_playlist_download_worker(name, flat)
         self.dl.progress_line = f"DL queued {len(tracks)}"
         self._need_redraw = True
         self._redraw_status_only = True
         self.dl.enqueue(tracks, worker)
+
+    def playlists_download_prompt(self) -> None:
+        if self.tab != TAB_PLAYLISTS or self.playlist_view_name is not None: return
+        if not self.playlist_names: self.toast("No playlists"); return
+        name = self.playlist_names[clamp(self.left_idx, 0, len(self.playlist_names) - 1)]
+        items = [
+            ("Download with subfolders [d]", False),
+            ("Download flat [D]",            True),
+        ]
+        hint = " j/k: navigate   Enter: confirm   Esc/q: cancel "
+        _, w = self.stdscr.getmaxyx()
+        box_w = clamp(max(len(name), max(len(s) for s, _ in items), len(hint)) + 6, 40, w - 6)
+        box_h = len(items) + 3   # title row + items + hint row
+        _, _, win = self._popup_win(box_h, box_w)
+        idx = 0
+        self.stdscr.nodelay(False)
+        while True:
+            win.erase(); win.box()
+            win.addstr(0, 2, f" {name} "[:box_w - 2], self.C(4))
+            for i, (label, _) in enumerate(items):
+                attr = curses.A_REVERSE if i == idx else 0
+                win.addstr(1 + i, 2, label[:box_w - 4].ljust(box_w - 4), attr)
+            win.addstr(box_h - 1, 2, hint[:box_w - 4], self.C(10))
+            win.touchwin(); win.refresh()
+            ch = self.stdscr.getch()
+            if ch in (curses.KEY_DOWN, ord("j"), 14): idx = (idx + 1) % len(items)
+            elif ch in (curses.KEY_UP, ord("k"), 16): idx = (idx - 1) % len(items)
+            elif ch in (10, 13): self._download_playlist_async(name, flat=items[idx][1]); return
+            elif ch == ord("d"): self._download_playlist_async(name, flat=False); return
+            elif ch == ord("D"): self._download_playlist_async(name, flat=True); return
+            elif ch in (27, ord("q")): return
 
     def _download_worker_impl(self, t: Track, remaining: int, current: int, total: int, set_progress, root: str, flat: bool) -> None:
         label = f"{t.artist[:16]} - {t.title[:16]}"
@@ -2852,13 +2496,9 @@ class App:
         out_path = os.path.join(out_dir, f"{base_name}.{ext}")
 
         def cb(done: int, tot: Optional[int]) -> None:
-            if tot and tot > 0:
-                pct = int((done * 100) / tot)
-                mb = done / (1024 * 1024)
-                sp(f"DL {count_s} {pct}% {mb:.1f}MB {label}")
-            else:
-                mb = done / (1024 * 1024)
-                sp(f"DL {count_s} {mb:.1f}MB {label}")
+            mb = done / (1024 * 1024)
+            pct = f" {int(done*100/tot)}%" if tot and tot > 0 else ""
+            sp(f"DL {count_s}{pct} {mb:.1f}MB {label}")
 
         sp(f"DL {count_s} resolving {label}")
         try:
@@ -2886,18 +2526,7 @@ class App:
         if not os.path.exists(lrc_path):
             try:
                 sp(f"DL {count_s} lyrics {label}")
-                lyr_lines = []
-                try:
-                    lyr_payload = self.client.lyrics(t.id)
-                    lyr_lines = self._extract_lrc_from_payload(lyr_payload)
-                except Exception:
-                    pass
-                if not lyr_lines:
-                    try:
-                        info_payload = self.client.info(t.id)
-                        lyr_lines = self._extract_lrc_from_payload(info_payload)
-                    except Exception:
-                        pass
+                lyr_lines = self._fetch_lyrics_lines(t.id, strip_lrc=False)
                 if lyr_lines:
                     with open(lrc_path, "w", encoding="utf-8") as f:
                         f.write("\n".join(lyr_lines))
@@ -2976,8 +2605,7 @@ class App:
 
     def fetch_cover_async(self, t: Optional[Track]) -> None:
         """Download cover art for track t. Called on playback start and when entering Cover tab."""
-        if not t:
-            return
+        if not t: return
         if self.cover_track and self.cover_track.id == t.id and self.cover_path:
             return  # already loaded for this track
         self.cover_track = t
@@ -3016,8 +2644,7 @@ class App:
             finally:
                 self.cover_loading = False
                 if self.tab == TAB_COVER:
-                    self._need_redraw = True
-                    self._redraw_status_only = False
+                    self._full_redraw()
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -3056,8 +2683,7 @@ class App:
             return False
 
     def _ueberzug_show(self, path: str, x: int, y: int, w: int, h: int) -> None:
-        if not self._cover_ub_socket:
-            return
+        if not self._cover_ub_socket: return
         try:
             subprocess.run(
                 ["ueberzugpp", "cmd", "-s", self._cover_ub_socket,
@@ -3071,8 +2697,7 @@ class App:
             debug_log(f"ueberzugpp show error: {e}")
 
     def _ueberzug_remove(self) -> None:
-        if not self._cover_ub_socket:
-            return
+        if not self._cover_ub_socket: return
         try:
             subprocess.run(
                 ["ueberzugpp", "cmd", "-s", self._cover_ub_socket,
@@ -3097,8 +2722,7 @@ class App:
         # If a cover is already on screen (old or newly loaded), skip all text so
         # ncurses doesn't write to the same row where the sixel starts, which
         # would briefly erase that row and cause a subtle flicker.
-        if self.cover_path:
-            return
+        if self.cover_path: return
         backend = self._cover_backend()
         if self.cover_loading:
             self.stdscr.addstr(y, x, " Loading cover…"[:max(0, w - 1)], self.C(4))
@@ -3125,6 +2749,16 @@ class App:
             else:
                 self.stdscr.addstr(y, x, " No cover art available for this track"[:max(0, w - 1)], self.C(10))
 
+    def _cover_img_cols(self, w: int) -> int:
+        """Compute cover image display width accounting for side panels."""
+        if self.queue_overlay and self.tab != TAB_QUEUE:
+            right_w = 44
+        elif self._cover_lyrics:
+            right_w = self._lyrics_panel_w(w) + 2
+        else:
+            right_w = 0
+        return w - right_w
+
     def _prerender_cover(self, path: str) -> None:
         """Pre-render cover image with chafa in the background download thread.
         Populates _cover_render_buf/_cover_render_key so the main thread can
@@ -3138,16 +2772,8 @@ class App:
         top_h = 2
         status_h = 2
         img_rows = h - top_h - status_h - 1  # -1 matches _render_cover_image gap
-        queue_panel_active = self.queue_overlay and self.tab != TAB_QUEUE
-        if queue_panel_active:
-            right_w = 44
-        elif self._cover_lyrics:
-            right_w = self._lyrics_panel_w(w) + 2  # +2 for gap between cover and lyrics
-        else:
-            right_w = 0
-        img_cols = w - right_w
-        if img_rows <= 0 or img_cols <= 0:
-            return
+        img_cols = self._cover_img_cols(w)
+        if img_rows <= 0 or img_cols <= 0: return
         render_key = f"{path}:{img_cols}x{img_rows}:chafa"
         try:
             result = subprocess.run(
@@ -3169,8 +2795,7 @@ class App:
     def _render_cover_image(self) -> None:
         """Write cover image to the terminal after curses has refreshed.
         Called only when self.tab == TAB_COVER and cover_path is set."""
-        if not self.cover_path or not os.path.exists(self.cover_path):
-            return
+        if not self.cover_path or not os.path.exists(self.cover_path): return
         backend = self._cover_backend()
         if backend == "none":
             return
@@ -3183,26 +2808,13 @@ class App:
         # some terminals to scroll the screen, shifting the image and corrupting
         # the layout.
         img_rows = h - top_h - status_h - 1
-        # Don't render sixel over the queue panel or inline lyrics panel — those
-        # are drawn as character cells and must remain visible above the sixel.
-        # When the lyrics_overlay popup is open it is a centred box drawn on top
-        # of the sixel (after rendering), so no column reservation is needed.
-        queue_panel_active = self.queue_overlay and self.tab != TAB_QUEUE
-        if queue_panel_active:
-            right_w = 44
-        elif self._cover_lyrics:
-            right_w = self._lyrics_panel_w(w) + 2  # +2 for gap between cover and lyrics
-        else:
-            right_w = 0
-        img_cols = w - right_w
-        if img_rows <= 0 or img_cols <= 0:
-            return
+        img_cols = self._cover_img_cols(w)
+        if img_rows <= 0 or img_cols <= 0: return
 
         render_key = f"{self.cover_path}:{img_cols}x{img_rows}:{backend}"
 
         if backend == "ueberzugpp":
-            if not self._ueberzug_start():
-                return
+            if not self._ueberzug_start(): return
             # ueberzugpp is idempotent — send on every render
             self._ueberzug_show(self.cover_path, x=0, y=top_h,
                                 w=img_cols, h=img_rows)
@@ -3261,8 +2873,7 @@ class App:
         """Overwrite the image area with spaces before a full curses redraw.
         Needed because some terminals don't clear sixel/ANSI pixels when curses
         paints over them (e.g. during popup overlays or tab switches)."""
-        if not self._cover_sixel_visible:
-            return
+        if not self._cover_sixel_visible: return
         h, w = self.stdscr.getmaxyx()
         top_h = 2
         status_h = 2
@@ -3286,8 +2897,7 @@ class App:
 
     def _erase_popup_bg(self, y0: int, x0: int, rows: int, cols: int) -> None:
         """Erase a popup area with raw ANSI writes to clear any sixel underneath."""
-        if not self._cover_sixel_visible:
-            return
+        if not self._cover_sixel_visible: return
         blank = b" " * cols
         buf = b"".join(
             f"\033[{y0 + 1 + r};{x0 + 1}H".encode() + blank
@@ -3296,10 +2906,40 @@ class App:
         sys.stdout.buffer.write(buf)
         sys.stdout.buffer.flush()
 
+    def _popup_win(self, box_h: int, box_w: int):
+        """Create a centered, key-enabled popup window; return (y0, x0, win)."""
+        h, w = self.stdscr.getmaxyx()
+        y0 = (h - box_h) // 2
+        x0 = (w - box_w) // 2
+        self._popup_clear_bg(y0, x0, box_h, box_w)
+        win = self.stdscr.derwin(box_h, box_w, y0, x0)
+        win.keypad(True)
+        return y0, x0, win
+
+    def _popup_refresh(self, y0: int, x0: int, box_h: int, box_w: int) -> None:
+        """Handle _need_redraw inside a popup loop: redraw background if not status-only."""
+        if not self._redraw_status_only:
+            self.draw()
+            self._popup_clear_bg(y0, x0, box_h, box_w)
+        self._need_redraw = False
+        self._redraw_status_only = False
+
+    def _popup_clear_bg(self, y0: int, x0: int, box_h: int, box_w: int, _erase_bg: bool = True) -> None:
+        """Erase popup background (sixel + spaces)."""
+        h, w = self.stdscr.getmaxyx()
+        pad_y = max(0, y0 - 1); pad_x = max(0, x0 - 2)
+        pad_h = min(h - pad_y, box_h + 2); pad_w = min(w - pad_x, box_w + 4)
+        self._erase_popup_bg(pad_y, pad_x, pad_h, pad_w)
+        if _erase_bg:
+            for yy in range(pad_y, pad_y + pad_h):
+                try:
+                    self.stdscr.addstr(yy, pad_x, " " * pad_w)
+                except curses.error:
+                    pass
+
     def _draw_cover_lyrics_panel(self, y: int, x: int, h: int, w: int) -> None:
         """Draw lyrics as a right-side panel in the cover tab."""
-        if w < 10:
-            return
+        if w < 10: return
         lyr_attr = curses.color_pair(int(self.settings.get("cover_lyrics_color_pair", 0))) if self.color_mode and curses.has_colors() else 0
         # Title bar: show filter state or navigation hint
         if self._lyrics_filter_q and self._lyrics_filter_hits:
@@ -3350,9 +2990,7 @@ class App:
         self.stdscr.clearok(True)
 
     def start_download_tracks(self, tracks: List[Track]) -> None:
-        if not tracks:
-            self.toast("Nothing to download")
-            return
+        if not tracks: self.toast("Nothing to download"); return
         self.dl.progress_line = f"DL queued {len(tracks)}"
         self._need_redraw = True
         self._redraw_status_only = True
@@ -3402,8 +3040,7 @@ class App:
         self.switch_tab(TAB_ALBUM, refresh=False)
         self.album_header = album
         self.album_tracks = []
-        self.left_idx = 0
-        self.left_scroll = 0
+        self._reset_left_cursor()
         key = f"album-open:{time.time()}"
         self._set_loading(key)
 
@@ -3419,8 +3056,7 @@ class App:
                     [t for t in self._extract_tracks_from_search(payload) if t.album.strip().lower() == al0],
                     key=lambda t: (t.track_no if t.track_no > 0 else 10_000, t.title.lower())
                 )
-            if self._loading_key != key:
-                return
+            if self._loading_key != key: return
             self.album_tracks = tracks[:1500]
             for t in self.album_tracks[:40]:
                 if (self.show_track_year and year_norm(t.year) == "????") or (self.show_track_duration and not t.duration):
@@ -3437,25 +3073,14 @@ class App:
     # tab loaders
     # ---------------------------------------------------------------------------
     def fetch_recommended_async(self, ctx: Optional[Track]) -> None:
-        if not ctx:
-            self.toast("No context")
-            return
+        if not ctx: self.toast("No context"); return
         self.recommended_results = []
         key = f"rec:{ctx.id}:{time.time()}"
         self._set_loading(key)
 
         def worker() -> None:
-            payload = self.client.recommendations(ctx.id, limit=50)
-            if self._loading_key != key:
-                return
-            tracks: List[Track] = []
-            data = payload.get("data") if isinstance(payload, dict) else None
-            if isinstance(data, dict) and isinstance(data.get("items"), list):
-                for it in data["items"]:
-                    if isinstance(it, dict) and isinstance(it.get("track"), dict):
-                        t = self._parse_track_obj(it["track"])
-                        if t:
-                            tracks.append(t)
+            tracks = self._fetch_recommended_tracks_for_track(ctx)
+            if self._loading_key != key: return
             self.recommended_results = tracks
             self.toast("Recommended")
 
@@ -3472,13 +3097,10 @@ class App:
             for d in self.liked_artists
         ]
         self.liked_playlist_cache = [d["name"] for d in self.liked_playlists]
-        self._need_redraw = True
-        self._redraw_status_only = False
+        self._full_redraw()
 
     def fetch_artist_async(self, ctx: Optional[Track]) -> None:
-        if not ctx:
-            self.toast("No context")
-            return
+        if not ctx: self.toast("No context"); return
         self._last_artist_fetch_track = ctx
         self.artist_albums, self.artist_tracks = [], []
         self.artist_ctx = None
@@ -3490,48 +3112,33 @@ class App:
             # is visible as soon as fetch_artist_async is called.
             if ctx.artist_id:
                 self.artist_ctx = (ctx.artist_id, ctx.artist)
-                self._need_redraw = True
-                self._redraw_status_only = False
-            aid = ctx.artist_id or self.meta.artist_id.get(ctx.id)
-            if not aid:
-                info = self.client.info(ctx.id)
-                data = info.get("data") if isinstance(info, dict) else None
-                if isinstance(data, dict):
-                    a = data.get("artist")
-                    if isinstance(a, dict) and str(a.get("id", "")).isdigit():
-                        aid = int(a["id"])
+                self._full_redraw()
+            aid = (ctx.artist_id or self.meta.artist_id.get(ctx.id) or
+                   self._resolve_artist_id_via_track(Artist(id=0, name=ctx.artist, track_id=ctx.id)))
 
             albums: List[Album] = []
             raw_tracks: List[Track] = []
 
-            def _yr(t: Track) -> int:
-                y = year_norm(t.year)
-                return int(y) if y.isdigit() else 9999
-
             def _commit_tracks() -> None:
                 partial = self._dedupe_tracks(raw_tracks)
-                partial.sort(key=lambda t: (_yr(t), t.album.lower(), t.track_no or 9999, t.title.lower()))
+                partial.sort(key=_track_sort_key)
                 self.artist_tracks = partial[:600]
-                self._need_redraw = True
-                self._redraw_status_only = False
+                self._full_redraw()
 
             if aid:
                 payload = self.client.artist(int(aid))
-                if self._loading_key != key:
-                    return
+                if self._loading_key != key: return
                 albums = self._extract_artist_albums_from_payload(payload)
                 albums = self._dedupe_albums(albums)
 
                 # Publish albums immediately so the UI fills in before track fetching starts
                 self.artist_ctx = (int(aid), ctx.artist)
                 self.artist_albums = albums[:500]
-                self._need_redraw = True
-                self._redraw_status_only = False
+                self._full_redraw()
 
                 # Fetch tracks album by album and update UI after each one
                 for alb in albums:
-                    if self._loading_key != key:
-                        return
+                    if self._loading_key != key: return
                     if alb.id:
                         try:
                             new_tracks = self._fetch_album_tracks_by_album_id(alb.id)
@@ -3542,33 +3149,16 @@ class App:
 
                 # Fallback: scan artist payload for track dicts if album fetches yielded nothing
                 if not raw_tracks:
-                    dicts: List[Dict[str, Any]] = []
-                    self._scan_for_track_dicts(payload, dicts, limit=2500)
-                    for d in dicts:
-                        t = self._parse_track_obj(d)
-                        if t:
-                            raw_tracks.append(t)
+                    raw_tracks.extend(self._scan_parse_tracks(payload))
 
             if not raw_tracks:
                 payload2 = self.client.search_tracks(ctx.artist, limit=300)
-                if self._loading_key != key:
-                    return
+                if self._loading_key != key: return
                 a0 = ctx.artist.strip().lower()
                 raw_tracks = [t for t in self._extract_tracks_from_search(payload2) if t.artist.strip().lower() == a0]
 
             if not albums:
-                best: Dict[Tuple, Album] = {}
-                for t in raw_tracks:
-                    k2 = (t.artist.strip().lower(), t.album.strip().lower())
-                    if k2 not in best:
-                        best[k2] = Album(id=t.album_id or 0, title=t.album, artist=t.artist, year=t.year)
-                    else:
-                        cur = best[k2]
-                        if cur.id == 0 and t.album_id:
-                            cur.id = t.album_id
-                        if year_norm(cur.year) == "????" and year_norm(t.year) != "????":
-                            cur.year = t.year
-                albums = sorted(best.values(), key=lambda a: (int(a.year) if year_norm(a.year) != "????" else 9999, a.title.lower()))
+                albums = self._build_synthetic_albums(raw_tracks)
 
             # Final commit with fully deduped/sorted results
             albums = self._dedupe_albums(albums)
@@ -3590,8 +3180,7 @@ class App:
         self.info_album = None
         self.info_artist = None
         self.info_loading = True
-        self._need_redraw = True
-        self._redraw_status_only = False
+        self._full_redraw()
 
     def _update_info_for_selection(self) -> None:
         """Refresh info content to match the current selection (used by show_info_dialog cursor nav)."""
@@ -3620,6 +3209,63 @@ class App:
                 if t and (self.info_track is None or t.id != self.info_track.id):
                     self._request_info_refresh(t)
 
+    def _info_payload_fields(self, keys: tuple, fallback_to_root: bool = False) -> List[str]:
+        """Extract key/value lines from self.info_payload; returns error line on failure."""
+        payload = self.info_payload or {}
+        if "error" in payload:
+            return [f"Error: {payload.get('error')}"]
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if fallback_to_root and not isinstance(data, dict):
+            data = payload
+        if isinstance(data, dict):
+            return [f"{k}: {data[k]}" for k in keys if k in data]
+        return []
+
+    def _info_lines(self) -> Tuple[str, List[str]]:
+        """Build (title, lines) for the info overlay from current info state."""
+        if self.info_artist and not self.info_track and not self.info_album:
+            ar = self.info_artist
+            lines: List[str] = [f"Artist : {ar.name}"] + ([f"ID     : {ar.id}"] if ar.id else []) + [""]
+            if self.info_loading:
+                lines.append("Loading artist info…")
+            else:
+                lines.extend(self._info_payload_fields(
+                    ("popularity", "numberOfAlbums", "numberOfTracks", "artistTypes", "url"),
+                    fallback_to_root=True))
+                if (self.info_payload or {}).get("_similar"):
+                    lines.append(f"  [s] browse {len(self.info_payload['_similar'])} similar artists")
+            return "Artist info", [l for l in lines if l is not None]
+        if self.info_album and not self.info_track:
+            a = self.info_album
+            lines = [f"Album  : {a.title}", f"Artist : {a.artist}",
+                     f"Year   : {year_norm(a.year)}"] + ([f"ID     : {a.id}"] if a.id else []) + [""]
+            if self.info_loading:
+                lines.append("Loading album info…")
+            else:
+                lines.extend(self._info_payload_fields(
+                    ("numberOfTracks", "numberOfVolumes", "releaseDate",
+                     "audioQuality", "explicit", "upc", "popularity")))
+            return "Album info", [l for l in lines if l is not None]
+        t = self.info_track
+        if not t:
+            return "Info", ["(no selection)"]
+        lines = [f"Title   : {t.title}",
+                 f"Artist  : {t.artist}" + (f" (id {t.artist_id})" if t.artist_id else ""),
+                 f"Album   : {t.album}" + (f" (id {t.album_id})" if t.album_id else "")]
+        yv = self._track_year(t)
+        if yv != "????":
+            lines.append(f"Year    : {yv}")
+        dv = self._track_duration(t)
+        if dv:
+            lines.append(f"Duration: {fmt_dur(dv)}")
+        lines += [f"Track id: {t.id}", f"Liked   : {'yes' if self.is_liked(t.id) else 'no'}", ""]
+        if self.info_loading:
+            lines.append("Loading /info…")
+        else:
+            lines.extend(self._info_payload_fields(
+                ("audioQuality", "explicit", "popularity", "streamReady")))
+        return "Track info", lines
+
     def show_info_dialog(self) -> None:
         """Inner-loop info popup (track/album/artist) — same pattern as show_similar_artists_dialog."""
         self._need_redraw = True
@@ -3627,109 +3273,18 @@ class App:
         h, w = self.stdscr.getmaxyx()
         box_h = min(h - 4, 24)
         box_w = min(w - 8, 82)
-        y0 = (h - box_h) // 2
-        x0 = (w - box_w) // 2
-        pad_y = max(0, y0 - 1)
-        pad_x = max(0, x0 - 2)
-        pad_h = min(h - pad_y, box_h + 2)
-        pad_w = min(w - pad_x, box_w + 4)
-        self._erase_popup_bg(pad_y, pad_x, pad_h, pad_w)
-        for yy in range(pad_y, pad_y + pad_h):
-            try:
-                self.stdscr.addstr(yy, pad_x, " " * pad_w)
-            except curses.error:
-                pass
-        win = self.stdscr.derwin(box_h, box_w, y0, x0)
-        win.keypad(True)
+        y0, x0, win = self._popup_win(box_h, box_w)
         info_scroll = 0
         self.stdscr.timeout(100)
         try:
             while True:
                 if self._need_redraw:
-                    if not self._redraw_status_only:
-                        self.draw()
-                        self._erase_popup_bg(pad_y, pad_x, pad_h, pad_w)
-                        for yy in range(pad_y, pad_y + pad_h):
-                            try:
-                                self.stdscr.addstr(yy, pad_x, " " * pad_w)
-                            except curses.error:
-                                pass
-                    self._need_redraw = False
-                    self._redraw_status_only = False
+                    self._popup_refresh(y0, x0, box_h, box_w)
 
                 self._do_info_fetch_if_due()
 
                 # Build title and lines from current info state
-                if self.info_artist and not self.info_track and not self.info_album:
-                    title = "Artist info"
-                    ar = self.info_artist
-                    lines: List[str] = [f"Artist : {ar.name}", f"ID     : {ar.id}" if ar.id else "", ""]
-                    if self.info_loading:
-                        lines.append("Loading artist info…")
-                    else:
-                        payload = self.info_payload or {}
-                        if "error" in payload:
-                            lines.append(f"Error: {payload.get('error')}")
-                        else:
-                            data = payload.get("data") if isinstance(payload, dict) else payload
-                            if not isinstance(data, dict):
-                                data = payload
-                            if isinstance(data, dict):
-                                for k in ("popularity", "numberOfAlbums", "numberOfTracks",
-                                          "artistTypes", "url"):
-                                    if k in data:
-                                        lines.append(f"{k}: {data[k]}")
-                            if payload.get("_similar"):
-                                lines.append(f"  [s] browse {len(payload['_similar'])} similar artists")
-                    lines = [l for l in lines if l is not None]
-                elif self.info_album and not self.info_track:
-                    title = "Album info"
-                    a = self.info_album
-                    lines = [f"Album  : {a.title}", f"Artist : {a.artist}",
-                             f"Year   : {year_norm(a.year)}", f"ID     : {a.id}" if a.id else "", ""]
-                    if self.info_loading:
-                        lines.append("Loading album info…")
-                    else:
-                        payload = self.info_payload or {}
-                        if "error" in payload:
-                            lines.append(f"Error: {payload.get('error')}")
-                        else:
-                            data = payload.get("data") if isinstance(payload, dict) else payload
-                            if isinstance(data, dict):
-                                for k in ("numberOfTracks", "numberOfVolumes", "releaseDate",
-                                          "audioQuality", "explicit", "upc", "popularity"):
-                                    if k in data:
-                                        lines.append(f"{k}: {data[k]}")
-                    lines = [l for l in lines if l is not None]
-                else:
-                    t = self.info_track
-                    if not t:
-                        title = "Info"
-                        lines = ["(no selection)"]
-                    else:
-                        title = "Track info"
-                        lines = [f"Title   : {t.title}",
-                                 f"Artist  : {t.artist}" + (f" (id {t.artist_id})" if t.artist_id else ""),
-                                 f"Album   : {t.album}" + (f" (id {t.album_id})" if t.album_id else "")]
-                        yv = self._track_year(t)
-                        if yv != "????":
-                            lines.append(f"Year    : {yv}")
-                        dv = self._track_duration(t)
-                        if dv:
-                            lines.append(f"Duration: {fmt_dur(dv)}")
-                        lines += [f"Track id: {t.id}", f"Liked   : {'yes' if self.is_liked(t.id) else 'no'}", ""]
-                        if self.info_loading:
-                            lines.append("Loading /info…")
-                        else:
-                            payload = self.info_payload or {}
-                            if "error" in payload:
-                                lines.append(f"Error: {payload.get('error')}")
-                            else:
-                                data = payload.get("data") if isinstance(payload, dict) else None
-                                if isinstance(data, dict):
-                                    for k in ("audioQuality", "explicit", "popularity", "streamReady"):
-                                        if k in data:
-                                            lines.append(f"{k}: {data.get(k)}")
+                title, lines = self._info_lines()
 
                 inner_h = box_h - 2
                 max_scroll = max(0, len(lines) - inner_h)
@@ -3739,22 +3294,7 @@ class App:
                 win.erase()
                 win.box()
                 win.addstr(0, 2, f" {title} "[:box_w - 2], self.C(4))
-                for i in range(inner_h):
-                    idx = start + i
-                    if idx >= len(lines):
-                        break
-                    line = lines[idx]
-                    if line.startswith("\x01"):
-                        text = line[1:][:box_w - 4].ljust(box_w - 4)
-                        try:
-                            win.addstr(1 + i, 2, text, curses.color_pair(16))
-                        except curses.error:
-                            pass
-                    else:
-                        try:
-                            win.addstr(1 + i, 2, line[:box_w - 4])
-                        except curses.error:
-                            pass
+                self._render_popup_lines(win, lines, start, inner_h, box_w)
                 try:
                     win.addstr(box_h - 1, 2, " j/k: cursor   PgUp/Dn: scroll info   g/G: top/bottom   q/i/ESC: close "[:box_w - 4], self.C(10))
                 except curses.error:
@@ -3762,65 +3302,41 @@ class App:
                 win.touchwin()
                 win.refresh()
 
-                try:
-                    ch = self.stdscr.get_wch()
-                except curses.error:
+                ch = self._get_wch_int()
+                if ch == -1:
                     continue
-                if isinstance(ch, str):
-                    try:
-                        ch = ord(ch)
-                    except Exception:
-                        continue
 
                 if ch in (27, ord("q"), ord("i"), ord("I")):
                     break
-                elif ch in (ord("j"), curses.KEY_DOWN):
-                    # Move cursor in the main list and update info
+                elif ch in (ord("j"), curses.KEY_DOWN, ord("k"), curses.KEY_UP):
+                    _d = 1 if ch in (ord("j"), curses.KEY_DOWN) else -1
                     if self._queue_context():
-                        self.queue_cursor = clamp(self.queue_cursor + 1, 0, max(0, len(self.queue_items) - 1))
+                        self.queue_cursor = clamp(self.queue_cursor + _d, 0, max(0, len(self.queue_items) - 1))
                     else:
                         _typ, _items = self._left_items()
-                        _ni = self.left_idx + 1
-                        while _ni < len(_items) and isinstance(_items[_ni], tuple) and _items[_ni][0] == "sep":
-                            _ni += 1
+                        _ni = self.left_idx + _d
+                        while 0 <= _ni < len(_items) and isinstance(_items[_ni], tuple) and _items[_ni][0] == "sep":
+                            _ni += _d
                         self.left_idx = clamp(_ni, 0, max(0, len(_items) - 1))
                     info_scroll = 0
                     self._update_info_for_selection()
-                    self._need_redraw = True
-                    self._redraw_status_only = False
-                elif ch in (ord("k"), curses.KEY_UP):
-                    if self._queue_context():
-                        self.queue_cursor = clamp(self.queue_cursor - 1, 0, max(0, len(self.queue_items) - 1))
-                    else:
-                        _typ, _items = self._left_items()
-                        _ni = self.left_idx - 1
-                        while _ni >= 0 and isinstance(_items[_ni], tuple) and _items[_ni][0] == "sep":
-                            _ni -= 1
-                        self.left_idx = clamp(_ni, 0, max(0, len(_items) - 1))
-                    info_scroll = 0
-                    self._update_info_for_selection()
-                    self._need_redraw = True
-                    self._redraw_status_only = False
-                elif ch == curses.KEY_PPAGE:
-                    info_scroll = max(0, info_scroll - self._page_step())
-                elif ch == curses.KEY_NPAGE:
-                    info_scroll = min(max_scroll, info_scroll + self._page_step())
-                elif ch in (curses.KEY_HOME, ord("g")):
-                    info_scroll = 0
-                elif ch in (curses.KEY_END, ord("G")):
-                    info_scroll = max_scroll
-                elif ch == ord("s") and self.info_artist:
+                    self._full_redraw()
+                else:
+                    _p = self._page_step()
+                    _nv = (max(0, info_scroll - _p) if ch == curses.KEY_PPAGE else
+                           min(max_scroll, info_scroll + _p) if ch == curses.KEY_NPAGE else
+                           0 if ch in (curses.KEY_HOME, ord("g")) else
+                           max_scroll if ch in (curses.KEY_END, ord("G")) else None)
+                    if _nv is not None: info_scroll = _nv
+                if ch == ord("s") and self.info_artist:
                     break  # fall through to show similar artists after dialog
         finally:
             self.stdscr.nodelay(True)
-            self._need_redraw = True
-            self._redraw_status_only = False
+            self._full_redraw()
 
     def _do_info_fetch_if_due(self) -> None:
-        if not self._info_target_id:
-            return
-        if time.time() < self._info_refresh_due:
-            return
+        if not self._info_target_id: return
+        if time.time() < self._info_refresh_due: return
         tid = self._info_target_id
         self._info_target_id = None
         self.info_payload = None
@@ -3836,6 +3352,12 @@ class App:
             self._need_redraw = True
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _open_info_track(self, t: Track) -> None:
+        self.info_scroll = 0
+        self._request_info_refresh(t)
+        self._need_redraw = True
+        self.show_info_dialog()
 
     def toggle_info_selected(self) -> None:
         self.info_follow_selection = True
@@ -3863,112 +3385,64 @@ class App:
                 self.open_info_album(it[1])
                 return
         t = self._current_selection_track()
-        if not t:
-            return
-        self.info_scroll = 0
-        self._request_info_refresh(t)
-        self._need_redraw = True
-        self.show_info_dialog()
+        if t:
+            self._open_info_track(t)
 
     def toggle_info_playing(self) -> None:
         self.info_follow_selection = False
         t = self.current_track
-        if not t:
-            return
-        self.info_scroll = 0
-        self._request_info_refresh(t)
-        self._need_redraw = True
-        self.show_info_dialog()
+        if t:
+            self._open_info_track(t)
+
+    def _start_info_load(self, fetch_fn, _dialog: bool = True) -> None:
+        """Common scaffold: reset loading state, fetch in background, optionally show dialog."""
+        self.info_payload = None
+        self.info_loading = True
+        self._info_target_id = None
+        self._full_redraw()
+        def worker() -> None:
+            try:
+                self.info_payload = fetch_fn()
+            except Exception as e:
+                self.info_payload = {"error": str(e)}
+            self.info_loading = False
+            self._need_redraw = True
+        threading.Thread(target=worker, daemon=True).start()
+        if _dialog:
+            self.show_info_dialog()
 
     def open_info_album(self, album: Album, _dialog: bool = True) -> None:
         self.info_scroll = 0
         self.info_track = None
         self.info_album = album
         self.info_artist = None
-        self.info_payload = None
-        self.info_loading = True
-        self._info_target_id = None
-        self._need_redraw = True
-        self._redraw_status_only = False
-
-        def worker() -> None:
-            try:
-                aid = self._resolve_album_id_for_album(album)
-                if aid:
-                    payload = self.client.album(int(aid))
-                    self.info_payload = payload if isinstance(payload, dict) else {"raw": payload}
-                else:
-                    self.info_payload = {"error": "Album id not found"}
-            except Exception as e:
-                self.info_payload = {"error": str(e)}
-            self.info_loading = False
-            self._need_redraw = True
-
-        threading.Thread(target=worker, daemon=True).start()
-        if _dialog:
-            self.show_info_dialog()
+        def _fetch():
+            aid = self._resolve_album_id_for_album(album)
+            if not aid:
+                return {"error": "Album id not found"}
+            payload = self.client.album(int(aid))
+            return payload if isinstance(payload, dict) else {"raw": payload}
+        self._start_info_load(_fetch, _dialog)
 
     def open_info_artist(self, artist: Artist, _dialog: bool = True) -> None:
         self.info_scroll = 0
         self.info_track = None
         self.info_album = None
         self.info_artist = artist
-        self.info_payload = None
-        self.info_loading = True
-        self._info_target_id = None
-        self._need_redraw = True
-        self._redraw_status_only = False
-
-        def worker() -> None:
+        def _fetch():
+            aid = self._resolve_artist_id_via_track(artist, artist.id)
+            if not aid:
+                return {"error": "Artist id not found"}
+            payload = self.client.artist(int(aid))
+            payload = payload if isinstance(payload, dict) else {"raw": payload}
             try:
-                aid = artist.id
-                if not aid and artist.track_id:
-                    try:
-                        info = self.client.info(artist.track_id)
-                        data = info.get("data") if isinstance(info, dict) else None
-                        if isinstance(data, dict):
-                            a = data.get("artist")
-                            if isinstance(a, dict) and str(a.get("id", "")).isdigit():
-                                aid = int(a["id"])
-                    except Exception:
-                        pass
-                if aid:
-                    payload = self.client.artist(int(aid))
-                    payload = payload if isinstance(payload, dict) else {"raw": payload}
-                    # Fetch similar artists
-                    try:
-                        sim_payload = self.client.artist_similar(int(aid))
-                        sim_items: Any = None
-                        if isinstance(sim_payload, dict):
-                            for _key in ("artists", "items", "data"):
-                                if isinstance(sim_payload.get(_key), list):
-                                    sim_items = sim_payload[_key]
-                                    break
-                        elif isinstance(sim_payload, list):
-                            sim_items = sim_payload
-                        if sim_items:
-                            similar: List[Dict[str, Any]] = []
-                            for _a in sim_items:
-                                if isinstance(_a, dict):
-                                    _aid2 = _a.get("id") or 0
-                                    _aname = _a.get("name") or _a.get("artistName") or ""
-                                    if _aname:
-                                        similar.append({"id": _aid2, "name": _aname})
-                            if similar:
-                                payload["_similar"] = similar
-                    except Exception:
-                        pass
-                    self.info_payload = payload
-                else:
-                    self.info_payload = {"error": "Artist id not found"}
-            except Exception as e:
-                self.info_payload = {"error": str(e)}
-            self.info_loading = False
-            self._need_redraw = True
-
-        threading.Thread(target=worker, daemon=True).start()
-        if _dialog:
-            self.show_info_dialog()
+                similar = self._parse_similar_artists_payload(self.client.artist_similar(int(aid)))
+                if similar:
+                    payload["_similar"] = similar
+            except Exception:
+                pass
+            return payload
+        self._start_info_load(_fetch, _dialog)
 
     def show_similar_artists_dialog(self, artist: Artist, album_id: int = 0) -> None:
         """Interactive dialog listing similar artists with action keys."""
@@ -3981,62 +3455,27 @@ class App:
 
         if cached is None:
             self.toast("Loading similar artists…")
-            self._need_redraw = True
             # Resolve artist id if needed
-            if not aid and artist.track_id:
-                try:
-                    info = self.client.info(artist.track_id)
-                    data = info.get("data") if isinstance(info, dict) else None
-                    if isinstance(data, dict):
-                        _a = data.get("artist")
-                        if isinstance(_a, dict) and str(_a.get("id", "")).lstrip("-").isdigit():
-                            aid = int(_a["id"])
-                except Exception:
-                    pass
+            if not aid:
+                aid = self._resolve_artist_id_via_track(artist)
             if not aid and album_id:
                 try:
                     tracks = self._fetch_album_tracks_by_album_id(album_id)
                     if tracks:
                         t0 = tracks[0]
-                        if t0.artist_id:
-                            aid = t0.artist_id
-                        elif t0.id:
-                            info = self.client.info(t0.id)
-                            data = info.get("data") if isinstance(info, dict) else None
-                            if isinstance(data, dict):
-                                _a = data.get("artist")
-                                if isinstance(_a, dict) and str(_a.get("id", "")).lstrip("-").isdigit():
-                                    aid = int(_a["id"])
+                        aid = t0.artist_id or self._resolve_artist_id_via_track(
+                            Artist(id=0, name=t0.artist, track_id=t0.id))
                 except Exception:
                     pass
-            if not aid:
-                self.toast("Artist id not found")
-                return
+            if not aid: self.toast("Artist id not found"); return
             try:
                 sim_payload = self.client.artist_similar(aid)
             except Exception as e:
                 self.toast(f"Error: {e}")
                 return
-            cached = []
-            sim_items: Any = None
-            if isinstance(sim_payload, dict):
-                for _key in ("artists", "items", "data"):
-                    if isinstance(sim_payload.get(_key), list):
-                        sim_items = sim_payload[_key]
-                        break
-            elif isinstance(sim_payload, list):
-                sim_items = sim_payload
-            if sim_items:
-                for _a in sim_items:
-                    if isinstance(_a, dict):
-                        _aid2 = _a.get("id") or 0
-                        _aname = _a.get("name") or _a.get("artistName") or ""
-                        if _aname:
-                            cached.append({"id": _aid2, "name": _aname})
+            cached = self._parse_similar_artists_payload(sim_payload)
 
-        if not cached:
-            self.toast("No similar artists found")
-            return
+        if not cached: self.toast("No similar artists found"); return
 
         artists: List[Artist] = [Artist(id=int(a["id"]) if str(a["id"]).lstrip("-").isdigit() else 0,
                                         name=a["name"]) for a in cached]
@@ -4048,38 +3487,14 @@ class App:
         h, w = self.stdscr.getmaxyx()
         box_w = min(w - 6, max(56, max(len(a.name) for a in artists) + 8))
         box_h = min(h - 6, max(8, len(artists) + 4))
-        y0 = (h - box_h) // 2
-        x0 = (w - box_w) // 2
-        pad_y = max(0, y0 - 1)
-        pad_x = max(0, x0 - 2)
-        pad_h = min(h - pad_y, box_h + 2)
-        pad_w = min(w - pad_x, box_w + 4)
-        self._erase_popup_bg(pad_y, pad_x, pad_h, pad_w)
-        for yy in range(pad_y, pad_y + pad_h):
-            try:
-                self.stdscr.addstr(yy, pad_x, " " * pad_w)
-            except curses.error:
-                pass
-        win = self.stdscr.derwin(box_h, box_w, y0, x0)
-        win.keypad(True)
+        y0, x0, win = self._popup_win(box_h, box_w)
         idx = 0
         hint = " j/k ^n/^p: navigate  Enter/5: go to  Esc/q: close "
         hint2 = " a: add to playlist   e/E: enqueue    l: like "
         try:
             while True:
                 if self._need_redraw:
-                    # For status-only progress ticks, skip the full redraw so that
-                    # stdscr.refresh() doesn't overwrite the popup area with spaces.
-                    if not self._redraw_status_only:
-                        self.draw()
-                        self._erase_popup_bg(pad_y, pad_x, pad_h, pad_w)
-                        for yy in range(pad_y, pad_y + pad_h):
-                            try:
-                                self.stdscr.addstr(yy, pad_x, " " * pad_w)
-                            except curses.error:
-                                pass
-                    self._need_redraw = False
-                    self._redraw_status_only = False
+                    self._popup_refresh(y0, x0, box_h, box_w)
 
                 idx = clamp(idx, 0, len(artists) - 1)
                 win.erase()
@@ -4099,16 +3514,9 @@ class App:
                 win.refresh()
 
                 self.stdscr.timeout(100)
-                try:
-                    ch = self.stdscr.get_wch()
-                except curses.error:
-                    continue  # timeout — loop to redraw if needed
-
-                if isinstance(ch, str):
-                    try:
-                        ch = ord(ch)
-                    except Exception:
-                        continue
+                ch = self._get_wch_int()
+                if ch == -1:
+                    continue
 
                 if ch in (ord("j"), curses.KEY_DOWN, 14):
                     idx = min(len(artists) - 1, idx + 1)
@@ -4132,14 +3540,18 @@ class App:
                     break
         finally:
             self.stdscr.nodelay(True)
-            self._need_redraw = True
-            self._redraw_status_only = False
+            self._full_redraw()
 
-    def _extract_lrc_from_payload(self, payload: Any) -> List[str]:
+    def _extract_lyrics(self, payload: Any, strip_lrc: bool = True) -> List[str]:
+        """Extract lyrics text from an API payload dict.
+
+        strip_lrc=True  → strip LRC timestamps (for overlay display).
+        strip_lrc=False → return raw lines including timestamps (for dialog).
+        """
         if not isinstance(payload, dict):
             return []
 
-        def _looks_like_lyrics(s: str) -> bool:
+        def _looks_like(s: str) -> bool:
             s = s.strip()
             if not s or len(s) < 30:
                 return False
@@ -4147,105 +3559,53 @@ class App:
                 return False
             if s.startswith("{") or s.startswith("[{") or s.startswith("http"):
                 return False
+            if strip_lrc and len(s) > 50 and "/" in s[:20]:
+                return False
             return True
 
-        def _find_raw(obj: Any, depth: int = 0) -> str:
+        def _find(obj: Any, depth: int = 0) -> str:
             if depth > 10:
                 return ""
             if isinstance(obj, str):
-                return obj.strip() if _looks_like_lyrics(obj) else ""
+                return obj.strip() if _looks_like(obj) else ""
             if isinstance(obj, dict):
                 for k in ("subtitles", "lyrics", "lyric"):
                     v = obj.get(k)
-                    if isinstance(v, str) and _looks_like_lyrics(v):
+                    if isinstance(v, str) and _looks_like(v):
                         return v.strip()
                     if isinstance(v, (dict, list)):
-                        r = _find_raw(v, depth + 1)
+                        r = _find(v, depth + 1)
                         if r:
                             return r
                 for k, v in obj.items():
-                    kl = k.lower()
-                    if kl in ("lyrics", "lyric", "subtitles", "subtitle", "lyricstext",
-                               "lyricssubtitles", "tracklyrics"):
-                        r = _find_raw(v, depth + 1)
+                    if k.lower() in ("lyrics", "lyric", "subtitles", "subtitle", "lyricstext",
+                                     "lyricssubtitles", "tracklyrics"):
+                        r = _find(v, depth + 1)
                         if r:
                             return r
                 for v in obj.values():
                     if isinstance(v, (dict, list)):
-                        r = _find_raw(v, depth + 1)
+                        r = _find(v, depth + 1)
                         if r:
                             return r
             if isinstance(obj, list):
                 for item in obj:
-                    r = _find_raw(item, depth + 1)
+                    r = _find(item, depth + 1)
                     if r:
                         return r
             return ""
 
-        text = _find_raw(payload)
+        text = _find(payload)
         if not text:
-            return []
-        return text.splitlines()
-
-    def _extract_lyrics_from_payload(self, payload: Any) -> List[str]:
-        if not isinstance(payload, dict):
+            if strip_lrc:
+                debug_log(f"_extract_lyrics: no lyrics text found in payload keys={list(payload.keys())[:10]}")
             return []
 
-        def _looks_like_lyrics(s: str) -> bool:
-            s = s.strip()
-            if not s:
-                return False
-            if len(s) < 30:
-                return False
-            if "\n" not in s and len(s) < 200:
-                return False
-            if s.startswith("{") or s.startswith("[{") or s.startswith("http"):
-                return False
-            if len(s) > 50 and "/" in s[:20]:
-                return False
-            return True
-
-        def _find_text(obj: Any, depth: int = 0) -> str:
-            if depth > 10:
-                return ""
-            if isinstance(obj, str):
-                if _looks_like_lyrics(obj):
-                    return obj.strip()
-                return ""
-            if isinstance(obj, dict):
-                for k in ("subtitles", "lyrics", "lyric"):
-                    v = obj.get(k)
-                    if isinstance(v, str) and _looks_like_lyrics(v):
-                        return v.strip()
-                    if isinstance(v, (dict, list)):
-                        r = _find_text(v, depth + 1)
-                        if r:
-                            return r
-                for k, v in obj.items():
-                    kl = k.lower()
-                    if kl in ("lyrics", "lyric", "subtitles", "subtitle", "lyricstext",
-                               "lyricssubtitles", "tracklyrics"):
-                        r = _find_text(v, depth + 1)
-                        if r:
-                            return r
-                for v in obj.values():
-                    if isinstance(v, (dict, list)):
-                        r = _find_text(v, depth + 1)
-                        if r:
-                            return r
-            if isinstance(obj, list):
-                for item in obj:
-                    r = _find_text(item, depth + 1)
-                    if r:
-                        return r
-            return ""
-
-        text = _find_text(payload)
-        if not text:
-            debug_log(f"_extract_lyrics: no lyrics text found in payload keys={list(payload.keys())[:10]}")
-            return []
         debug_log(f"_extract_lyrics: found {len(text)} chars, first 60: {text[:60]!r}")
         lines = text.splitlines()
+        if not strip_lrc:
+            return lines
+
         cleaned: List[str] = []
         lrc_re = re.compile(r"^\[\d+:\d+\.\d+\](.*)$")
         has_lrc = any(lrc_re.match(l) for l in lines[:5] if l.strip())
@@ -4258,22 +3618,32 @@ class App:
             cleaned.append(l)
         return cleaned
 
+    def _fetch_lyrics_lines(self, t_id: int, strip_lrc: bool = True) -> List[str]:
+        """Fetch lyrics via lyrics API, falling back to info API. Returns empty list on failure."""
+        lines: List[str] = []
+        try:
+            lines = self._extract_lyrics(self.client.lyrics(t_id), strip_lrc)
+        except Exception:
+            pass
+        if not lines:
+            try:
+                lines = self._extract_lyrics(self.client.info(t_id), strip_lrc)
+            except Exception:
+                pass
+        return lines
+
     def toggle_lyrics(self, target: Optional["Track"] = None) -> None:
         if self.lyrics_overlay:
             self.lyrics_overlay = False
             self._need_redraw = True
             return
         t = target or self.current_track or self._current_selection_track()
-        if not t:
-            self.toast("No track")
-            return
+        if not t: self.toast("No track"); return
         self.lyrics_overlay = True
         self.lyrics_scroll = 0
         self.lyrics_track = t
-        self._need_redraw = True
-        self._redraw_status_only = False
-        if self.lyrics_track_id == t.id and self.lyrics_lines:
-            return
+        self._full_redraw()
+        if self.lyrics_track_id == t.id and self.lyrics_lines: return
         self.lyrics_track_id = t.id
         self.lyrics_lines = []
         self.lyrics_loading = True
@@ -4282,19 +3652,9 @@ class App:
         self._lyrics_filter_pos = -1
 
         def worker() -> None:
-            lines: List[str] = []
             try:
-                try:
-                    lyr_payload = self.client.lyrics(t.id)
-                    lines = self._extract_lyrics_from_payload(lyr_payload)
-                except Exception:
-                    pass
-                if not lines:
-                    info_payload = self.client.info(t.id)
-                    lines = self._extract_lyrics_from_payload(info_payload)
-                if not lines:
-                    lines = ["No lyrics available for this track."]
-                self.lyrics_lines = lines
+                lines = self._fetch_lyrics_lines(t.id)
+                self.lyrics_lines = lines or ["No lyrics available for this track."]
             except Exception as e:
                 self.lyrics_lines = [f"Error fetching lyrics: {e}"]
             self.lyrics_loading = False
@@ -4314,12 +3674,11 @@ class App:
             def _worker() -> None:
                 try:
                     payload = self.client.lyrics(track.id)
-                    self.lyrics_lines = self._extract_lrc_from_payload(payload)
+                    self.lyrics_lines = self._extract_lyrics(payload, strip_lrc=False)
                 except Exception:
                     self.lyrics_lines = []
                 self.lyrics_loading = False
-                self._need_redraw = True
-                self._redraw_status_only = False
+                self._full_redraw()
 
             threading.Thread(target=_worker, daemon=True).start()
 
@@ -4328,35 +3687,13 @@ class App:
         h, w = self.stdscr.getmaxyx()
         box_h = min(h - 4, 32)
         box_w = min(w - 8, 86)
-        y0 = (h - box_h) // 2
-        x0 = (w - box_w) // 2
-        pad_y = max(0, y0 - 1)
-        pad_x = max(0, x0 - 2)
-        pad_h = min(h - pad_y, box_h + 2)
-        pad_w = min(w - pad_x, box_w + 4)
-        self._erase_popup_bg(pad_y, pad_x, pad_h, pad_w)
-        for yy in range(pad_y, pad_y + pad_h):
-            try:
-                self.stdscr.addstr(yy, pad_x, " " * pad_w)
-            except curses.error:
-                pass
-        win = self.stdscr.derwin(box_h, box_w, y0, x0)
-        win.keypad(True)
+        y0, x0, win = self._popup_win(box_h, box_w)
         scroll = 0
         self.stdscr.timeout(100)
         try:
             while True:
                 if self._need_redraw:
-                    if not self._redraw_status_only:
-                        self.draw()
-                        self._erase_popup_bg(pad_y, pad_x, pad_h, pad_w)
-                        for yy in range(pad_y, pad_y + pad_h):
-                            try:
-                                self.stdscr.addstr(yy, pad_x, " " * pad_w)
-                            except curses.error:
-                                pass
-                    self._need_redraw = False
-                    self._redraw_status_only = False
+                    self._popup_refresh(y0, x0, box_h, box_w)
 
                 t_ref = track
                 title = f"Lyrics – {t_ref.artist} - {t_ref.title}"
@@ -4390,34 +3727,23 @@ class App:
                 win.touchwin()
                 win.refresh()
 
-                try:
-                    ch = self.stdscr.get_wch()
-                except curses.error:
+                ch = self._get_wch_int()
+                if ch == -1:
                     continue
-                if isinstance(ch, str):
-                    try:
-                        ch = ord(ch)
-                    except Exception:
-                        continue
 
                 if ch in (27, ord("v"), ord("V"), ord("q")):
                     break
-                elif ch in (ord("j"), curses.KEY_DOWN, 14):
-                    scroll = min(max_scroll, scroll + 1)
-                elif ch in (ord("k"), curses.KEY_UP, 16):
-                    scroll = max(0, scroll - 1)
-                elif ch == curses.KEY_PPAGE:
-                    scroll = max(0, scroll - self._page_step())
-                elif ch == curses.KEY_NPAGE:
-                    scroll = min(max_scroll, scroll + self._page_step())
-                elif ch in (curses.KEY_HOME, ord("g")):
-                    scroll = 0
-                elif ch in (curses.KEY_END, ord("G")):
-                    scroll = max_scroll
+                _p = self._page_step()
+                _nv = (min(max_scroll, scroll + 1) if ch in (ord("j"), curses.KEY_DOWN, 14) else
+                       max(0, scroll - 1) if ch in (ord("k"), curses.KEY_UP, 16) else
+                       max(0, scroll - _p) if ch == curses.KEY_PPAGE else
+                       min(max_scroll, scroll + _p) if ch == curses.KEY_NPAGE else
+                       0 if ch in (curses.KEY_HOME, ord("g")) else
+                       max_scroll if ch in (curses.KEY_END, ord("G")) else None)
+                if _nv is not None: scroll = _nv
         finally:
             self.stdscr.nodelay(True)
-            self._need_redraw = True
-            self._redraw_status_only = False
+            self._full_redraw()
 
     # ---------------------------------------------------------------------------
     # search
@@ -4425,13 +3751,11 @@ class App:
     def do_search_prompt_anywhere(self) -> None:
         self.playlist_view_name = None
         q = self.prompt_text("Search:", self.search_q)
-        if q is None:
-            return
+        if q is None: return
         self.switch_tab(TAB_SEARCH, refresh=False)
         self.search_q = q
         self.search_results = []
-        self.left_idx = 0
-        self.left_scroll = 0
+        self._reset_left_cursor()
         self.last_error = None
         try:
             payload = self.client.search_tracks(self.search_q, limit=260)
@@ -4439,9 +3763,7 @@ class App:
             self.toast(f"{len(self.search_results)} results")
         except Exception as e:
             self.last_error = str(e)
-            self.toast("Error")
-        self._need_redraw = True
-        self._redraw_status_only = False
+            self._toast_redraw("Error")
 
     # ---------------------------------------------------------------------------
     # filter / find
@@ -4450,8 +3772,7 @@ class App:
         q = self.filter_q.strip().lower()
         self.filter_hits = []
         self.filter_pos = -1
-        if not q:
-            return
+        if not q: return
         typ, items = self._left_items()
         for i, it in enumerate(items):
             if isinstance(it, Track):
@@ -4484,8 +3805,7 @@ class App:
 
     def filter_prompt(self) -> None:
         q = self.prompt_text("Filter:", self.filter_q)
-        if q is None:
-            return
+        if q is None: return
         self.filter_q = q
         self._compute_filter_hits()
         if not self.filter_hits:
@@ -4496,8 +3816,7 @@ class App:
         self.toast(f"1/{len(self.filter_hits)}")
 
     def filter_next(self, delta: int) -> None:
-        if not self.filter_hits:
-            return
+        if not self.filter_hits: return
         self.filter_pos = (self.filter_pos + delta) % len(self.filter_hits)
         self._set_filter_cursor(self.filter_hits[self.filter_pos])
         self.toast(f"{self.filter_pos+1}/{len(self.filter_hits)}")
@@ -4506,8 +3825,7 @@ class App:
         q = self._lyrics_filter_q.strip().lower()
         self._lyrics_filter_hits = []
         self._lyrics_filter_pos = -1
-        if not q:
-            return
+        if not q: return
         for i, line in enumerate(self.lyrics_lines or []):
             if q in line.lower():
                 self._lyrics_filter_hits.append(i)
@@ -4516,8 +3834,7 @@ class App:
 
     def lyrics_filter_prompt(self) -> None:
         q = self.prompt_text("Lyrics filter:", self._lyrics_filter_q)
-        if q is None:
-            return
+        if q is None: return
         self._lyrics_filter_q = q
         self._compute_lyrics_filter_hits()
         if not self._lyrics_filter_hits:
@@ -4529,8 +3846,7 @@ class App:
         self.toast(f"1/{len(self._lyrics_filter_hits)}")
 
     def lyrics_filter_next(self, delta: int) -> None:
-        if not self._lyrics_filter_hits:
-            return
+        if not self._lyrics_filter_hits: return
         self._lyrics_filter_pos = (self._lyrics_filter_pos + delta) % len(self._lyrics_filter_hits)
         self.lyrics_scroll = self._lyrics_filter_hits[self._lyrics_filter_pos]
         self._need_redraw = True
@@ -4541,19 +3857,15 @@ class App:
     # ---------------------------------------------------------------------------
     def playlists_create(self) -> None:
         name = self.prompt_text("New playlist name:", "")
-        if not name:
-            return
+        if not name: return
         if name in self.playlists:
             self.toast("Exists")
             return
         now_ms = int(time.time() * 1000)
         self.playlists[name] = []
         self.playlists_meta[name] = {"id": str(uuid.uuid4()), "createdAt": now_ms}
-        save_playlists(self.playlists, self.playlists_meta)
-        self.playlist_names = sorted(self.playlists.keys())
-        self.toast("Created")
-        self._need_redraw = True
-        self._redraw_status_only = False
+        self._save_playlists()
+        self._toast_redraw("Created")
 
     def playlists_delete_current(self) -> None:
         if self.playlist_view_name is None:
@@ -4565,48 +3877,36 @@ class App:
                     self.playlists.pop(name, None)
                     self.playlists_meta.pop(name, None)
                 self.marked_left_idx.clear()
-                save_playlists(self.playlists, self.playlists_meta)
-                self.playlist_names = sorted(self.playlists.keys())
+                self._save_playlists()
                 self.left_idx = clamp(self.left_idx, 0, max(0, len(self.playlist_names) - 1))
-                self.toast(f"Deleted {len(marked)}")
-                self._need_redraw = True
-                self._redraw_status_only = False
+                self._toast_redraw(f"Deleted {len(marked)}")
                 return
-            if not self.playlist_names:
-                return
+            if not self.playlist_names: return
             name = self.playlist_names[clamp(self.left_idx, 0, len(self.playlist_names)-1)]
         else:
             name = self.playlist_view_name
-        if not name:
-            return
+        if not name: return
         if not self.prompt_yes_no(f"Delete '{name}'? (y/n)"):
             return
         self.playlists.pop(name, None)
         self.playlists_meta.pop(name, None)
-        save_playlists(self.playlists, self.playlists_meta)
+        self._save_playlists()
         self.playlist_view_name = None
         self.playlist_view_tracks = []
-        self.playlist_names = sorted(self.playlists.keys())
-        self.left_idx = 0
-        self.left_scroll = 0
-        self.toast("Deleted")
-        self._need_redraw = True
-        self._redraw_status_only = False
+        self._reset_left_cursor()
+        self._toast_redraw("Deleted")
 
     def playlists_open_selected(self) -> None:
-        if not self.playlist_names:
-            return
+        if not self.playlist_names: return
         name = self.playlist_names[clamp(self.left_idx, 0, len(self.playlist_names)-1)]
         self.playlist_view_name = name
         self.playlist_view_tracks = []
-        self.left_idx = 0
-        self.left_scroll = 0
+        self._reset_left_cursor()
         self.fetch_playlist_tracks_async(name)
 
     def fetch_playlist_tracks_async(self, name: str) -> None:
         self.playlist_view_tracks = list(self.playlists.get(name, []))
-        self._need_redraw = True
-        self._redraw_status_only = False
+        self._full_redraw()
 
     def _enqueue_playlist_async(self, name: str, insert_after_playing: bool) -> None:
         tracks = self.playlists.get(name, [])
@@ -4615,144 +3915,56 @@ class App:
         else:
             self.toast("Empty playlist")
 
+    def _tracks_from_playlists(self, names: List[str]) -> List[Track]:
+        return [t for name in names for t in self.playlists.get(name, [])]
+
+    def _save_playlists(self) -> None:
+        """Persist playlists to disk and refresh the sorted name list."""
+        save_playlists(self.playlists, self.playlists_meta)
+        self.playlist_names = sorted(self.playlists.keys())
+
     def _add_tracks_to_named_playlist(self, tracks: List[Track], name: str) -> None:
         self.playlists.setdefault(name, []).extend(tracks)
         save_playlists(self.playlists, self.playlists_meta)
-        self.toast(f"Added {len(tracks)}")
-        self._need_redraw = True
-        self._redraw_status_only = False
+        self._toast_redraw(f"Added {len(tracks)}")
         if self.tab == TAB_PLAYLISTS and self.playlist_view_name == name:
             self.playlist_view_tracks = list(self.playlists[name])
 
     def playlists_add_tracks(self, tracks: List[Track]) -> None:
-        if not tracks:
-            self.toast("No tracks")
-            return
-        name = self.pick_playlist("Add to playlist")
-        if not name:
-            return
+        if not tracks: self.toast("No tracks"); return
+        if not (name := self.pick_playlist("Add to playlist")): return
         self._add_tracks_to_named_playlist(tracks, name)
 
     def _add_album_to_playlist_async(self, album: Album) -> None:
-        name = self.pick_playlist("Add to playlist")
-        if not name:
-            return
-        self.toast("Fetching album…")
-        def worker() -> None:
-            aid = self._resolve_album_id_for_album(album)
-            if not aid:
-                self.toast("Album id?")
-                return
-            tracks = self._fetch_album_tracks_by_album_id(aid)
-            if tracks:
-                self._add_tracks_to_named_playlist(tracks, name)
-            else:
-                self.toast("No tracks")
-        self._bg(worker)
+        if not (name := self.pick_playlist("Add to playlist")): return
+        self._with_album_tracks_async(album,
+            lambda t: self._add_tracks_to_named_playlist(t, name) if t else self.toast("No tracks"),
+            "Fetching album…")
 
     def _add_marked_artists_to_playlist_async(self, artists: List[Artist]) -> None:
-        name = self.pick_playlist("Add to playlist")
-        if not name:
-            return
-        self.toast(f"Fetching {len(artists)} artists…")
-        def worker() -> None:
-            all_tracks: List[Track] = []
-            for artist in artists:
-                aid = artist.id
-                if not aid and artist.track_id:
-                    try:
-                        info = self.client.info(artist.track_id)
-                        data = info.get("data") if isinstance(info, dict) else None
-                        if isinstance(data, dict):
-                            a = data.get("artist")
-                            if isinstance(a, dict) and str(a.get("id", "")).isdigit():
-                                aid = int(a["id"])
-                    except Exception:
-                        pass
-                if aid:
-                    _albums, tracks = self._fetch_artist_catalog_by_artist_id(aid)
-                    all_tracks.extend(tracks)
-            if all_tracks:
-                self._add_tracks_to_named_playlist(all_tracks, name)
-            else:
-                self.toast("No tracks")
-        self._bg(worker)
+        if not (name := self.pick_playlist("Add to playlist")): return
+        self._process_marked_artists_async(artists, lambda t: self._add_tracks_to_named_playlist(t, name))
 
     def _add_marked_albums_to_playlist_async(self, albums: List[Album]) -> None:
-        name = self.pick_playlist("Add to playlist")
-        if not name:
-            return
-        self.toast(f"Fetching {len(albums)} albums…")
-        def worker() -> None:
-            all_tracks: List[Track] = []
-            for album in albums:
-                aid = self._resolve_album_id_for_album(album)
-                if aid:
-                    all_tracks.extend(self._fetch_album_tracks_by_album_id(aid))
-            if all_tracks:
-                self._add_tracks_to_named_playlist(all_tracks, name)
-            else:
-                self.toast("No tracks")
-        self._bg(worker)
+        if not (name := self.pick_playlist("Add to playlist")): return
+        self._process_marked_albums_async(albums, lambda t: self._add_tracks_to_named_playlist(t, name))
 
     def _add_artist_to_playlist_async(self, artist: Artist) -> None:
-        name = self.pick_playlist("Add to playlist")
-        if not name:
-            return
-        self.toast("Fetching artist…")
-        def worker() -> None:
-            tracks: List[Track] = []
-            aid = artist.id
-            if not aid and artist.track_id:
-                try:
-                    info = self.client.info(artist.track_id)
-                    data = info.get("data") if isinstance(info, dict) else None
-                    if isinstance(data, dict):
-                        a = data.get("artist")
-                        if isinstance(a, dict) and str(a.get("id", "")).isdigit():
-                            aid = int(a["id"])
-                except Exception:
-                    pass
-            if aid:
-                _albums, tracks = self._fetch_artist_catalog_by_artist_id(aid)
-            if not tracks:
-                payload2 = self.client.search_tracks(artist.name, limit=300)
-                a0 = artist.name.strip().lower()
-                tracks = [t for t in self._extract_tracks_from_search(payload2)
-                          if t.artist.strip().lower() == a0]
-            if tracks:
-                def _yr(t: Track) -> int:
-                    y = year_norm(t.year)
-                    return int(y) if y.isdigit() else 9999
-                tracks = self._dedupe_tracks(tracks)
-                tracks = sorted(tracks, key=lambda t: (_yr(t), t.album.lower(), t.track_no or 9999, t.title.lower()))
-                self._add_tracks_to_named_playlist(tracks, name)
-            else:
-                self.toast("No tracks")
-        self._bg(worker)
+        if not (name := self.pick_playlist("Add to playlist")): return
+        self._with_artist_tracks_async(artist, lambda t: self._add_tracks_to_named_playlist(t, name), "Fetching artist…")
 
     def _add_playlist_to_playlist_async(self, source_name: str) -> None:
         tracks = list(self.playlists.get(source_name, []))
-        if not tracks:
-            self.toast("Empty playlist")
-            return
-        name = self.pick_playlist("Add to playlist", exclude=source_name)
-        if not name:
-            return
+        if not tracks: self.toast("Empty playlist"); return
+        if not (name := self.pick_playlist("Add to playlist", exclude=source_name)): return
         self._add_tracks_to_named_playlist(tracks, name)
 
     def playlists_add_from_context(self) -> None:
         if self._queue_context():
-            tracks = self._marked_tracks_from_queue() or ([self._queue_selected_track()] if self._queue_selected_track() else [])
-            self.playlists_add_tracks([t for t in tracks if t])
+            self.playlists_add_tracks(self._target_tracks())
             return
-        marked_albums = self._marked_albums_from_left()
-        marked_artists = self._marked_artists_from_left()
-        marked_playlists = self._marked_playlists_from_left()
-        marked_albums, marked_artists, marked_playlists, cancelled = \
-            self._resolve_batch_conflict(marked_albums, marked_artists, marked_playlists)
-        if cancelled:
-            return
+        marked_albums, marked_artists, marked_playlists, cancelled = self._marked_batch()
+        if cancelled: return
         if marked_albums:
             self._add_marked_albums_to_playlist_async(marked_albums)
             return
@@ -4762,9 +3974,7 @@ class App:
         if marked_playlists:
             name = self.pick_playlist("Add to playlist")
             if name:
-                all_tracks: List[Track] = []
-                for pl in marked_playlists:
-                    all_tracks.extend(self.playlists.get(pl, []))
+                all_tracks = self._tracks_from_playlists(marked_playlists)
                 if all_tracks:
                     self._add_tracks_to_named_playlist(all_tracks, name)
                 else:
@@ -4780,8 +3990,7 @@ class App:
         if isinstance(it, str):
             self._add_playlist_to_playlist_async(it)
             return
-        tracks = self._marked_tracks_from_left() or ([self._selected_left_track()] if self._selected_left_track() else [])
-        self.playlists_add_tracks([t for t in tracks if t])
+        self.playlists_add_tracks(self._target_tracks())
 
     # ---------------------------------------------------------------------------
     # drawing
@@ -4813,36 +4022,54 @@ class App:
         self.stdscr.addstr(y, x, s[:width], self.C(10))
         return len(s)
 
-    def _draw_track_line_colored(self, y: int, x: int, w: int, t: Track, selected: bool,
-                                  marked: bool, priority_pos: int = 0,
-                                  force_no_tsv: bool = False, simple_format: bool = False) -> None:
+    def _draw_segs(self, y: int, x: int, w: int, segs, base_attr: int) -> None:
+        """Draw colored text segments left-to-right, padding remainder with spaces."""
+        rem = max(0, w - 1)
+        cx = x
+        for text, pair in segs:
+            if rem <= 0 or not text: continue
+            text = text[:rem]
+            self.stdscr.addstr(y, cx, text, base_attr | (self.C(pair) if self.color_mode else 0))
+            cx += len(text)
+            rem -= len(text)
+        if rem > 0:
+            self.stdscr.addstr(y, cx, " " * rem, base_attr)
+
+    def _draw_track_line(self, y: int, x: int, w: int, t: Track, selected: bool,
+                         marked: bool, idx1: Optional[int], priority_pos: int = 0,
+                         force_no_tsv: bool = False, simple_format: bool = False) -> None:
         base_attr = curses.A_REVERSE if selected else 0
+        _c = lambda pair: self.C(pair) if self.color_mode else 0
+
+        offs = self._draw_line_no(y, x, idx1 or 0, w) if idx1 is not None else 0
+        x += offs
+        w -= offs
+        if w <= 0: return
+
         liked = self.is_liked(t.id)
         use_tsv = self.tab_align and not force_no_tsv and not simple_format
 
         prio_str = str(priority_pos) if priority_pos > 0 else ""
         n_digits = len(prio_str)
         pref_w = 3 if n_digits <= 2 else (1 + n_digits + 1)
-        if w <= pref_w:
-            return
+        if w <= pref_w: return
         self.stdscr.addstr(y, x, " " * pref_w, base_attr)
         if marked:
-            self.stdscr.addstr(y, x, "+", base_attr | self.C(15))
+            self.stdscr.addstr(y, x, "+", base_attr | _c(15))
         if priority_pos > 0:
-            self.stdscr.addstr(y, x + 1, prio_str[:pref_w - 1], base_attr | self.C(5))
+            self.stdscr.addstr(y, x + 1, prio_str[:pref_w - 1], base_attr | _c(5))
         x += pref_w
         w -= pref_w
 
         heart_w = 2
         if liked:
-            self.stdscr.addstr(y, x, ("♥ ")[:max(0, w)], base_attr | self.C(14))
+            self.stdscr.addstr(y, x, ("♥ ")[:max(0, w)], base_attr | _c(14))
         elif use_tsv:
             self.stdscr.addstr(y, x, "  "[:max(0, w)], base_attr)
         if liked or use_tsv:
             x += heart_w
             w -= heart_w
-            if w <= 0:
-                return
+            if w <= 0: return
 
         if simple_format:
             artist = t.artist
@@ -4854,17 +4081,7 @@ class App:
             ]
             if dur:
                 segs.append((dur, 9))
-            rem = max(0, w - 1)
-            cx = x
-            for text, pair in segs:
-                if rem <= 0 or not text:
-                    continue
-                text = text[:rem]
-                self.stdscr.addstr(y, cx, text, base_attr | (self.C(pair) if pair else 0))
-                cx += len(text)
-                rem -= len(text)
-            if rem > 0:
-                self.stdscr.addstr(y, cx, " " * rem, base_attr)
+            self._draw_segs(y, x, w, segs, base_attr)
             return
 
         parts = self._make_track_parts(t)
@@ -4880,8 +4097,7 @@ class App:
             if dur:
                 field_defs.append((dur, 9, "duration"))
             n_fields = len(field_defs)
-            if n_fields == 0:
-                return
+            if n_fields == 0: return
             cx = x
             rem = w
             for fi, (text, pair, fkey) in enumerate(field_defs):
@@ -4901,7 +4117,7 @@ class App:
                         display = display.ljust(fw)[:fw]
                     else:
                         display = text.ljust(fw)[:fw]
-                self.stdscr.addstr(y, cx, display, base_attr | self.C(pair))
+                self.stdscr.addstr(y, cx, display, base_attr | _c(pair))
                 cx += fw
                 rem -= fw
         else:
@@ -4914,112 +4130,11 @@ class App:
                 segs += [(" ", 0), (album_or_combined, 8)]
             if dur:
                 segs += [(" ", 0), (dur, 9)]
-            rem = max(0, w - 1)
-            cx = x
-            for text, pair in segs:
-                if rem <= 0 or not text:
-                    continue
-                text = text[:rem]
-                self.stdscr.addstr(y, cx, text, base_attr | (self.C(pair) if pair else 0))
-                cx += len(text)
-                rem -= len(text)
-            if rem > 0:
-                self.stdscr.addstr(y, cx, " " * rem, base_attr)
-
-    def _draw_track_line(self, y: int, x: int, w: int, t: Track, selected: bool,
-                         marked: bool, idx1: Optional[int], priority_pos: int = 0,
-                         force_no_tsv: bool = False, simple_format: bool = False) -> None:
-        base_attr = curses.A_REVERSE if selected else 0
-
-        offs = self._draw_line_no(y, x, idx1 or 0, w) if idx1 is not None else 0
-        x += offs
-        w -= offs
-        if w <= 0:
-            return
-
-        if self.color_mode:
-            self._draw_track_line_colored(y, x, w, t, selected, marked, priority_pos,
-                                           force_no_tsv=force_no_tsv, simple_format=simple_format)
-        else:
-            liked = self.is_liked(t.id)
-            use_tsv = self.tab_align and not force_no_tsv and not simple_format
-            prio_str = str(priority_pos) if priority_pos > 0 else ""
-            n_digits = len(prio_str)
-            pref_w = 3 if n_digits <= 2 else (1 + n_digits + 1)
-            if priority_pos > 0 and marked:
-                pref = ("+" + prio_str).ljust(pref_w)
-            elif priority_pos > 0:
-                pref = (" " + prio_str).ljust(pref_w)
-            elif marked:
-                pref = "+  "
-            else:
-                pref = "   "
-            pref = pref[:pref_w].ljust(pref_w)
-            self.stdscr.addstr(y, x, pref[:max(0, w - 1)], base_attr)
-            x += pref_w
-            w -= pref_w
-            if w <= 0:
-                return
-            if simple_format:
-                dv = self._track_duration(t)
-                dur_s = f" [{fmt_dur(dv)}]" if dv else ""
-                head = "♥ " if liked else ""
-                line = f"{head}{t.artist} - {t.title}{dur_s}"
-                self.stdscr.addstr(y, x, line.ljust(max(0, w - 1))[:max(0, w - 1)], base_attr)
-                return
-            if use_tsv:
-                if liked:
-                    self.stdscr.addstr(y, x, "♥ "[:max(0, w - 1)], base_attr)
-                else:
-                    self.stdscr.addstr(y, x, "  "[:max(0, w - 1)], base_attr)
-                x += 2
-                w -= 2
-                if w <= 0:
-                    return
-                parts = self._make_track_parts(t)
-                artist, title = parts[0], parts[1]
-                album_or_combined = parts[2]
-                dur = parts[3]
-                year_part = parts[4] if len(parts) > 4 else ""
-                field_defs_bw = [(artist, "artist"), (title, "title")]
-                if self.show_track_album and album_or_combined:
-                    field_defs_bw.append((album_or_combined, "album"))
-                if self.show_track_year and year_part:
-                    field_defs_bw.append((year_part, "year"))
-                if dur:
-                    field_defs_bw.append((dur, "duration"))
-                n_fields = len(field_defs_bw)
-                cx = x
-                rem = w
-                for fi, (text, fkey) in enumerate(field_defs_bw):
-                    if rem <= 0:
-                        break
-                    is_last = (fi == n_fields - 1)
-                    if is_last:
-                        fw = rem
-                        display = text[:fw].ljust(fw)[:fw]
-                    else:
-                        mcw = self.tsv_field_widths.get(fkey, self.tsv_max_col_width)
-                        if mcw <= 0:
-                            mcw = w
-                        fw = min(mcw, rem)
-                        if len(text) >= fw:
-                            display = (text[:max(0, fw - 2)] + "…") if fw > 1 else "…"
-                            display = display.ljust(fw)[:fw]
-                        else:
-                            display = text.ljust(fw)[:fw]
-                    self.stdscr.addstr(y, cx, display, base_attr)
-                    cx += fw
-                    rem -= fw
-            else:
-                head = "♥ " if liked else ""
-                line = self.fmt_track_line_bw(t, w - 1, liked=liked)
-                self.stdscr.addstr(y, x, line.ljust(max(0, w - 1))[:max(0, w - 1)], base_attr)
+            self._draw_segs(y, x, w, segs, base_attr)
 
     def _draw_left(self, y: int, x: int, h: int, w: int) -> None:
         typ, items = self._left_items()
-        if h <= 0 or w <= 0:
-            return
+        if h <= 0 or w <= 0: return
         if self._loading:
             if self.tab == TAB_ARTIST and (self.artist_ctx or self.artist_albums or self.artist_tracks):
                 pass  # fall through; partial content visible, "…" shown in section headers
@@ -5055,63 +4170,24 @@ class App:
             return
 
         # Empty-tab hints
-        if n == 0 and self.tab == TAB_QUEUE:
-            self.stdscr.addstr(y, x, " Press e/E on tracks in any tab to enqueue, q to show queue overlay"[:max(0, w - 1)].ljust(max(0, w - 1)), self.C(10))
-            return
-        if typ == "tracks" and n == 0 and self.tab == TAB_SEARCH:
-            self.stdscr.addstr(y, x, " Search on TIDAL with /"[:max(0, w - 1)].ljust(max(0, w - 1)), self.C(10))
-            return
-        if typ == "tracks" and n == 0 and self.tab == TAB_RECOMMENDED:
-            hint = (
-                " A playing track is required to get recommendations\n"
-                "\n"
-                " If Autoplay is set to \"recommended\", the queue will expand with recommended suggestions\n"
-                " based on last queue items"
-            )
-            for i, line in enumerate(hint.splitlines()):
-                if y + i < h - 1:
-                    self.stdscr.addstr(
-                        y + i, x,
-                        line[:max(0, w - 1)].ljust(max(0, w - 1)),
-                        self.C(10),
-                    )
-            return
-
-        if n == 0 and self.tab == TAB_MIX:
-            hint = (
-                " Press 4 on a track, album or artist in any tab to load its track mix\n"
-                "\n"
-                " If Autoplay is set to \"mix\", the queue will expand with mix suggestions\n"
-                " based on last queue items"
-            )
-            if self.mix_track:
-                hint = " No mix tracks loaded — press 4 with a track, album or artist selected"
-
-            for i, line in enumerate(hint.splitlines()):
-                if y + i < h - 1:
-                    self.stdscr.addstr(
-                        y + i, x,
-                        line[:max(0, w - 1)].ljust(max(0, w - 1)),
-                        self.C(10),
-                    )
-            return
-        if  n == 0 and self.tab == TAB_ARTIST:
-            self.stdscr.addstr(y, x, " Press 5 on a track or album in any tab to show its artist"[:max(0, w - 1)].ljust(max(0, w - 1)), self.C(10))
-            return
-        if  n == 0 and self.tab == TAB_ALBUM:
-            self.stdscr.addstr(y, x, " Press 6 on a track in any tab to show its album"[:max(0, w - 1)].ljust(max(0, w - 1)), self.C(10))
-            return
-        if n == 0 and self.tab == TAB_LIKED:
-            FILTER_NAMES = ["All", "Tracks", "Artists", "Albums", "Playlists"]
-            fn = FILTER_NAMES[self.liked_filter]
-            self.stdscr.addstr(y, x, f"\n Nothing liked here — press l on items to like them\n Cycle sub-categories with [/], Alt+7, or ^←/^→, or jump directly with Alt+1-5"[:max(0, w - 1)].ljust(max(0, w - 1)), self.C(10))
-            return
-        if typ == "tracks" and n == 0 and self.tab == TAB_HISTORY:
-            self.stdscr.addstr(y, x, " Play tracks to build history"[:max(0, w - 1)].ljust(max(0, w - 1)), self.C(10))
-            return
-        if  n == 0 and self.tab == TAB_PLAYLISTS:
-            self.stdscr.addstr(y, x, " Press n to create a new playlist"[:max(0, w - 1)].ljust(max(0, w - 1)), self.C(10))
-            return
+        if n == 0:
+            _hints = {
+                TAB_QUEUE:       " Press e/E on tracks in any tab to enqueue, q to show queue overlay",
+                TAB_SEARCH:      " Search on TIDAL with /",
+                TAB_RECOMMENDED: " A playing track is required to get recommendations\n\n If Autoplay is set to \"recommended\", the queue will expand with recommended suggestions\n based on last queue items",
+                TAB_MIX:         (" No mix tracks loaded — press 4 with a track, album or artist selected"
+                                   if self.mix_track else
+                                   " Press 4 on a track, album or artist in any tab to load its track mix\n\n If Autoplay is set to \"mix\", the queue will expand with mix suggestions\n based on last queue items"),
+                TAB_ARTIST:      " Press 5 on a track or album in any tab to show its artist",
+                TAB_ALBUM:       " Press 6 on a track in any tab to show its album",
+                TAB_LIKED:       "\n Nothing liked here — press l on items to like them\n Cycle sub-categories with [/], Alt+7, or ^←/^→, or jump directly with Alt+1-5",
+                TAB_HISTORY:     " Play tracks to build history",
+                TAB_PLAYLISTS:   (" Empty playlist — press a on a track to add it" if self.playlist_view_name is not None else " Press n to create a new playlist"),
+            }
+            _hint = _hints.get(self.tab)
+            if _hint:
+                self._draw_hint(y, x, h, w, _hint)
+                return
         
         for row in range(h):
             i = self.left_scroll + row
@@ -5193,11 +4269,6 @@ class App:
                         self.stdscr.addstr(yy, px, f"{it.title}{ys}"[:pw].ljust(pw)[:pw],
                                            base_attr | self.C(8))
                     continue
-                if isinstance(it, Track):
-                    marked = (i in self.marked_left_idx)
-                    self._draw_track_line(yy, x, w, it, selected=selected, marked=marked, idx1=i + 1)
-                    continue
-
             if typ == "album_mixed":
                 if isinstance(it, tuple) and it[0] == "album_title" and isinstance(it[1], Album):
                     a = it[1]
@@ -5218,10 +4289,6 @@ class App:
                         self.stdscr.addstr(yy, px,
                                            f"{a.artist} — {a.title}{ys}"[:pw].ljust(pw)[:pw], base_attr)
                     continue
-                if isinstance(it, Track):
-                    marked = (i in self.marked_left_idx)
-                    self._draw_track_line(yy, x, w, it, selected=selected, marked=marked, idx1=i + 1)
-                    continue
 
             if typ == "liked_mixed":
                 if isinstance(it, tuple) and it[0] == "sep":
@@ -5229,63 +4296,28 @@ class App:
                     offs = self._draw_line_no(yy, x, i + 1, w) if self.show_numbers else 0
                     self.stdscr.addstr(yy, x + offs, line[:max(0, w - offs - 1)].ljust(max(0, w - offs - 1)), self.C(4))
                     continue
-                if isinstance(it, Track):
-                    marked = (i in self.marked_left_idx)
-                    self._draw_track_line(yy, x, w, it, selected=selected, marked=marked, idx1=i + 1)
-                    continue
                 if isinstance(it, Album):
                     yv = year_norm(it.year)
                     ys = f", {yv}" if (self.show_track_year and yv != "????") else ""
-                    base_attr = curses.A_REVERSE if selected else 0
                     marked = (i in self.marked_left_idx)
-                    offs = self._draw_line_no(yy, x, i + 1, w) if self.show_numbers else 0
-                    px = x + offs; pw = max(0, w - offs - 1)
-                    pref = "+  " if marked else "   "
-                    if pw > 0:
-                        self.stdscr.addstr(yy, px, pref[:pw],
-                                           base_attr | (self.C(15) if marked else 0))
-                        px += 3; pw -= 3
-                    if pw > 0:
-                        self.stdscr.addstr(yy, px, "♥ "[:pw], base_attr | self.C(14))
-                        px += 2; pw -= 2
-                    if pw > 0:
-                        self.stdscr.addstr(yy, px,
-                                           f"{it.artist} — {it.title}{ys}"[:pw].ljust(pw)[:pw],
-                                           base_attr | self.C(8))
+                    self._draw_liked_row(yy, x, w, i, selected, marked,
+                                         f"{it.artist} — {it.title}{ys}", self.C(8))
                     continue
                 if isinstance(it, Artist):
-                    base_attr = curses.A_REVERSE if selected else 0
                     marked = (i in self.marked_left_idx)
-                    offs = self._draw_line_no(yy, x, i + 1, w) if self.show_numbers else 0
-                    px = x + offs; pw = max(0, w - offs - 1)
-                    pref = "+  " if marked else "   "
-                    if pw > 0:
-                        self.stdscr.addstr(yy, px, pref[:pw], base_attr | (self.C(15) if marked else 0))
-                        px += 3; pw -= 3
-                    if pw > 0:
-                        self.stdscr.addstr(yy, px, "♥ "[:pw], base_attr | self.C(14))
-                        px += 2; pw -= 2
-                    if pw > 0:
-                        self.stdscr.addstr(yy, px, it.name[:pw].ljust(pw)[:pw],
-                                           base_attr | self.C(7))
+                    self._draw_liked_row(yy, x, w, i, selected, marked, it.name, self.C(7))
                     continue
                 if isinstance(it, str):  # playlist name
                     count = len(self.playlists.get(it, []))
-                    base_attr = curses.A_REVERSE if selected else 0
                     marked = (i in self.marked_left_idx)
-                    offs = self._draw_line_no(yy, x, i + 1, w) if self.show_numbers else 0
-                    px = x + offs; pw = max(0, w - offs - 1)
-                    pref = "+  " if marked else "   "
-                    if pw > 0:
-                        self.stdscr.addstr(yy, px, pref[:pw], base_attr | (self.C(15) if marked else 0))
-                        px += 3; pw -= 3
-                    if pw > 0:
-                        self.stdscr.addstr(yy, px, "♥ "[:pw], base_attr | self.C(14))
-                        px += 2; pw -= 2
-                    if pw > 0:
-                        content = f"{it} ({count} tracks)" if count else it
-                        self.stdscr.addstr(yy, px, content[:pw].ljust(pw)[:pw], base_attr)
+                    content = f"{it} ({count} tracks)" if count else it
+                    self._draw_liked_row(yy, x, w, i, selected, marked, content)
                     continue
+
+            if typ in ("artist_mixed", "album_mixed", "liked_mixed") and isinstance(it, Track):
+                marked = (i in self.marked_left_idx)
+                self._draw_track_line(yy, x, w, it, selected=selected, marked=marked, idx1=i + 1)
+                continue
 
             if typ == "playlists":
                 offs = self._draw_line_no(yy, x, i + 1, w) if self.show_numbers else 0
@@ -5318,8 +4350,7 @@ class App:
         return f" Queue {clamp(self.queue_play_idx + 1, 1, len(self.queue_items))}/{len(self.queue_items)}{pq_info}"
 
     def _draw_queue(self, y: int, x: int, h: int, w: int) -> None:
-        if h <= 1 or w <= 0:
-            return
+        if h <= 1 or w <= 0: return
         total_h = h
         scr_h, scr_w = self.stdscr.getmaxyx()
         if x > 0 and x < scr_w:
@@ -5330,13 +4361,11 @@ class App:
                     pass
         x += 1
         w -= 1
-        if w <= 0:
-            return
+        if w <= 0: return
         self.stdscr.addstr(y, x, self._queue_title()[:max(0, w - 1)].ljust(max(0, w - 1)), self.C(4))
         y += 1
         h -= 1
-        if not self.queue_items:
-            return
+        if not self.queue_items: return
 
         self.queue_cursor = clamp(self.queue_cursor, 0, len(self.queue_items) - 1)
         q_scroll = max(0, self.queue_cursor - h + 1) if self.queue_cursor >= h else 0
@@ -5360,21 +4389,12 @@ class App:
             base_attr = curses.A_REVERSE if selected else 0
             ct = self.current_track
             playing = alive and ct is not None and ct.id == t.id and i == self.queue_play_idx
-            if playing and not pa:
-                pfx_sym = "▶"
-                pfx_color = self.C(1)
-            elif playing and pa:
-                pfx_sym = "⏸"
-                pfx_color = self.C(2)
-            else:
-                pfx_sym = ""
-                pfx_color = 0
+            pfx_sym, pfx_color = ("▶", self.C(1)) if (playing and not pa) else ("⏸", self.C(2)) if (playing and pa) else ("", 0)
 
             offs = self._draw_line_no(yy, x, i + 1, w) if self.show_numbers else 0
             px = x + offs
             pw = w - offs
-            if pw <= 0:
-                continue
+            if pw <= 0: continue
             self.stdscr.addstr(yy, px, " ", base_attr)
             if pw > 1:
                 sym = pfx_sym if pfx_sym else " "
@@ -5391,10 +4411,8 @@ class App:
 
         if self.show_toggles:
             parts = []
-            if self.repeat_mode == 1:
-                parts.append("repeat: all")
-            elif self.repeat_mode == 2:
-                parts.append("repeat: one")
+            if self.repeat_mode:
+                parts.append("repeat: " + ("all" if self.repeat_mode == 1 else "one"))
             if self.shuffle_on:
                 parts.append("shuffle")
             if self.autoplay != AUTOPLAY_OFF:
@@ -5450,33 +4468,8 @@ class App:
 
         self.stdscr.addstr(y + 1, x, line2, self._status_color_pair(pa, alive))
 
-    def _draw_overlay_box(self, title: str, lines: List[str], scroll: int, box_w: int, box_h: int, _erase_bg: bool = True) -> None:
-        h, w = self.stdscr.getmaxyx()
-        box_w = min(w - 6, box_w)
-        box_h = min(h - 6, box_h)
-        y0 = (h - box_h) // 2
-        x0 = (w - box_w) // 2
-        # Erase a 1-cell padding ring outside the box, clearing any sixel pixels
-        # and providing a visible blank margin that separates the popup from the
-        # background.  This is always done (even in the fast path) because
-        # _erase_popup_bg uses raw ANSI writes and doesn't disturb ncurses state.
-        pad_y = max(0, y0 - 1)
-        pad_x = max(0, x0 - 2)
-        pad_h = min(h - pad_y, box_h + 2)
-        pad_w = min(w - pad_x, box_w + 4)
-        self._erase_popup_bg(pad_y, pad_x, pad_h, pad_w)
-        if _erase_bg:
-            for yy in range(pad_y, pad_y + pad_h):
-                try:
-                    self.stdscr.addstr(yy, pad_x, " " * pad_w)
-                except curses.error:
-                    pass
-        win = self.stdscr.derwin(box_h, box_w, y0, x0)
-        win.erase()
-        win.box()
-        win.addstr(0, 2, f" {title} ", self.C(4))
-        inner_h = box_h - 2
-        start = clamp(scroll, 0, max(0, len(lines) - inner_h))
+    def _render_popup_lines(self, win, lines: List[str], start: int, inner_h: int, box_w: int) -> None:
+        """Render lines into a popup window, supporting \\x01 highlighted headers."""
         for i in range(inner_h):
             idx = start + i
             if idx >= len(lines):
@@ -5484,9 +4477,29 @@ class App:
             line = lines[idx]
             if line.startswith("\x01"):
                 text = line[1:][:box_w - 4].ljust(box_w - 4)
-                win.addstr(1 + i, 2, text, curses.color_pair(16))
+                try:
+                    win.addstr(1 + i, 2, text, curses.color_pair(16))
+                except curses.error:
+                    pass
             else:
-                win.addstr(1 + i, 2, line[:box_w - 4])
+                try:
+                    win.addstr(1 + i, 2, line[:box_w - 4])
+                except curses.error:
+                    pass
+
+    def _draw_overlay_box(self, title: str, lines: List[str], scroll: int, box_w: int, box_h: int, _erase_bg: bool = True) -> None:
+        h, w = self.stdscr.getmaxyx()
+        box_w = min(w - 6, box_w)
+        box_h = min(h - 6, box_h)
+        y0 = (h - box_h) // 2
+        x0 = (w - box_w) // 2
+        self._popup_clear_bg(y0, x0, box_h, box_w, _erase_bg)
+        win = self.stdscr.derwin(box_h, box_w, y0, x0)
+        win.erase()
+        win.box()
+        win.addstr(0, 2, f" {title} ", self.C(4))
+        inner_h = box_h - 2
+        self._render_popup_lines(win, lines, clamp(scroll, 0, max(0, len(lines) - inner_h)), inner_h, box_w)
         win.touchwin()  # force full resend so popup is visible over any sixel residue
         win.refresh()
 
@@ -5609,84 +4622,14 @@ class App:
         self._draw_overlay_box("Help  (? or q to close)", lines, self.help_scroll, box_w=97, box_h=box_h)
 
     def _draw_info(self, _erase_bg: bool = True) -> None:
+        title, lines = self._info_lines()
         if self.info_artist and not self.info_track and not self.info_album:
-            ar = self.info_artist
-            lines: List[str] = [f"Artist : {ar.name}", f"ID     : {ar.id}" if ar.id else "", ""]
-            if self.info_loading:
-                lines.append("Loading artist info…")
-            else:
-                payload = self.info_payload or {}
-                if "error" in payload:
-                    lines.append(f"Error: {payload.get('error')}")
-                else:
-                    data = payload.get("data") if isinstance(payload, dict) else payload
-                    if not isinstance(data, dict):
-                        data = payload
-                    if isinstance(data, dict):
-                        for k in ("popularity", "numberOfAlbums", "numberOfTracks",
-                                  "artistTypes", "url"):
-                            if k in data:
-                                lines.append(f"{k}: {data[k]}")
-                    if payload.get("_similar"):
-                        lines.append(f"  [s] browse {len(payload['_similar'])} similar artists")
-            lines = [l for l in lines if l is not None]
-            self._draw_overlay_box("Artist info", lines, self.info_scroll, box_w=76, box_h=20, _erase_bg=_erase_bg)
-            return
-        if self.info_album and not self.info_track:
-            a = self.info_album
-            lines: List[str] = [
-                f"Album  : {a.title}",
-                f"Artist : {a.artist}",
-                f"Year   : {year_norm(a.year)}",
-                f"ID     : {a.id}" if a.id else "",
-                "",
-            ]
-            if self.info_loading:
-                lines.append("Loading album info…")
-            else:
-                payload = self.info_payload or {}
-                if "error" in payload:
-                    lines.append(f"Error: {payload.get('error')}")
-                else:
-                    data = payload.get("data") if isinstance(payload, dict) else payload
-                    if isinstance(data, dict):
-                        for k in ("numberOfTracks", "numberOfVolumes", "releaseDate",
-                                  "audioQuality", "explicit", "upc", "popularity"):
-                            if k in data:
-                                lines.append(f"{k}: {data[k]}")
-            lines = [l for l in lines if l is not None]
-            self._draw_overlay_box("Album info", lines, self.info_scroll, box_w=76, box_h=16, _erase_bg=_erase_bg)
-            return
-
-        t = self.info_track
-        if not t:
-            self._draw_overlay_box("Info", ["(no selection)"], 0, box_w=72, box_h=10, _erase_bg=_erase_bg)
-            return
-        lines = [
-            f"Title   : {t.title}",
-            f"Artist  : {t.artist}" + (f" (id {t.artist_id})" if t.artist_id else ""),
-            f"Album   : {t.album}" + (f" (id {t.album_id})" if t.album_id else ""),
-        ]
-        yv = self._track_year(t)
-        if yv != "????":
-            lines.append(f"Year    : {yv}")
-        dv = self._track_duration(t)
-        if dv:
-            lines.append(f"Duration: {fmt_dur(dv)}")
-        lines += [f"Track id: {t.id}", f"Liked   : {'yes' if self.is_liked(t.id) else 'no'}", ""]
-        if self.info_loading:
-            lines.append("Loading /info…")
+            self._draw_overlay_box(title, lines, self.info_scroll, box_w=76, box_h=20, _erase_bg=_erase_bg)
+        elif self.info_album and not self.info_track:
+            self._draw_overlay_box(title, lines, self.info_scroll, box_w=76, box_h=16, _erase_bg=_erase_bg)
         else:
-            payload = self.info_payload or {}
-            if "error" in payload:
-                lines.append(f"Error: {payload.get('error')}")
-            else:
-                data = payload.get("data") if isinstance(payload, dict) else None
-                if isinstance(data, dict):
-                    for k in ("audioQuality", "explicit", "popularity", "streamReady"):
-                        if k in data:
-                            lines.append(f"{k}: {data.get(k)}")
-        self._draw_overlay_box("Track info", lines, self.info_scroll, box_w=76, box_h=16, _erase_bg=_erase_bg)
+            box_h = 10 if not self.info_track else 20
+            self._draw_overlay_box(title, lines, self.info_scroll, box_w=72, box_h=box_h, _erase_bg=_erase_bg)
 
     def _draw_lyrics(self, _erase_bg: bool = True) -> None:
         t_id = self.lyrics_track_id
@@ -5705,6 +4648,22 @@ class App:
         self._lyrics_overlay_max_scroll = max(0, len(lines) - inner_h)
         self._draw_overlay_box(title[:80], lines, self.lyrics_scroll, box_w=84, box_h=30, _erase_bg=_erase_bg)
 
+    def _draw_liked_row(self, yy: int, x: int, w: int, i: int, selected: bool, marked: bool,
+                        content: str, color: int = 0) -> None:
+        """Draw a liked-item row: line_no + mark prefix + ♥ + content."""
+        base_attr = curses.A_REVERSE if selected else 0
+        offs = self._draw_line_no(yy, x, i + 1, w) if self.show_numbers else 0
+        px = x + offs; pw = max(0, w - offs - 1)
+        pref = "+  " if marked else "   "
+        if pw > 0:
+            self.stdscr.addstr(yy, px, pref[:pw], base_attr | (self.C(15) if marked else 0))
+            px += 3; pw -= 3
+        if pw > 0:
+            self.stdscr.addstr(yy, px, "♥ "[:pw], base_attr | self.C(14))
+            px += 2; pw -= 2
+        if pw > 0:
+            self.stdscr.addstr(yy, px, content[:pw].ljust(pw)[:pw], base_attr | color)
+
     def _draw_liked_filter_bar(self, y: int, x: int, w: int) -> None:
         FILTER_LABELS = ["Allᴹ⁻¹", "Tracksᴹ⁻²", "Artistsᴹ⁻³", "Albumsᴹ⁻⁴", "Playlistsᴹ⁻⁵"]
         self.stdscr.addstr(y, x, " " * max(0, w - 1), self.C(4))
@@ -5720,8 +4679,7 @@ class App:
                 cx += 2
 
     def draw(self) -> None:
-        if not self._need_redraw:
-            return
+        if not self._need_redraw: return
 
         h, w = self.stdscr.getmaxyx()
         top_h = 3 if self.tab == TAB_LIKED else 2
@@ -5816,6 +4774,15 @@ class App:
     # ---------------------------------------------------------------------------
     # tab switching
     # ---------------------------------------------------------------------------
+    def _goto_liked_filter(self, f: int) -> None:
+        """Switch to (or stay on) the Liked tab and select the given filter index."""
+        if self.tab != TAB_LIKED:
+            self.switch_tab(TAB_LIKED, refresh=False)
+            self.fetch_liked_async()
+        self.liked_filter = f
+        self._reset_left_cursor()
+        self.toast(f"Liked: {LIKED_FILTER_NAMES[f]}")
+
     def switch_tab(self, t: int, refresh: bool = True) -> None:
         # save current tab position before switching
         self._tab_positions[self.tab] = (self.left_idx, self.left_scroll)
@@ -5840,15 +4807,11 @@ class App:
         if not fresh_fetch and t in self._tab_positions:
             self.left_idx, self.left_scroll = self._tab_positions[t]
         else:
-            self.left_idx = 0
-            self.left_scroll = 0
+            self._reset_left_cursor()
 
-        if t == TAB_RECOMMENDED and refresh:
+        if t in (TAB_RECOMMENDED, TAB_MIX) and refresh:
             ctx = self._selected_left_track() or self.current_track
-            self.fetch_recommended_async(ctx)
-        elif t == TAB_MIX and refresh:
-            ctx = self._selected_left_track() or self.current_track
-            self.fetch_mix_async(ctx)
+            (self.fetch_recommended_async if t == TAB_RECOMMENDED else self.fetch_mix_async)(ctx)
         elif t == TAB_LIKED and refresh:
             self.fetch_liked_async()
         elif t == TAB_ARTIST and refresh:
@@ -5858,15 +4821,12 @@ class App:
             self.playlist_names = sorted(self.playlists.keys())
             self.playlist_view_name = None
             self.playlist_view_tracks = []
-        elif t == TAB_HISTORY:
-            pass  # history_tracks always up to date
         elif t == TAB_COVER:
             self.fetch_cover_async(self.current_track)
             if self.queue_overlay:
                 self.jump_to_playing_in_queue()
 
-        self._need_redraw = True
-        self._redraw_status_only = False
+        self._full_redraw()
 
     # ---------------------------------------------------------------------------
     # navigation
@@ -5904,8 +4864,7 @@ class App:
             self.queue_overlay = True
         self.focus = "queue"
         self.queue_cursor = clamp(self.queue_play_idx, 0, len(self.queue_items) - 1)
-        self._need_redraw = True
-        self._redraw_status_only = False
+        self._full_redraw()
 
     # ---------------------------------------------------------------------------
     # main loop
@@ -5930,6 +4889,107 @@ class App:
             if _resume_pos > 1.0:
                 self.toast(f"Resumed from {fmt_time(_resume_pos)}")
 
+        def _mk_ctrl(names, fallback=()):
+            def _check(c):
+                try: return curses.keyname(c) in names
+                except Exception: return c in fallback
+            return _check
+        _is_ctrl_right = _mk_ctrl((b"kRIT5", b"kRIT3"), (444, 560))
+        _is_ctrl_left  = _mk_ctrl((b"kLFT5", b"kLFT3"), (443, 545))
+        _is_ctrl_down  = _mk_ctrl((b"kDN5", b"kDN3"))
+        _is_ctrl_up    = _mk_ctrl((b"kUP5", b"kUP3"))
+
+        def _gkey(t: Track) -> tuple:
+            return (year_norm(t.year), t.album.lower())
+
+        def _alb_down(lst: list, cur: int) -> int:
+            if not (0 <= cur < len(lst)) or not isinstance(lst[cur], Track):
+                return cur
+            key = _gkey(lst[cur])
+            i = cur + 1
+            while i < len(lst) and isinstance(lst[i], Track):
+                if _gkey(lst[i]) != key:
+                    return i
+                i += 1
+            return cur
+
+        def _alb_up(lst: list, cur: int) -> int:
+            if not (0 <= cur < len(lst)) or not isinstance(lst[cur], Track):
+                return cur
+            key = _gkey(lst[cur])
+            i = cur - 1
+            while i >= 0 and isinstance(lst[i], Track) and _gkey(lst[i]) == key:
+                i -= 1
+            start = i + 1
+            if start < cur:
+                return start
+            if i >= 0 and isinstance(lst[i], Track):
+                prev_key = _gkey(lst[i])
+                while i > 0 and isinstance(lst[i - 1], Track) and _gkey(lst[i - 1]) == prev_key:
+                    i -= 1
+                return i
+            return cur
+
+        def _tog(attr: str, on: str, off: str) -> None:
+            v = not getattr(self, attr)
+            setattr(self, attr, v)
+            self.toast(on if v else off)
+
+        def _skip(d: int) -> None:
+            self._skip_delta += d
+            self._skip_at = time.time()
+
+        _DISPATCH: Dict[int, Any] = {
+            ord("i"): self.toggle_info_selected,
+            ord("I"): self.toggle_info_playing,
+            ord("P"): self.play_track_with_resume,
+            ord("z"): self.jump_to_playing_in_queue,
+            ord("B"): self.clear_priority_queue,
+            ord("u"): self.unmark_all_current_view,
+            ord("U"): self.mark_all_current_view,
+            ord("m"): self.mute_toggle,
+            ord("l"): self.like_selected,
+            ord("L"): self.like_playing,
+            ord("*"): self.like_popup_from_playing,
+            ord(":"): self.context_actions_popup,
+            ord("!"): self.context_actions_popup,
+            ord("-"): lambda: self.volume_add(-2.0),
+            ord("+"): lambda: self.volume_add(2.0),
+            ord("="): lambda: self.volume_add(2.0),
+            curses.KEY_LEFT: lambda: self.seek_rel(-5.0),
+            curses.KEY_RIGHT: lambda: self.seek_rel(5.0),
+            getattr(curses, "KEY_SLEFT", -999): lambda: self.seek_rel(-30.0),
+            getattr(curses, "KEY_SRIGHT", -999): lambda: self.seek_rel(30.0),
+            ord("/"): self.do_search_prompt_anywhere,
+            ord(" "): self.toggle_mark_and_advance,
+            ord("a"): self.playlists_add_from_context,
+            ord("0"): lambda: self.switch_tab(TAB_COVER),
+            ord("e"): lambda: self.enqueue_key(insert_after_playing=False),
+            ord("E"): lambda: self.enqueue_key(insert_after_playing=True),
+            ord("R"): lambda: (setattr(self, "repeat_mode", (self.repeat_mode + 1) % 3),
+                               self.toast(["Repeat: off", "Repeat: all", "Repeat: one"][self.repeat_mode])),
+            ord("S"): lambda: _tog("shuffle_on", "Shuffle: on", "Shuffle: off"),
+            ord("F"): lambda: (setattr(self, "quality_idx", (self.quality_idx + 1) % len(QUALITY_ORDER)),
+                               self.toast(f"Quality: {QUALITY_ORDER[self.quality_idx]}")),
+            ord("T"): lambda: _tog("show_toggles", "Toggles: on", "Toggles: off"),
+            ord("c"): lambda: _tog("color_mode", "Color", "B/W"),
+            ord("w"): lambda: _tog("show_track_album", "Album field: on", "Album field: off"),
+            ord("y"): lambda: _tog("show_track_year", "Year field: on", "Year field: off"),
+            ord("<"): lambda: _skip(-1),
+            ord(","): lambda: _skip(-1),
+            ord(">"): lambda: _skip(+1),
+            ord("."): lambda: _skip(+1),
+            ord("\\"): lambda: _tog("tab_align", "TSV: on", "TSV: off"),
+            ord("f"): lambda: self.lyrics_filter_prompt() if self.tab == TAB_COVER and self._cover_lyrics and not self.queue_overlay else self.filter_prompt(),
+            ord("("): lambda: self.lyrics_filter_next(-1) if self.tab == TAB_COVER and self._cover_lyrics and not self.queue_overlay else self.filter_next(-1),
+            ord(")"): lambda: self.lyrics_filter_next(1) if self.tab == TAB_COVER and self._cover_lyrics and not self.queue_overlay else self.filter_next(+1),
+            ord("p"): lambda: self.play_queue_index(self.queue_play_idx) if not self.mp.alive() and self.queue_items else self.toggle_pause(),
+            ord(";"): lambda: self.switch_tab(self._prev_tab, refresh=False) if self._prev_tab != self.tab else None,
+            ord("n"): lambda: self.playlists_create() if self.tab == TAB_PLAYLISTS else _tog("show_numbers", "Line numbers: on", "Line numbers: off"),
+            ord("d"): lambda: self.playlists_delete_current() if self.tab == TAB_PLAYLISTS else _tog("show_track_duration", "Duration field: on", "Duration field: off"),
+            ord("D"): lambda: self.playlists_download_prompt() if self.tab == TAB_PLAYLISTS else None,
+        }
+
         while True:
             now = time.time()
 
@@ -5940,57 +5000,17 @@ class App:
 
             self._do_info_fetch_if_due()
 
-            if self.info_overlay and self.info_follow_selection:
-                if self._queue_context():
-                    _qt = self._current_selection_track()
-                    if _qt and (self.info_track is None or _qt.id != self.info_track.id):
-                        self._request_info_refresh(_qt)
-                else:
-                    _it = self._selected_left_item()
-                    if isinstance(_it, Artist):
-                        if self.info_artist is None or self.info_artist.id != _it.id:
-                            self.open_info_artist(_it)
-                    elif isinstance(_it, tuple) and _it[0] == "artist_header":
-                        _ar = Artist(id=_it[1][0], name=_it[1][1])
-                        if self.info_artist is None or self.info_artist.id != _ar.id:
-                            self.open_info_artist(_ar)
-                    elif isinstance(_it, Album):
-                        if self.info_album is None or self.info_album.id != _it.id:
-                            self.open_info_album(_it)
-                    elif isinstance(_it, tuple) and _it[0] == "album_title" and isinstance(_it[1], Album):
-                        _alb = _it[1]
-                        if self.info_album is None or self.info_album.id != _alb.id:
-                            self.open_info_album(_alb)
-                    else:
-                        _t = self._current_selection_track()
-                        if _t and (self.info_track is None or _t.id != self.info_track.id):
-                            self._request_info_refresh(_t)
 
             if self.current_track and not self.mp.alive():
                 tp, du, pa, vo, mu = self.mp.snapshot()
                 if tp is None and du is None:
                     self.current_track = None
                     self.next_track()
-                    self._need_redraw = True
-                    self._redraw_status_only = False
+                    self._full_redraw()
 
             if now - last_persist > 2.0:
                 last_persist = now
-                self.settings.update({
-                    "volume": self.desired_volume, "mute": self.desired_mute,
-                    "color_mode": self.color_mode, "queue_overlay": self.queue_overlay,
-                    "show_toggles": self.show_toggles, "show_numbers": self.show_numbers,
-                    "show_track_album": self.show_track_album, "show_track_year": self.show_track_year,
-                    "show_track_duration": self.show_track_duration,
-                    "quality": QUALITY_ORDER[self.quality_idx],
-                    "autoplay": self.autoplay, "initial_tab": self.tab,
-                    "tab_align": self.tab_align,
-                    "include_singles_and_eps_in_artist_tab": self._show_singles_eps,
-                })
-                try:
-                    save_settings(self.settings)
-                except Exception:
-                    pass
+                self._persist_settings()
 
             # Debounced prev/next skip: accumulate rapid keypresses and jump
             # directly to the final target track after a 150 ms pause.
@@ -6013,8 +5033,7 @@ class App:
                 time.sleep(0.004)
                 continue
 
-            self._need_redraw = True
-            self._redraw_status_only = False
+            self._full_redraw()
 
             if ch == 27:
                 # Peek for an escape sequence or Alt+digit
@@ -6056,28 +5075,12 @@ class App:
                 elif _c2 != -1:
                     curses.ungetch(_c2)  # not a recognised sequence — put it back
                 if _ctrl_digit:
-                    _LIKED_FILTER_NAMES = ["All", "Tracks", "Artists", "Albums", "Playlists"]
                     if 1 <= _ctrl_digit <= 5:
-                        _lsub = _ctrl_digit - 1
-                        if self.tab != TAB_LIKED:
-                            self.switch_tab(TAB_LIKED, refresh=False)
-                            self.fetch_liked_async()
-                        self.liked_filter = _lsub
-                        self.left_idx = 0
-                        self.left_scroll = 0
-                        self.toast(f"Liked: {_LIKED_FILTER_NAMES[_lsub]}")
-                        self._need_redraw = True
+                        self._goto_liked_filter(_ctrl_digit - 1)
                     elif _ctrl_digit == 7:
-                        if self.tab != TAB_LIKED:
-                            self.switch_tab(TAB_LIKED, refresh=False)
-                            self.fetch_liked_async()
-                            self.toast(f"Liked: {_LIKED_FILTER_NAMES[self.liked_filter]}")
-                        else:
-                            self.liked_filter = (self.liked_filter + 1) % len(_LIKED_FILTER_NAMES)
-                            self.left_idx = 0
-                            self.left_scroll = 0
-                            self.toast(f"Liked: {_LIKED_FILTER_NAMES[self.liked_filter]}")
-                        self._need_redraw = True
+                        self._goto_liked_filter(
+                            (self.liked_filter + 1) % len(LIKED_FILTER_NAMES)
+                            if self.tab == TAB_LIKED else self.liked_filter)
                     continue
                 # Plain ESC: dismiss overlays
                 if self.show_help:
@@ -6102,43 +5105,21 @@ class App:
                 continue
 
             if self.show_help:
-                if ch in (27, ord("?"), ord("Q"), ord("q")):
-                    self.show_help = False
-                elif ch in (curses.KEY_DOWN, ord("j")):
-                    self.help_scroll = min(self.help_scroll + 1, max(0, getattr(self, "_help_max_scroll", 10_000)))
-                elif ch in (curses.KEY_UP, ord("k")):
-                    self.help_scroll = max(0, self.help_scroll - 1)
-                elif ch == curses.KEY_PPAGE:
-                    self.help_scroll = max(0, self.help_scroll - self._page_step())
-                elif ch == curses.KEY_NPAGE:
-                    self.help_scroll = min(self.help_scroll + self._page_step(), max(0, getattr(self, "_help_max_scroll", 10_000)))
-                elif ch in (curses.KEY_HOME, ord("g")):
-                    self.help_scroll = 0
-                elif ch in (curses.KEY_END, ord("G")):
-                    self.help_scroll = max(0, getattr(self, "_help_max_scroll", 10_000))
+                _hmax = max(0, getattr(self, "_help_max_scroll", 10_000)); _p = self._page_step()
+                if ch in (27, ord("?"), ord("Q"), ord("q")): self.show_help = False
+                elif ch in (curses.KEY_DOWN, ord("j")): self.help_scroll = min(self.help_scroll + 1, _hmax)
+                elif ch in (curses.KEY_UP, ord("k")): self.help_scroll = max(0, self.help_scroll - 1)
+                elif ch == curses.KEY_PPAGE: self.help_scroll = max(0, self.help_scroll - _p)
+                elif ch == curses.KEY_NPAGE: self.help_scroll = min(self.help_scroll + _p, _hmax)
+                elif ch in (curses.KEY_HOME, ord("g")): self.help_scroll = 0
+                elif ch in (curses.KEY_END, ord("G")): self.help_scroll = _hmax
                 continue
 
-            if ch == ord("/"):
-                self.do_search_prompt_anywhere()
-                continue
-            if ch == ord("f"):
-                if self.tab == TAB_COVER and self._cover_lyrics and not self.queue_overlay:
-                    self.lyrics_filter_prompt()
-                else:
-                    self.filter_prompt()
-                continue
-            if ch == ord("("):
-                if self.tab == TAB_COVER and self._cover_lyrics and not self.queue_overlay:
-                    self.lyrics_filter_next(-1)
-                else:
-                    self.filter_next(-1)
-                continue
-            if ch == ord(")"):
-                if self.tab == TAB_COVER and self._cover_lyrics and not self.queue_overlay:
-                    self.lyrics_filter_next(1)
-                else:
-                    self.filter_next(+1)
-                continue
+            if isinstance(ch, int):
+                _fn = _DISPATCH.get(ch)
+                if _fn is not None:
+                    _fn()
+                    continue
 
             # V in cover tab:
             #   - If miniqueue is open → close it and show lyrics (one action, no toggle).
@@ -6170,13 +5151,6 @@ class App:
                 _vt = self.current_track
                 if _vt:
                     self.show_lyrics_dialog(_vt)
-                continue
-
-            if ch == ord("i"):
-                self.toggle_info_selected()
-                continue
-            if ch == ord("I"):
-                self.toggle_info_playing()
                 continue
 
             if ch == ord("s"):
@@ -6231,15 +5205,6 @@ class App:
                     self.open_url(f"{self.web_base()}/track/{self.current_track.id}")
                 continue
 
-            if ch == ord("P"):
-                self.play_track_with_resume()
-                continue
-
-            if ch == ord("\\"):
-                self.tab_align = not self.tab_align
-                self.toast("TSV: on" if self.tab_align else "TSV: off")
-                continue
-
             if ch == ord("q"):
                 self.queue_overlay = not self.queue_overlay
                 if not self.queue_overlay and self.focus == "queue":
@@ -6253,25 +5218,9 @@ class App:
                 self.focus = "queue" if self.focus == "left" else "left"
                 continue
 
-            # Tab switching: 0-9
-            if ch == ord("0"):
-                self.switch_tab(TAB_COVER)
-                continue
-
-            if ch in (ord("1"), ord("2"), ord("3"), ord("4"),
-                      ord("5"), ord("6"), ord("7"), ord("8"), ord("9")):
-                mapping = {
-                    ord("1"): TAB_SEARCH,
-                    ord("2"): TAB_QUEUE,
-                    ord("3"): TAB_RECOMMENDED,
-                    ord("4"): TAB_MIX,
-                    ord("5"): TAB_ARTIST,
-                    ord("6"): TAB_ALBUM,
-                    ord("7"): TAB_LIKED,
-                    ord("8"): TAB_PLAYLISTS,
-                    ord("9"): TAB_HISTORY,
-                }
-                t_num = mapping[ch]
+            # Tab switching: 1-9 (keys "1"-"9" map directly to TAB_SEARCH..TAB_HISTORY = 1..9)
+            if ord("1") <= ch <= ord("9"):
+                t_num = ch - ord("0")
                 if t_num == TAB_RECOMMENDED:
                     if self.tab == TAB_COVER:
                         self.switch_tab(TAB_RECOMMENDED)
@@ -6288,27 +5237,21 @@ class App:
                     else:
                         it = self._selected_left_item() if not self._queue_context() else None
                         ctx = self._current_selection_track()
+                        self.switch_tab(TAB_MIX, refresh=False)
                         if isinstance(it, Album):
-                            self.switch_tab(TAB_MIX, refresh=False)
                             self.fetch_mix_from_album_async(it)
                         elif isinstance(it, Artist):
-                            self.switch_tab(TAB_MIX, refresh=False)
                             self.fetch_mix_from_artist_async(it)
                         elif isinstance(it, tuple) and it[0] == "artist_header":
-                            self.switch_tab(TAB_MIX, refresh=False)
                             self.fetch_mix_from_artist_async(Artist(id=it[1][0], name=it[1][1]))
                         elif ctx:
-                            self.switch_tab(TAB_MIX, refresh=False)
                             self.fetch_mix_async(ctx)
-                        else:
-                            self.switch_tab(TAB_MIX, refresh=False)
 
                 elif t_num == TAB_ARTIST:
                     if self.tab == TAB_COVER:
                         self.switch_tab(TAB_ARTIST)
                         continue
-                    if self.tab == TAB_ARTIST and not self._queue_context():
-                        continue
+                    if self.tab == TAB_ARTIST and not self._queue_context(): continue
                     if not self._queue_context() and self.tab == TAB_ALBUM and self.album_header:
                         self._open_artist_from_album_async(self.album_header)
                         continue
@@ -6340,19 +5283,6 @@ class App:
                     self.switch_tab(t_num, refresh=True)
                 continue
 
-            if ch == ord("z"):
-                self.jump_to_playing_in_queue()
-                continue
-
-            if ch == ord("a"):
-                self.playlists_add_from_context()
-                continue
-
-            if ch == ord("n") and self.tab != TAB_PLAYLISTS:
-                self.show_numbers = not self.show_numbers
-                self.toast("Line numbers: on" if self.show_numbers else "Line numbers: off")
-                continue
-
             if ch == ord("b"):
                 if self._queue_context() and self.queue_items:
                     idx = clamp(self.queue_cursor, 0, len(self.queue_items) - 1)
@@ -6365,63 +5295,6 @@ class App:
                         self.toggle_priority(new_idx)
                 continue
 
-            if ch == ord("B"):
-                self.clear_priority_queue()
-                continue
-
-            if ch == ord("u"):
-                self.unmark_all_current_view()
-                continue
-            if ch == ord("U"):
-                self.mark_all_current_view()
-                continue
-
-            # Playback
-            if ch == ord("p"):
-                if not self.mp.alive() and self.queue_items:
-                    self.play_queue_index(self.queue_play_idx)
-                else:
-                    self.toggle_pause()
-                continue
-            if ch == ord("m"):
-                self.mute_toggle()
-                continue
-            if ch == ord("-"):
-                self.volume_add(-2.0)
-                continue
-            if ch in (ord("+"), ord("=")):
-                self.volume_add(2.0)
-                continue
-            if ch == curses.KEY_LEFT:
-                self.seek_rel(-5.0)
-                continue
-            if ch == curses.KEY_RIGHT:
-                self.seek_rel(5.0)
-                continue
-            if ch == getattr(curses, "KEY_SLEFT", -999):
-                self.seek_rel(-30.0)
-                continue
-            if ch == getattr(curses, "KEY_SRIGHT", -999):
-                self.seek_rel(30.0)
-                continue
-
-            if ch in (ord("<"), ord(",")):
-                self._skip_delta -= 1
-                self._skip_at = time.time()
-                continue
-            if ch in (ord(">"), ord(".")):
-                self._skip_delta += 1
-                self._skip_at = time.time()
-                continue
-
-            if ch == ord("R"):
-                self.repeat_mode = (self.repeat_mode + 1) % 3
-                self.toast(["Repeat: off", "Repeat: all", "Repeat: one"][self.repeat_mode])
-                continue
-            if ch == ord("S"):
-                self.shuffle_on = not self.shuffle_on
-                self.toast("Shuffle: on" if self.shuffle_on else "Shuffle: off")
-                continue
             if ch == ord("A"):
                 self.autoplay = (self.autoplay + 1) % 3
                 self.toast(f"Autoplay: {AUTOPLAY_NAMES[self.autoplay]}")
@@ -6433,55 +5306,13 @@ class App:
                 if self.autoplay != AUTOPLAY_OFF:
                     self._autoplay_trigger_prefetch()
                 continue
-            if ch == ord("F"):
-                self.quality_idx = (self.quality_idx + 1) % len(QUALITY_ORDER)
-                self.toast(f"Quality: {QUALITY_ORDER[self.quality_idx]}")
-                continue
             if ch == ord("#"):
                 self._show_singles_eps = not self._show_singles_eps
                 self.settings["include_singles_and_eps_in_artist_tab"] = self._show_singles_eps
                 self.toast(f"Singles/EPs: {'on' if self._show_singles_eps else 'off'}")
                 if self.tab == TAB_ARTIST and self._last_artist_fetch_track:
                     self.fetch_artist_async(self._last_artist_fetch_track)
-                self._need_redraw = True
-                self._redraw_status_only = False
-                continue
-            if ch == ord("T"):
-                self.show_toggles = not self.show_toggles
-                self.toast("Toggles: on" if self.show_toggles else "Toggles: off")
-                continue
-            if ch == ord("c"):
-                self.color_mode = not self.color_mode
-                self.toast("Color" if self.color_mode else "B/W")
-                continue
-            if ch == ord("w"):
-                self.show_track_album = not self.show_track_album
-                self.toast("Album field: on" if self.show_track_album else "Album field: off")
-                continue
-            if ch == ord("y"):
-                self.show_track_year = not self.show_track_year
-                self.toast("Year field: on" if self.show_track_year else "Year field: off")
-                continue
-            if ch == ord("d") and self.tab != TAB_PLAYLISTS:
-                self.show_track_duration = not self.show_track_duration
-                self.toast("Duration field: on" if self.show_track_duration else "Duration field: off")
-                continue
-
-            if ch == ord("l"):
-                self.like_selected()
-                continue
-            if ch == ord("L"):
-                self.like_playing()
-                continue
-            if ch == ord("*"):
-                self.like_popup_from_playing()
-                continue
-            if ch in (ord(":"), ord("!")):
-                self.context_actions_popup()
-                continue
-            if ch == ord(";"):
-                if self._prev_tab != self.tab:
-                    self.switch_tab(self._prev_tab, refresh=False)
+                self._full_redraw()
                 continue
             if ch in (curses.KEY_BACKSPACE, 127, 8):
                 if not (self.tab == TAB_PLAYLISTS and self.playlist_view_name is not None):
@@ -6490,28 +5321,14 @@ class App:
                     continue
                 # falls through to the TAB_PLAYLISTS block to exit playlist view
             if ch in (ord("["), ord("]")) and self.tab == TAB_LIKED:
-                _LIKED_FILTER_NAMES = ["All", "Tracks", "Artists", "Albums", "Playlists"]
                 delta = 1 if ch == ord("]") else -1
-                self.liked_filter = (self.liked_filter + delta) % len(_LIKED_FILTER_NAMES)
-                self.left_idx = 0
-                self.left_scroll = 0
-                self.toast(f"Liked: {_LIKED_FILTER_NAMES[self.liked_filter]}")
+                self._goto_liked_filter((self.liked_filter + delta) % len(LIKED_FILTER_NAMES))
                 continue
 
             # Ctrl+Left/Ctrl+Right: cycle through all tabs including Liked subtabs
             # Sequence: Queue Search Recommended Mix Artist Album
             #           Liked/All Liked/Tracks Liked/Artists Liked/Albums Liked/Playlists
             #           Playlists History  (wraps)
-            def _is_ctrl_right(c: int) -> bool:
-                try:
-                    return curses.keyname(c) in (b"kRIT5", b"kRIT3")
-                except Exception:
-                    return c in (444, 560)
-            def _is_ctrl_left(c: int) -> bool:
-                try:
-                    return curses.keyname(c) in (b"kLFT5", b"kLFT3")
-                except Exception:
-                    return c in (443, 545)
             if isinstance(ch, int) and (_is_ctrl_left(ch) or _is_ctrl_right(ch)):
                 _NAV_SEQ = [
                     (TAB_QUEUE, 0), (TAB_SEARCH, 0),
@@ -6528,62 +5345,15 @@ class App:
                 delta = 1 if _is_ctrl_right(ch) else -1
                 nxt_tab, nxt_f = _NAV_SEQ[(cur_pos + delta) % len(_NAV_SEQ)]
                 if nxt_tab == TAB_LIKED:
-                    # Switch to liked tab and set filter without full refresh
-                    if self.tab != TAB_LIKED:
-                        self.switch_tab(TAB_LIKED, refresh=False)
-                        self.fetch_liked_async()
-                    self.liked_filter = nxt_f
-                    self.left_idx = 0
-                    self.left_scroll = 0
-                    _LIKED_FILTER_NAMES = ["All", "Tracks", "Artists", "Albums", "Playlists"]
-                    self.toast(f"Liked: {_LIKED_FILTER_NAMES[nxt_f]}")
+                    self._goto_liked_filter(nxt_f)
                 else:
                     self.switch_tab(nxt_tab, refresh=True)
-                self._need_redraw = True
+                    self._need_redraw = True
                 continue
 
             # Ctrl+Down/Ctrl+Up: jump between album groups/sections
-            def _is_ctrl_down(c: int) -> bool:
-                try: return curses.keyname(c) in (b"kDN5", b"kDN3")
-                except Exception: return False
-            def _is_ctrl_up(c: int) -> bool:
-                try: return curses.keyname(c) in (b"kUP5", b"kUP3")
-                except Exception: return False
             if isinstance(ch, int) and (_is_ctrl_down(ch) or _is_ctrl_up(ch)):
                 _dir = 1 if _is_ctrl_down(ch) else -1
-
-                # Group key for album-boundary detection: (year, album)
-                def _gkey(t: Track) -> tuple:
-                    return (year_norm(t.year), t.album.lower())
-
-                def _alb_down(lst: list, cur: int) -> int:
-                    if not (0 <= cur < len(lst)) or not isinstance(lst[cur], Track):
-                        return cur
-                    key = _gkey(lst[cur])
-                    i = cur + 1
-                    while i < len(lst) and isinstance(lst[i], Track):
-                        if _gkey(lst[i]) != key:
-                            return i
-                        i += 1
-                    return cur  # no next group
-
-                def _alb_up(lst: list, cur: int) -> int:
-                    if not (0 <= cur < len(lst)) or not isinstance(lst[cur], Track):
-                        return cur
-                    key = _gkey(lst[cur])
-                    i = cur - 1
-                    while i >= 0 and isinstance(lst[i], Track) and _gkey(lst[i]) == key:
-                        i -= 1
-                    start = i + 1
-                    if start < cur:
-                        return start  # jump to start of current group
-                    if i >= 0 and isinstance(lst[i], Track):
-                        prev_key = _gkey(lst[i])
-                        while i > 0 and isinstance(lst[i - 1], Track) and _gkey(lst[i - 1]) == prev_key:
-                            i -= 1
-                        return i
-                    return cur  # no prev group
-
                 if self._queue_context():
                     # Jump between album groups in queue
                     _q = self.queue_items
@@ -6661,36 +5431,14 @@ class App:
                     self._need_redraw = True
                 continue
 
-            if ch == ord(" "):
-                self.toggle_mark_and_advance()
-                continue
-
-            if ch == ord("e"):
-                self.enqueue_key(insert_after_playing=False)
-                continue
-            if ch == ord("E"):
-                self.enqueue_key(insert_after_playing=True)
-                continue
-
             if self.tab == TAB_PLAYLISTS:
-                if ch == ord("n"):
-                    self.playlists_create()
-                    continue
-                if ch == ord("d"):
-                    self.playlists_delete_current()
-                    continue
-                if ch == ord("a"):
-                    self.playlists_add_from_context()
-                    continue
                 if ch in (curses.KEY_BACKSPACE, 127, 8):
                     if self.playlist_view_name is not None:
                         self.playlist_view_name = None
                         self.playlist_view_tracks = []
                         self.playlist_names = sorted(self.playlists.keys())
-                        self.left_idx = 0
-                        self.left_scroll = 0
-                        self._need_redraw = True
-                        self._redraw_status_only = False
+                        self._reset_left_cursor()
+                        self._full_redraw()
                     continue
                 if ch == ord("x") and self.playlist_view_name is not None:
                     pname = self.playlist_view_name
@@ -6707,9 +5455,7 @@ class App:
                     self.marked_left_idx.clear()
                     self.left_idx = clamp(self.left_idx, 0, max(0, len(self.playlist_view_tracks) - 1))
                     save_playlists(self.playlists, self.playlists_meta)
-                    self.toast("Removed from playlist")
-                    self._need_redraw = True
-                    self._redraw_status_only = False
+                    self._toast_redraw("Removed from playlist")
                     continue
 
             if ch == ord("x") and self._queue_context():
@@ -6742,68 +5488,27 @@ class App:
                         self.queue_cursor = 0
                     self.marked_queue_idx.clear()
                     self.priority_queue.clear()
-                    self.toast("Queue cleared")
-                    self._need_redraw = True
-                    self._redraw_status_only = False
+                    self._toast_redraw("Queue cleared")
                 continue
 
             if ch in (ord("J"), ord("K")):
-                if not self.queue_items:
-                    continue
+                if not self.queue_items: continue
                 delta = +1 if ch == ord("J") else -1
                 idxs = sorted([i for i in self.marked_queue_idx if 0 <= i < len(self.queue_items)])
                 if not idxs:
                     i = clamp(self.queue_cursor, 0, len(self.queue_items) - 1)
                     j = i + delta
                     if 0 <= j < len(self.queue_items):
-                        self.queue_items[i], self.queue_items[j] = self.queue_items[j], self.queue_items[i]
-                        pi, pj = self._priority_index_of(i), self._priority_index_of(j)
-                        if pi > 0:
-                            self.priority_queue[pi - 1] = j
-                        if pj > 0:
-                            self.priority_queue[pj - 1] = i
+                        self._swap_queue_items(i, j)
                         self.queue_cursor = j
-                        if self.queue_play_idx == i:
-                            self.queue_play_idx = j
-                        elif self.queue_play_idx == j:
-                            self.queue_play_idx = i
                     continue
 
                 s = set(idxs)
-                if delta < 0:
-                    for i in idxs:
-                        j = i - 1
-                        if j < 0 or j in s:
-                            continue
-                        self.queue_items[j], self.queue_items[i] = self.queue_items[i], self.queue_items[j]
-                        pi, pj = self._priority_index_of(i), self._priority_index_of(j)
-                        if pi > 0:
-                            self.priority_queue[pi - 1] = j
-                        if pj > 0:
-                            self.priority_queue[pj - 1] = i
-                        s.discard(i)
-                        s.add(j)
-                        if self.queue_play_idx == i:
-                            self.queue_play_idx = j
-                        elif self.queue_play_idx == j:
-                            self.queue_play_idx = i
-                else:
-                    for i in reversed(idxs):
-                        j = i + 1
-                        if j >= len(self.queue_items) or j in s:
-                            continue
-                        self.queue_items[j], self.queue_items[i] = self.queue_items[i], self.queue_items[j]
-                        pi, pj = self._priority_index_of(i), self._priority_index_of(j)
-                        if pi > 0:
-                            self.priority_queue[pi - 1] = j
-                        if pj > 0:
-                            self.priority_queue[pj - 1] = i
-                        s.discard(i)
-                        s.add(j)
-                        if self.queue_play_idx == i:
-                            self.queue_play_idx = j
-                        elif self.queue_play_idx == j:
-                            self.queue_play_idx = i
+                for i in (idxs if delta < 0 else reversed(idxs)):
+                    j = i + delta
+                    if 0 <= j < len(self.queue_items) and j not in s:
+                        self._swap_queue_items(i, j)
+                        s.discard(i); s.add(j)
                 self.marked_queue_idx = s
                 m = sorted(s)
                 if m:
@@ -6812,13 +5517,8 @@ class App:
 
             if ch == ord("D"):
                 if not self._queue_context():
-                    marked_albums = self._marked_albums_from_left()
-                    marked_artists = self._marked_artists_from_left()
-                    marked_playlists = self._marked_playlists_from_left()
-                    marked_albums, marked_artists, marked_playlists, _cancelled = \
-                        self._resolve_batch_conflict(marked_albums, marked_artists, marked_playlists)
-                    if _cancelled:
-                        continue
+                    marked_albums, marked_artists, marked_playlists, _cancelled = self._marked_batch()
+                    if _cancelled: continue
                     if marked_albums:
                         self._download_marked_albums_async(marked_albums)
                         continue
@@ -6826,10 +5526,7 @@ class App:
                         self._download_marked_artists_async(marked_artists)
                         continue
                     if marked_playlists:
-                        all_tracks: List[Track] = []
-                        for pl in marked_playlists:
-                            all_tracks.extend(self.playlists.get(pl, []))
-                        self.start_download_tracks(all_tracks)
+                        self.start_download_tracks(self._tracks_from_playlists(marked_playlists))
                         continue
                 if not self._queue_context() and self.tab == TAB_ALBUM and self._selected_album_title_line():
                     self.start_download_tracks(list(self.album_tracks))
@@ -6837,49 +5534,26 @@ class App:
                 if not self._queue_context() and self.tab == TAB_ARTIST:
                     alb = self._selected_left_album()
                     if alb:
-                        def worker_dl() -> None:
-                            try:
-                                aid = self._resolve_album_id_for_album(alb)
-                                if not aid:
-                                    self.toast("Album id?")
-                                    return
-                                self.start_download_tracks(self._fetch_album_tracks_by_album_id(aid))
-                            except Exception:
-                                self.toast("Error")
-                        threading.Thread(target=worker_dl, daemon=True).start()
+                        self._bg_download_album(alb)
                         continue
                 if self.tab == TAB_PLAYLISTS and self.playlist_view_name is not None:
                     self.start_download_tracks(list(self.playlist_view_tracks))
                     continue
-                if self._queue_context():
-                    tracks = self._marked_tracks_from_queue() or ([self._queue_selected_track()] if self._queue_selected_track() else [])
-                else:
-                    tracks = self._marked_tracks_from_left() or ([self._selected_left_track()] if self._selected_left_track() else [])
-                self.start_download_tracks([t for t in tracks if t])
+                self.start_download_tracks(self._target_tracks())
                 continue
 
             # In the cover tab with the inline lyrics panel (no queue overlay, no
             # full-screen overlay), intercept navigation keys to scroll the panel.
-            if (self.tab == TAB_COVER and self._cover_lyrics
-                    and not self.queue_overlay):
-                _lmax = self._cover_lyrics_max_scroll
-                if ch in (curses.KEY_DOWN, ord("j"), 14):
-                    self.lyrics_scroll = min(self.lyrics_scroll + 1, _lmax)
-                    continue
-                if ch in (curses.KEY_UP, ord("k"), 16):
-                    self.lyrics_scroll = max(0, self.lyrics_scroll - 1)
-                    continue
-                if ch == curses.KEY_PPAGE:
-                    self.lyrics_scroll = max(0, self.lyrics_scroll - self._page_step())
-                    continue
-                if ch == curses.KEY_NPAGE:
-                    self.lyrics_scroll = min(self.lyrics_scroll + self._page_step(), _lmax)
-                    continue
-                if ch in (curses.KEY_HOME, ord("g")):
-                    self.lyrics_scroll = 0
-                    continue
-                if ch in (curses.KEY_END, ord("G")):
-                    self.lyrics_scroll = _lmax
+            if (self.tab == TAB_COVER and self._cover_lyrics and not self.queue_overlay):
+                _lmax = self._cover_lyrics_max_scroll; _p = self._page_step()
+                _nv = (min(self.lyrics_scroll + 1, _lmax) if ch in (curses.KEY_DOWN, ord("j"), 14) else
+                       max(0, self.lyrics_scroll - 1) if ch in (curses.KEY_UP, ord("k"), 16) else
+                       max(0, self.lyrics_scroll - _p) if ch == curses.KEY_PPAGE else
+                       min(self.lyrics_scroll + _p, _lmax) if ch == curses.KEY_NPAGE else
+                       0 if ch in (curses.KEY_HOME, ord("g")) else
+                       _lmax if ch in (curses.KEY_END, ord("G")) else None)
+                if _nv is not None:
+                    self.lyrics_scroll = _nv
                     continue
 
             # Navigation
@@ -6895,24 +5569,15 @@ class App:
             if ch in (curses.KEY_END, ord("G")):
                 self.nav_end()
                 continue
-            if ch in (curses.KEY_DOWN, ord("j")):
+            if ch in (curses.KEY_DOWN, ord("j"), curses.KEY_UP, ord("k")):
+                d = 1 if ch in (curses.KEY_DOWN, ord("j")) else -1
                 if self._queue_context():
-                    self.queue_cursor = clamp(self.queue_cursor + 1, 0, max(0, len(self.queue_items) - 1))
+                    self.queue_cursor = clamp(self.queue_cursor + d, 0, max(0, len(self.queue_items) - 1))
                 else:
                     _typ, items = self._left_items()
-                    new_idx = self.left_idx + 1
-                    while new_idx < len(items) and isinstance(items[new_idx], tuple) and items[new_idx][0] == "sep":
-                        new_idx += 1
-                    self.left_idx = clamp(new_idx, 0, max(0, len(items) - 1))
-                continue
-            if ch in (curses.KEY_UP, ord("k")):
-                if self._queue_context():
-                    self.queue_cursor = clamp(self.queue_cursor - 1, 0, max(0, len(self.queue_items) - 1))
-                else:
-                    _typ, items = self._left_items()
-                    new_idx = self.left_idx - 1
-                    while new_idx >= 0 and isinstance(items[new_idx], tuple) and items[new_idx][0] == "sep":
-                        new_idx -= 1
+                    new_idx = self.left_idx + d
+                    while (0 <= new_idx < len(items)) and isinstance(items[new_idx], tuple) and items[new_idx][0] == "sep":
+                        new_idx += d
                     self.left_idx = clamp(new_idx, 0, max(0, len(items) - 1))
                 continue
 
@@ -6945,39 +5610,22 @@ class App:
                 continue
 
         # Cleanup
+        for _fn in (lambda: save_queue(self.queue_items, self.queue_play_idx),
+                    self._save_liked,
+                    lambda: save_playlists(self.playlists, self.playlists_meta)):
+            try:
+                _fn()
+            except Exception:
+                pass
         try:
-            save_queue(self.queue_items, self.queue_play_idx)
-        except Exception:
-            pass
-        try:
-            self._save_liked()
-        except Exception:
-            pass
-        try:
-            save_playlists(self.playlists, self.playlists_meta)
-        except Exception:
-            pass
-        try:
-            _exit_settings: Dict[str, Any] = {
-                "volume": self.desired_volume, "mute": self.desired_mute,
-                "color_mode": self.color_mode, "queue_overlay": self.queue_overlay,
-                "show_toggles": self.show_toggles, "show_numbers": self.show_numbers,
-                "show_track_album": self.show_track_album, "show_track_year": self.show_track_year,
-                "show_track_duration": self.show_track_duration,
-                "quality": QUALITY_ORDER[self.quality_idx],
-                "autoplay": self.autoplay, "initial_tab": self.tab,
-                "tab_align": self.tab_align,
-                "include_singles_and_eps_in_artist_tab": self._show_singles_eps,
-            }
             if self.current_track and self.mp.alive():
                 _tp, _du, _pa, _vo, _mu = self.mp.snapshot()
                 if _tp is not None and _tp > 1.0:
-                    _exit_settings["_resume_queue_idx"] = self.queue_play_idx
-                    _exit_settings["_resume_position"] = float(_tp)
-            self.settings.update(_exit_settings)
-            save_settings(self.settings)
+                    self.settings["_resume_queue_idx"] = self.queue_play_idx
+                    self.settings["_resume_position"] = float(_tp)
         except Exception:
             pass
+        self._persist_settings()
         self.meta.stop()
         self.mp_poller.stop()
         self.mp.stop()

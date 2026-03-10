@@ -191,6 +191,7 @@ class App:
         self._cover_lyrics: bool = True; self._cover_lyrics_max_scroll: int = 10_000
         self._show_singles_eps: bool = bool(self.settings.get("include_singles_and_eps_in_artist_tab", False))
         self._last_artist_fetch_track: Optional["Track"] = None
+        self._artist_cache: Dict[int, Tuple[List[Any], List[Any], Tuple[int, str]]] = {}
 
         self._skip_delta: int = 0; self._skip_at: float = 0.0
         self.filter_q = ""; self.filter_hits: List[int] = []; self.filter_pos = -1  # not persisted
@@ -3101,6 +3102,11 @@ class App:
 
     def fetch_artist_async(self, ctx: Optional[Track]) -> None:
         if not ctx: self.toast("No context"); return
+        # Early-exit if the same artist is already loaded (by known artist_id)
+        if (ctx.artist_id and ctx.artist_id in self._artist_cache and
+                self.artist_ctx and self.artist_ctx[0] == ctx.artist_id):
+            self._last_artist_fetch_track = ctx
+            return
         self._last_artist_fetch_track = ctx
         self.artist_albums, self.artist_tracks = [], []
         self.artist_ctx = None
@@ -3115,6 +3121,17 @@ class App:
                 self._full_redraw()
             aid = (ctx.artist_id or self.meta.artist_id.get(ctx.id) or
                    self._resolve_artist_id_via_track(Artist(id=0, name=ctx.artist, track_id=ctx.id)))
+
+            # Cache hit after resolving aid
+            if aid and int(aid) in self._artist_cache:
+                cached_albums, cached_tracks, cached_ctx = self._artist_cache[int(aid)]
+                self.artist_albums = cached_albums
+                self.artist_tracks = cached_tracks
+                self.artist_ctx = cached_ctx
+                self._loading_key = ""
+                self._loading = False
+                self._full_redraw()
+                return
 
             albums: List[Album] = []
             raw_tracks: List[Track] = []
@@ -3166,6 +3183,8 @@ class App:
             if aid:
                 self.artist_ctx = (int(aid), ctx.artist)
             _commit_tracks()
+            if aid:
+                self._artist_cache[int(aid)] = (self.artist_albums, self.artist_tracks, self.artist_ctx)
             self.toast("Artist")
 
         self._bg(worker, loading_key=key, on_error="Error", record_error=True)

@@ -183,7 +183,7 @@ class App:
 
         # Cover tab state
         self.cover_track: Optional[Track] = None; self.cover_path: Optional[str] = None; self.cover_loading: bool = False
-        self._cover_backend_cache: Optional[str] = None   # "ueberzugpp"/"chafa"/"none"
+        self._cover_backend_cache: Optional[str] = None   # "ueberzugpp"/"chafa-kitty"/"chafa"/"none"
         self._cover_render_key: str = ""           # "path:WxH" to detect when re-render needed
         self._cover_render_buf: Optional[bytes] = None    # cached chafa/ANSI output
         self._cover_sixel_visible: bool = False; self._cover_sixel_cols: int = 0
@@ -2587,13 +2587,30 @@ class App:
     # Cover tab
     # ---------------------------------------------------------------------------
 
+    def _supports_kitty_protocol(self) -> bool:
+        """Return True if the terminal claims to support the Kitty graphics protocol."""
+        term      = os.environ.get("TERM", "")
+        term_prog = os.environ.get("TERM_PROGRAM", "")
+        return (
+            term == "xterm-kitty"
+            or "KITTY_WINDOW_ID" in os.environ
+            or term_prog in ("WezTerm", "ghostty", "iTerm.app")
+        )
+
     def _cover_backend(self) -> str:
-        """Detect the best available image rendering backend (cached)."""
+        """Detect the best available image rendering backend (cached).
+
+        Priority: ueberzugpp > chafa-kitty (Kitty graphics protocol) > chafa (sixel) > none.
+        chafa-kitty is preferred over sixel because the Kitty protocol renders images
+        in the terminal's compositor layer, so ncurses redraws cannot overwrite them.
+        """
         if self._cover_backend_cache is None:
             if shutil.which("ueberzugpp"):
                 self._cover_backend_cache = "ueberzugpp"
             elif shutil.which("chafa"):
-                self._cover_backend_cache = "chafa"
+                self._cover_backend_cache = (
+                    "chafa-kitty" if self._supports_kitty_protocol() else "chafa"
+                )
             else:
                 self._cover_backend_cache = "none"
         return self._cover_backend_cache
@@ -2764,7 +2781,8 @@ class App:
         """Pre-render cover image with chafa in the background download thread.
         Populates _cover_render_buf/_cover_render_key so the main thread can
         write the image instantly without running chafa again."""
-        if self._cover_backend() != "chafa":
+        backend = self._cover_backend()
+        if backend not in ("chafa", "chafa-kitty"):
             return
         try:
             h, w = self.stdscr.getmaxyx()
@@ -2775,10 +2793,11 @@ class App:
         img_rows = h - top_h - status_h - 1  # -1 matches _render_cover_image gap
         img_cols = self._cover_img_cols(w)
         if img_rows <= 0 or img_cols <= 0: return
-        render_key = f"{path}:{img_cols}x{img_rows}:chafa"
+        fmt = "kitty" if backend == "chafa-kitty" else "sixel"
+        render_key = f"{path}:{img_cols}x{img_rows}:{fmt}"
         try:
             result = subprocess.run(
-                ["chafa", "--format=sixel", f"--size={img_cols}x{img_rows}", path],
+                ["chafa", f"--format={fmt}", f"--size={img_cols}x{img_rows}", path],
                 capture_output=True, timeout=8,
             )
             if result.returncode != 0 or not result.stdout:
@@ -2812,7 +2831,8 @@ class App:
         img_cols = self._cover_img_cols(w)
         if img_rows <= 0 or img_cols <= 0: return
 
-        render_key = f"{self.cover_path}:{img_cols}x{img_rows}:{backend}"
+        chafa_fmt = "kitty" if backend == "chafa-kitty" else "sixel"
+        render_key = f"{self.cover_path}:{img_cols}x{img_rows}:{chafa_fmt}"
 
         if backend == "ueberzugpp":
             if not self._ueberzug_start(): return
@@ -2824,17 +2844,26 @@ class App:
             self._cover_sixel_cols = img_cols
             return
 
-        # chafa path: cache rendered bytes, re-run only on change.
-        # Skip the write entirely when the sixel is already on screen and nothing
-        # changed — avoids the visible flash on every progress-tick redraw.
+        is_kitty = backend == "chafa-kitty"
+
+        # Kitty: always delete any existing image before rendering.  This covers
+        # both size changes (V key, lyrics panel, queue overlay) and re-renders
+        # after popups.  The delete is a single short escape and is harmless when
+        # no image is present.
+        if is_kitty:
+            sys.stdout.buffer.write(b"\033_Ga=d,d=A\033\\")
+            sys.stdout.buffer.flush()
+
+        # chafa/chafa-kitty path: cache rendered bytes, re-run only on content/size change.
+        # Sixel: always re-send because ncurses wipes the area on every refresh.
         if render_key == self._cover_render_key and self._cover_render_buf:
-            if not self._cover_sixel_visible:
-                self._write_image_to_terminal(top_h, self._cover_render_buf, img_cols)
+            self._write_image_to_terminal(top_h, self._cover_render_buf, img_cols,
+                                          kitty=is_kitty)
             return
 
         try:
             result = subprocess.run(
-                ["chafa", "--format=sixel", f"--size={img_cols}x{img_rows}",
+                ["chafa", f"--format={chafa_fmt}", f"--size={img_cols}x{img_rows}",
                  self.cover_path],
                 capture_output=True, timeout=8,
             )
@@ -2848,16 +2877,29 @@ class App:
             if result.returncode == 0 and result.stdout:
                 self._cover_render_buf = result.stdout
                 self._cover_render_key = render_key
-                self._write_image_to_terminal(top_h, result.stdout, img_cols)
+                self._write_image_to_terminal(top_h, result.stdout, img_cols,
+                                              kitty=is_kitty)
         except Exception as e:
             debug_log(f"chafa render error: {e}")
 
-    def _write_image_to_terminal(self, top_row: int, data: bytes, cols: int = 0) -> None:
+    @staticmethod
+    def _kitty_set_z_below(data: bytes) -> bytes:
+        """Inject z=-1 into the first Kitty APC sequence so the image renders
+        below terminal text, letting ncurses popups/panels appear on top of it."""
+        idx = data.find(b"\033_G")
+        if idx == -1:
+            return data
+        return data[:idx + 3] + b"z=-1," + data[idx + 3:]
+
+    def _write_image_to_terminal(self, top_row: int, data: bytes, cols: int = 0,
+                                  kitty: bool = False) -> None:
         """Write image data (sixel or ANSI) directly to the terminal at the given row."""
         # Strip trailing newlines — chafa often appends one, and writing a newline
         # when the cursor is near the bottom of the terminal causes the terminal to
         # scroll, shifting the cover image and corrupting the layout.
         data = data.rstrip(b"\r\n")
+        if kitty:
+            data = self._kitty_set_z_below(data)
         # Save cursor, move to content area, write image, restore cursor
         sys.stdout.buffer.write(
             b"\0337"                                          # save cursor (VT100)
@@ -2871,24 +2913,30 @@ class App:
             self._cover_sixel_cols = cols
 
     def _cover_erase_terminal(self) -> None:
-        """Overwrite the image area with spaces before a full curses redraw.
-        Needed because some terminals don't clear sixel/ANSI pixels when curses
-        paints over them (e.g. during popup overlays or tab switches)."""
+        """Remove the cover image from the terminal before a full curses redraw."""
         if not self._cover_sixel_visible: return
-        h, w = self.stdscr.getmaxyx()
-        top_h = 2
-        status_h = 2
-        img_rows = h - top_h - status_h
-        # Only erase the columns that were actually covered by the last sixel.
-        img_cols = self._cover_sixel_cols if self._cover_sixel_cols > 0 else w
-        if img_rows > 0 and img_cols > 0:
-            blank_line = b" " * img_cols
-            buf = b"".join(
-                f"\033[{top_h + 1 + r};1H".encode() + blank_line
-                for r in range(img_rows)
-            )
-            sys.stdout.buffer.write(buf)
+        if self._cover_backend() == "chafa-kitty":
+            # Kitty graphics protocol: send delete-all-placements command.
+            # This removes all compositor-managed images instantly without
+            # needing to overwrite cell regions with spaces.
+            sys.stdout.buffer.write(b"\033_Ga=d,d=A\033\\")
             sys.stdout.buffer.flush()
+        else:
+            # Sixel/symbols: overwrite the image area with spaces because some
+            # terminals don't clear sixel pixels when curses paints over them.
+            h, w = self.stdscr.getmaxyx()
+            top_h = 2
+            status_h = 2
+            img_rows = h - top_h - status_h
+            img_cols = self._cover_sixel_cols if self._cover_sixel_cols > 0 else w
+            if img_rows > 0 and img_cols > 0:
+                blank_line = b" " * img_cols
+                buf = b"".join(
+                    f"\033[{top_h + 1 + r};1H".encode() + blank_line
+                    for r in range(img_rows)
+                )
+                sys.stdout.buffer.write(buf)
+                sys.stdout.buffer.flush()
         self._cover_sixel_visible = False
 
     def _lyrics_panel_w(self, w: int) -> int:
@@ -2912,9 +2960,16 @@ class App:
         h, w = self.stdscr.getmaxyx()
         y0 = (h - box_h) // 2
         x0 = (w - box_w) // 2
+        # For kitty backend: delete the compositor image before drawing the popup
+        # so it appears on a clean background.  The image is restored on next redraw.
+        if self._cover_sixel_visible and self._cover_backend() == "chafa-kitty":
+            sys.stdout.buffer.write(b"\033_Ga=d,d=A\033\\")
+            sys.stdout.buffer.flush()
+            self._cover_sixel_visible = False
         self._popup_clear_bg(y0, x0, box_h, box_w)
         win = self.stdscr.derwin(box_h, box_w, y0, x0)
         win.keypad(True)
+        win.bkgd(' ', self.C(0))
         return y0, x0, win
 
     def _popup_refresh(self, y0: int, x0: int, box_h: int, box_w: int) -> None:
@@ -2932,9 +2987,12 @@ class App:
         pad_h = min(h - pad_y, box_h + 2); pad_w = min(w - pad_x, box_w + 4)
         self._erase_popup_bg(pad_y, pad_x, pad_h, pad_w)
         if _erase_bg:
+            # Use pair 16 (white on black) — the only explicitly non-default-bg pair —
+            # so popup background cells are opaque when a kitty z=-1 image is beneath.
+            bg_attr = self.C(0)
             for yy in range(pad_y, pad_y + pad_h):
                 try:
-                    self.stdscr.addstr(yy, pad_x, " " * pad_w)
+                    self.stdscr.addstr(yy, pad_x, " " * pad_w, bg_attr)
                 except curses.error:
                     pass
 
@@ -3701,6 +3759,7 @@ class App:
 
             threading.Thread(target=_worker, daemon=True).start()
 
+        self._hide_cover_for_popup = True # Specific line to hide cover when the lyrics popup (v) is visible
         self._need_redraw = True
         self.draw()
         h, w = self.stdscr.getmaxyx()
@@ -3761,6 +3820,7 @@ class App:
                        max_scroll if ch in (curses.KEY_END, ord("G")) else None)
                 if _nv is not None: scroll = _nv
         finally:
+            self._hide_cover_for_popup = False # Specific line to hide cover when the lyrics popup (v) is visible
             self.stdscr.nodelay(True)
             self._full_redraw()
 
@@ -4704,11 +4764,18 @@ class App:
         top_h = 3 if self.tab == TAB_LIKED else 2
         status_h = 2
         usable_h = h - top_h - status_h
+        hide_cover = getattr(self, "_hide_cover_for_popup", False) # Specific line to hide cover when the lyrics popup (v) is visible
 
         if self._redraw_status_only and not self.show_help:
             self._draw_status(h - status_h, 0, w)
-            self.stdscr.noutrefresh()
-            curses.doupdate()
+            sys.stdout.buffer.write(b"\033[?2026h")
+            sys.stdout.buffer.flush()
+            try:
+                self.stdscr.noutrefresh()
+                curses.doupdate()
+            finally:
+                sys.stdout.buffer.write(b"\033[?2026l")
+                sys.stdout.buffer.flush()
             self._need_redraw = False
             self._redraw_status_only = False
             return
@@ -4721,7 +4788,7 @@ class App:
         # while curses repaints the UI chrome — the new cover is written after
         # stdscr.refresh(), and overlays are drawn on top of it afterwards.
         # On any other tab (or if cover_path is unset), erase any stale sixel first.
-        if not (self.tab == TAB_COVER and self.cover_path):
+        if hide_cover or not (self.tab == TAB_COVER and self.cover_path): # Specific line to hide cover when the lyrics popup (v) is visible
             self._cover_erase_terminal()
         # Full redraw: stdscr.erase()+refresh() will overwrite the sixel area with
         # spaces, so mark it as no longer visible.  This ensures _render_cover_image
@@ -4759,33 +4826,31 @@ class App:
             # rewrites each cell individually on the next refresh instead of
             # issuing ESC[S/ESC[T sequences that shift the sixel image.
             self.stdscr.redrawln(top_h, usable_h)
-        self.stdscr.refresh()
 
-        # After curses has refreshed, write the cover sixel.  Overlays (info,
-        # lyrics, help) are drawn AFTER the sixel so they appear on top of it.
-        # _draw_overlay_box calls _erase_popup_bg + win.touchwin() to ensure the
-        # popup area is clear and its content is fully resent over the sixel.
-        if self.tab == TAB_COVER and self.cover_path and not self.show_help:
-            # _cover_sixel_visible was cleared at the top of this full-redraw path
-            # (see below), so _render_cover_image will always re-write the sixel
-            # after a full stdscr.erase()+refresh().  The flag is only kept True
-            # during status-only redraws so those skip the expensive write.
-            self._render_cover_image()
-            # Re-assert the tab-bar and status-bar rows so that any scroll
-            # artifacts are overwritten.  redrawln tells ncurses the physical
-            # terminal content of those rows is corrupted (by the sixel write)
-            # and forces a full character-cell repaint on the next refresh —
-            # unlike touchline which ncurses may optimise away when it thinks
-            # curscr already has the right content.
-            if self._cover_sixel_visible:
-                self.stdscr.redrawln(0, top_h)
-                # Cover includes a one-row gap at h-status_h-1 to prevent the
-                # sixel from touching the terminal's last few rows (some terminals
-                # auto-scroll when sixel data reaches the bottom edge).  When a
-                # panel scrolls UP the displaced sixel lands on that gap row, so
-                # include it (status_h+1 rows) to ensure it is fully repainted.
-                self.stdscr.redrawln(h - status_h - 1, status_h + 1)
-                self.stdscr.refresh()
+        # Synchronized output (DEC mode 2026): tells the terminal to buffer all
+        # output until the ESU marker, presenting the entire frame atomically.
+        # Harmless on terminals that don't support it (unknown sequences ignored).
+        sys.stdout.buffer.write(b"\033[?2026h")
+        sys.stdout.buffer.flush()
+        try:
+            self.stdscr.refresh()
+
+            # After curses has refreshed, write the cover image.  Overlays (info,
+            # lyrics, help) are drawn AFTER the image so they appear on top of it.
+            if self.tab == TAB_COVER and self.cover_path and not self.show_help and not hide_cover:
+                # _cover_sixel_visible was cleared at the top of this full-redraw
+                # path, so _render_cover_image always re-writes after erase+refresh.
+                self._render_cover_image()
+                # Re-assert tab-bar and status-bar rows: the image write corrupts
+                # the terminal's physical view of those rows, so redrawln forces
+                # ncurses to fully repaint them on the next refresh.
+                if self._cover_sixel_visible:
+                    self.stdscr.redrawln(0, top_h)
+                    self.stdscr.redrawln(h - status_h - 1, status_h + 1)
+                    self.stdscr.refresh()
+        finally:
+            sys.stdout.buffer.write(b"\033[?2026l")
+            sys.stdout.buffer.flush()
 
         if self.show_help:
             self._draw_help()

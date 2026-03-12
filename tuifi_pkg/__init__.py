@@ -1,8 +1,8 @@
 """tuifi package — a TUI music player for TIDAL HiFi API."""
 
 APP_NAME = "tuifi"
-VERSION = "1.3.5"
-DEFAULT_API = "https://api.monochrome.tf"
+VERSION = "1.4.0"
+DEFAULT_API = ""
 
 TAB_SEARCH      = 1
 TAB_QUEUE       = 2

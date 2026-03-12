@@ -176,28 +176,58 @@ def load_settings() -> Dict[str, Any]:
     s = load_json(SETTINGS_FILE, {})
     if not isinstance(s, dict):
         s = {}
+
+    # -------------------------------------------------------------------------
+    # Runtime state — written automatically by the app on exit / during use.
+    # These keys are valid in settings.json but are not intended for manual
+    # editing; their values are overwritten every session.
+    # -------------------------------------------------------------------------
+    s.setdefault("_resume_position", 0.0)       # playback position (seconds) at last exit
+    s.setdefault("_resume_queue_idx", 0)        # queue index at last exit
+    s.setdefault("initial_tab", TAB_QUEUE)      # last active tab (restored on startup)
+    s.setdefault("initial_filter", "")          # last active filter string (restored on startup)
+
+    # -------------------------------------------------------------------------
+    # User-editable settings — safe to change in settings.json.
+    # -------------------------------------------------------------------------
+
+    # -- API --
+    s.setdefault("api", "")                     # API base URL; overrides the compiled-in default
+
+    # -- Audio --
     s.setdefault("volume", 100)
     s.setdefault("mute", False)
+    s.setdefault("quality", QUALITY_ORDER[0])   # e.g. "lossless", "high", "low"
+
+    # -- Playback / autoplay --
+    s.setdefault("autoplay", AUTOPLAY_OFF)      # 0=off 1=mix 2=recommended
+    s.setdefault("autoplay_n", 3)               # tracks added per autoplay refill
+    s.setdefault("auto_resume_playback", True)  # resume last position on startup
+
+    # -- UI chrome --
     s.setdefault("color_mode", True)
     s.setdefault("queue_overlay", False)
     s.setdefault("show_toggles", True)
     s.setdefault("show_track_album", True)
     s.setdefault("show_track_year", True)
     s.setdefault("show_track_duration", True)
-    s.setdefault("quality", QUALITY_ORDER[0])
-    s.setdefault("autoplay", AUTOPLAY_OFF)
-    s.setdefault("autoplay_n", 3)
-    s.setdefault("history_max", 0)
     s.setdefault("show_numbers", False)
-    s.setdefault("initial_tab", TAB_QUEUE)
-    s.setdefault("initial_filter", "")
     s.setdefault("tab_align", True)
-    s.setdefault("tsv_max_col_width", 32)
-    s.setdefault("tsv_max_artist_width", 25)
-    s.setdefault("tsv_max_title_width", 0)
-    s.setdefault("tsv_max_album_width", 0)
-    s.setdefault("tsv_max_year_width", 6)
-    s.setdefault("tsv_max_duration_width", 6)
+
+    # -- History --
+    s.setdefault("history_max", 0)              # 0 = unlimited
+
+    # -- Artist tab --
+    s.setdefault("include_singles_and_eps_in_artist_tab", False)  # toggle with #
+
+    # -- Confirmation prompts when switching to a tab that already has content --
+    # Set to true to skip the "press again to confirm" step and fetch immediately.
+    s.setdefault("recommended_tab_no_confirm_refetch", False)
+    s.setdefault("mix_tab_no_confirm_refetch", False)
+    s.setdefault("artist_tab_no_confirm_refetch", False)
+    s.setdefault("album_tab_no_confirm_refetch", False)
+
+    # -- Colors (name or 0-255 terminal color index) --
     s.setdefault("color_playing",   "green")
     s.setdefault("color_paused",    "yellow")
     s.setdefault("color_error",     "red")
@@ -212,11 +242,20 @@ def load_settings() -> Dict[str, Any]:
     s.setdefault("color_separator", "white")
     s.setdefault("color_liked",     "white")
     s.setdefault("color_mark",      "red")
+
+    # -- Downloads --
     s.setdefault("download_dir", _default_downloads_dir())
     s.setdefault("download_structure", "{artist}/{artist} - {album} ({year})")
     s.setdefault("download_filename", "{track:02d}. {artist} - {title}")
-    s.setdefault("include_singles_and_eps_in_artist_tab", False)
-    s.setdefault("auto_resume_playback", False)
+
+    # -- TSV display widths (0 = unlimited) --
+    s.setdefault("tsv_max_col_width", 32)
+    s.setdefault("tsv_max_artist_width", 25)
+    s.setdefault("tsv_max_title_width", 0)
+    s.setdefault("tsv_max_album_width", 0)
+    s.setdefault("tsv_max_year_width", 6)
+    s.setdefault("tsv_max_duration_width", 6)
+
     return s
 
 

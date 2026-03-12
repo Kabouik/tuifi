@@ -930,7 +930,7 @@ class App:
 
     def _dedupe_albums(self, albums: List[Album]) -> List[Album]:
         # Key by (artist, title, year) so that different-ID editions of the
-        # same album are collapsed into one entry (matching Monochrome.tf behaviour).
+        # same album are collapsed into one entry.
         best: Dict[Tuple[str, str, str], Album] = {}
         for a in albums:
             k = (
@@ -1101,12 +1101,12 @@ class App:
             if getattr(self, "_artist_pending_ctx", None):
                 _ar = self._artist_pending_ctx
                 items.append(("pending_refetch_hint",
-                              f'Press 5 again to refetch data for artist "{_ar.artist}".'))
+                              f'Press 5 again to refetch data for artist [{_ar.artist}]'))
                 items.append(("pending_refetch_hint", ""))
             if self.artist_ctx:
                 items.append(("artist_header", self.artist_ctx))
             if self.artist_albums:
-                _sep_hint = "), press # to exclude singles/EPs" if self._show_singles_eps else "), press # to include singles/EPs"
+                _sep_hint = "), incl. singles/EPs (#: toggle)" if self._show_singles_eps else "), excl. singles/EPs (#: toggle)"
                 alb_label = f"Albums ({len(self.artist_albums)}" + ("…" if self._loading else "") + _sep_hint
                 items.append(("sep", alb_label))
                 items.extend(self.artist_albums)
@@ -1120,7 +1120,7 @@ class App:
             if getattr(self, "_album_pending_ctx", None):
                 _alp = self._album_pending_ctx
                 items.append(("pending_refetch_hint",
-                              f'Press 6 again to refetch album for "{_alp.artist} - {_alp.album}".'))
+                              f'Press 6 again to refetch data for album [{_alp.artist} - {_alp.album}]'))
                 items.append(("pending_refetch_hint", ""))
             if self.album_header:
                 items.append(("album_title", self.album_header))
@@ -3012,12 +3012,27 @@ class App:
         return y0, x0, win
 
     def _popup_refresh(self, y0: int, x0: int, box_h: int, box_w: int) -> None:
-        """Handle _need_redraw inside a popup loop: redraw background if not status-only."""
-        if not self._redraw_status_only:
+        """Handle _need_redraw inside a popup loop: redraw background if not status-only.
+
+        Intentionally does NOT clear _need_redraw after a full redraw so the
+        popup loop immediately redraws its own content in the same iteration
+        (avoiding a blank-popup flicker frame between draw() and win.refresh()).
+        For status-only redraws _need_redraw is cleared normally since those
+        don't erase the screen and the popup is still visible.
+        """
+        if self._redraw_status_only:
+            # Status-only: background not erased, popup still visible — safe to clear.
+            self._need_redraw = False
+            self._redraw_status_only = False
+        else:
+            # Full redraw: draw() erases the screen. Leave _need_redraw = True so
+            # the popup loop falls through to redraw its own content immediately
+            # in the same iteration, before the next _get_wch_int() call.
+            self._redraw_status_only = False
             self.draw()
             self._popup_clear_bg(y0, x0, box_h, box_w)
-        self._need_redraw = False
-        self._redraw_status_only = False
+            # Now clear it — popup will redraw content below in the same pass.
+            self._need_redraw = False
 
     def _popup_clear_bg(self, y0: int, x0: int, box_h: int, box_w: int, _erase_bg: bool = True) -> None:
         """Erase popup background (sixel + spaces)."""
@@ -3440,7 +3455,8 @@ class App:
                         self.left_idx = clamp(_ni, 0, max(0, len(_items) - 1))
                     info_scroll = 0
                     self._update_info_for_selection()
-                    self._full_redraw()
+                    self._need_redraw = True
+                    self._redraw_status_only = True
                 else:
                     _p = self._page_step()
                     _nv = (max(0, info_scroll - _p) if ch == curses.KEY_PPAGE else
@@ -3874,15 +3890,19 @@ class App:
         self.playlist_view_name = None
         q = self.prompt_text("Search:", self.search_q)
         if q is None: return
-        self.switch_tab(TAB_SEARCH, refresh=False)
         self.search_q = q
-        self.search_results = []
-        self._reset_left_cursor()
         self.last_error = None
         try:
             payload = self.client.search_tracks(self.search_q, limit=260)
-            self.search_results = self._extract_tracks_from_search(payload)
-            self.toast(f"{len(self.search_results)} results")
+            results = self._extract_tracks_from_search(payload)
+            if results:
+                self.search_results = results
+                self.switch_tab(TAB_SEARCH, refresh=False)
+                self._reset_left_cursor()
+                self.toast(f"{len(self.search_results)} results")
+            else:
+                self.search_results = []
+                self.toast("0 results")
         except Exception as e:
             self.last_error = str(e)
             self._toast_redraw("Error")
@@ -4373,10 +4393,18 @@ class App:
                                            base_attr | self.C(7) | curses.A_BOLD)
                     continue
                 if isinstance(it, tuple) and it[0] == "sep":
-                    line = f"──── {it[1]} ──" if self.tab_align else f"── {it[1]} ──"
+                    line = f"──── {it[1]}" if self.tab_align else f"── {it[1]}"
                     offs = self._draw_line_no(yy, x, i + 1, w) if self.show_numbers else 0
-                    self.stdscr.addstr(yy, x + offs, line[:max(0, w - offs - 1)].ljust(max(0, w - offs - 1)),
-                                       self.C(4))
+                    avail = max(0, w - offs - 1)
+                    _TOGGLE_SUFFIX = "(#: toggle)"
+                    _suf_idx = line.find(_TOGGLE_SUFFIX)
+                    if self.tab == TAB_ARTIST and _suf_idx != -1 and _suf_idx < avail:
+                        prefix = line[:_suf_idx].ljust(_suf_idx)
+                        suffix = line[_suf_idx:avail]
+                        self.stdscr.addstr(yy, x + offs, prefix[:avail], self.C(4))
+                        self.stdscr.addstr(yy, x + offs + _suf_idx, suffix, self.C(5))
+                    else:
+                        self.stdscr.addstr(yy, x + offs, line[:avail].ljust(avail), self.C(4))
                     continue
                 if isinstance(it, Album):
                     yv = year_norm(it.year)
@@ -4633,7 +4661,8 @@ class App:
         win.touchwin()  # force full resend so popup is visible over any sixel residue
         win.refresh()
 
-    def _draw_help(self) -> None:
+    def show_help_dialog(self) -> None:
+        """Inner-loop help popup - no flicker (same pattern as show_similar_artists_dialog)."""
         lines = [
             "",
             "\x01 TABS",
@@ -4683,14 +4712,14 @@ class App:
             " q         mini-queue overlay",
             " Tab       move cursor between main view and mini-queue overlay",
             " z         jump to playing track",
-            " ^←/^→/1-9 Navigate main tabs and sub-tabs",
+            " ^\u2190/^\u2192/1-9 Navigate main tabs and sub-tabs",
             " Alt+1-5   jump directly to Liked sub-tabs (Allᴹ⁻¹ Tracksᴹ⁻² Artistsᴹ⁻³ Albumsᴹ⁻⁴ Playlistsᴹ⁻⁵)",
             " Alt+7     jump to Liked tab then cycle its sub-tabs",
             " [/]       cycle Liked sub-tabs",
             " ;/Bkspc   go back to last tab without refreshing",
             " g/G       go to top/bottom",
-            " j/k/↓/↑   go down/up",
-            " ^↓/^↑     jump to adjacent sub-section (tabs 5 and 7) or to next artist/album in list",
+            " j/k/\u2193/\u2191   go down/up",
+            " ^\u2193/^\u2191     jump to adjacent sub-section (tabs 5 and 7) or to next artist/album in list",
             " c         color/bw",
             " w/y/d/n   album/year/duration/line number fields",
             " T         status bar",
@@ -4710,27 +4739,28 @@ class App:
             " Refill candidates are picked haphazardly based on suggestions (mix or recommended)",
             " pooled from recent play history + upcoming queue tracks",
             "",
-            "\x01 SETTINGS (settings.json)",
-            " API:",
-            f" api: API base URL (default {DEFAULT_API})",
+            "\x01 SETTINGS (edit settings.json manually)",
+            " TIDAL HiFi API instance:",
+            f" api: API base URL (current: {DEFAULT_API if DEFAULT_API else 'not set'}"")",
+            " if not set, the first invocation of tuifi with the --api runtime flag will set it",
             "",
             " Autoplay:",
-            " autoplay_n:  number of tracks to add per autoplay refill (default 3)",
+            " autoplay_n:  number of tracks to add per autoplay refill (default: 3)",
             "",
             " History tab:",
-            " history_max: max history entries to keep (default 0 = unlimited)",
+            " history_max: max history entries to keep (default: 0 = unlimited)",
             "",
             " Playback:",
-            " auto_resume_playback: resume last position on startup (default false)",
+            " auto_resume_playback: resume last position on startup (default: true)",
             "",
             " Artist tab:",
-            " include_singles_and_eps_in_artist_tab: show singles/EPs (default false, toggle with #)",
+            " include_singles_and_eps_in_artist_tab: show singles/EPs (default: false, toggle with #)",
             "",
-            " Download file hierarchy:",
-            " download_dir (Linux default /tmp/tuifi/)",
-            " download_structure (default {artist}/{artist} - {album} ({year}))",
-            " download_filename (default {track:02d}. {artist} - {title})",
-            " Playlists can be downloaded with hierarchy or flat"
+            " Download file structure:",
+            " download_dir (Linux default: /tmp/tuifi/)",
+            " download_structure (default: {artist}/{artist} - {album} ({year}))",
+            " download_filename (default: {track:02d}. {artist} - {title})",
+            " Playlists can also be downloaded with a flat structure",
             "",
             " Colors:",
             " color_playing  color_paused  color_error  color_chrome  color_accent",
@@ -4740,16 +4770,64 @@ class App:
             "",
             " TSV fields (general or per field overrides):",
             " tsv_max_col_width: default max column width in TSV mode (default 32, 0=unlimited)",
-            " tsv_max_artist_width     tsv_max_title_width     tsv_max_album_width",
-            " tsv_max_year_width       tsv_max_duration_width",
+            " tsv_max_artist_width       tsv_max_title_width       tsv_max_album_width",
+            " tsv_max_year_width         tsv_max_duration_width",
             "",
             f"\x01 tuifi v{VERSION}",
         ]
-        box_h = 38
-        h, _ = self.stdscr.getmaxyx()
-        inner_h = min(h - 8, box_h - 2)
-        self._help_max_scroll = max(0, len(lines) - inner_h)
-        self._draw_overlay_box("Help  (? or q to close)", lines, self.help_scroll, box_w=97, box_h=box_h)
+        h, w = self.stdscr.getmaxyx()
+        box_w = min(w - 6, 97)
+        box_h = min(h - 6, 38)
+        inner_h = box_h - 2
+        max_scroll = max(0, len(lines) - inner_h)
+        scroll = clamp(getattr(self, "help_scroll", 0), 0, max_scroll)
+        self._hide_cover_for_popup = True  # hide cover art while help is shown
+        self._need_redraw = True
+        self.draw()
+        y0, x0, win = self._popup_win(box_h, box_w)
+        self.stdscr.timeout(100)
+        try:
+            while True:
+                if self._need_redraw:
+                    self._popup_refresh(y0, x0, box_h, box_w)
+
+                scroll = clamp(scroll, 0, max_scroll)
+                win.erase()
+                win.box()
+                win.addstr(0, 2, " Help "[:box_w - 2], self.C(4))
+                self._render_popup_lines(win, lines, scroll, inner_h, box_w)
+                try:
+                    win.addstr(box_h - 1, 2,
+                               " j/k: scroll   PgUp/PgDn: scroll pages   g/G: top/bottom   ?/q/Esc: close "[:box_w - 4],
+                               self.C(10))
+                except curses.error:
+                    pass
+                win.touchwin()
+                win.refresh()
+
+                ch = self._get_wch_int()
+                if ch == -1:
+                    continue
+                if ch in (27, ord("?"), ord("Q"), ord("q")):
+                    break
+                _p = self._page_step()
+                if ch in (curses.KEY_DOWN, ord("j")):
+                    scroll = min(scroll + 1, max_scroll)
+                elif ch in (curses.KEY_UP, ord("k")):
+                    scroll = max(0, scroll - 1)
+                elif ch == curses.KEY_PPAGE:
+                    scroll = max(0, scroll - _p)
+                elif ch == curses.KEY_NPAGE:
+                    scroll = min(scroll + _p, max_scroll)
+                elif ch in (curses.KEY_HOME, ord("g")):
+                    scroll = 0
+                elif ch in (curses.KEY_END, ord("G")):
+                    scroll = max_scroll
+        finally:
+            self._hide_cover_for_popup = False  # restore cover art after help closes
+            self.help_scroll = scroll
+            self.stdscr.nodelay(True)
+            self._full_redraw()
 
     def _draw_info(self, _erase_bg: bool = True) -> None:
         title, lines = self._info_lines()
@@ -4817,7 +4895,7 @@ class App:
         usable_h = h - top_h - status_h
         hide_cover = getattr(self, "_hide_cover_for_popup", False) # Specific line to hide cover when the lyrics popup (v) is visible
 
-        if self._redraw_status_only and not self.show_help:
+        if self._redraw_status_only:
             self._draw_status(h - status_h, 0, w)
             sys.stdout.buffer.write(b"\033[?2026h")
             sys.stdout.buffer.flush()
@@ -4903,8 +4981,6 @@ class App:
             sys.stdout.buffer.write(b"\033[?2026l")
             sys.stdout.buffer.flush()
 
-        if self.show_help:
-            self._draw_help()
 
     # ---------------------------------------------------------------------------
     # tab switching
@@ -5130,7 +5206,6 @@ class App:
             ord(";"): lambda: self.switch_tab(self._prev_tab, refresh=False) if self._prev_tab != self.tab else None,
             ord("n"): lambda: self.playlists_create() if self.tab == TAB_PLAYLISTS else _tog("show_numbers", "Line numbers: on", "Line numbers: off"),
             ord("d"): lambda: self.playlists_delete_current() if self.tab == TAB_PLAYLISTS else _tog("show_track_duration", "Duration field: on", "Duration field: off"),
-            ord("D"): lambda: self.playlists_download_prompt() if self.tab == TAB_PLAYLISTS else None,
         }
 
         while True:
@@ -5226,8 +5301,6 @@ class App:
                             if self.tab == TAB_LIKED else self.liked_filter)
                     continue
                 # Plain ESC: dismiss overlays
-                if self.show_help:
-                    self.show_help = False
                 elif self.tab == TAB_COVER and self._lyrics_filter_q:
                     self._lyrics_filter_q = ""
                     self._lyrics_filter_hits = []
@@ -5244,19 +5317,9 @@ class App:
                 break
 
             if ch == ord("?"):
-                self.show_help = not self.show_help
+                self.show_help_dialog()
                 continue
 
-            if self.show_help:
-                _hmax = max(0, getattr(self, "_help_max_scroll", 10_000)); _p = self._page_step()
-                if ch in (27, ord("?"), ord("Q"), ord("q")): self.show_help = False
-                elif ch in (curses.KEY_DOWN, ord("j")): self.help_scroll = min(self.help_scroll + 1, _hmax)
-                elif ch in (curses.KEY_UP, ord("k")): self.help_scroll = max(0, self.help_scroll - 1)
-                elif ch == curses.KEY_PPAGE: self.help_scroll = max(0, self.help_scroll - _p)
-                elif ch == curses.KEY_NPAGE: self.help_scroll = min(self.help_scroll + _p, _hmax)
-                elif ch in (curses.KEY_HOME, ord("g")): self.help_scroll = 0
-                elif ch in (curses.KEY_END, ord("G")): self.help_scroll = _hmax
-                continue
 
             if isinstance(ch, int):
                 _fn = _DISPATCH.get(ch)
@@ -5370,6 +5433,10 @@ class App:
                             _ctx2 = self._recommended_pending_ctx
                             self._recommended_pending_ctx = None
                             self.fetch_recommended_async(_ctx2)
+                        else:
+                            _direct = self._current_selection_track() or self.current_track
+                            if _direct:
+                                self.fetch_recommended_async(_direct)
                         continue
                     ctx = self._current_selection_track() or self.current_track
                     _rc_no_confirm = bool(self.settings.get("recommended_tab_no_confirm_refetch", False))
@@ -5395,6 +5462,16 @@ class App:
                                 self.fetch_mix_from_artist_async(_mctx)
                             else:
                                 self.fetch_mix_async(_mctx)
+                        else:
+                            _dit = self._selected_left_item()
+                            _dctx = self._current_selection_track() or self.current_track
+                            if isinstance(_dit, Album): self.fetch_mix_from_album_async(_dit)
+                            elif isinstance(_dit, Artist): self.fetch_mix_from_artist_async(_dit)
+                            elif isinstance(_dit, tuple) and _dit[0] == 'artist_header':
+                                self.fetch_mix_from_artist_async(Artist(id=_dit[1][0], name=_dit[1][1]))
+                            elif isinstance(_dit, tuple) and _dit[0] == 'album_title' and isinstance(_dit[1], Album):
+                                self.fetch_mix_from_album_async(_dit[1])
+                            elif _dctx: self.fetch_mix_async(_dctx)
                         continue
                     it = self._selected_left_item() if not self._queue_context() else None
                     ctx = self._current_selection_track() or self.current_track
@@ -5517,8 +5594,19 @@ class App:
                 self._show_singles_eps = not self._show_singles_eps
                 self.settings["include_singles_and_eps_in_artist_tab"] = self._show_singles_eps
                 self.toast(f"Singles/EPs: {'on' if self._show_singles_eps else 'off'}")
-                if self.tab == TAB_ARTIST and self._last_artist_fetch_track:
-                    self.fetch_artist_async(self._last_artist_fetch_track)
+                if self.tab == TAB_ARTIST:
+                    _ref = self._last_artist_fetch_track
+                    if not _ref and self.artist_ctx:
+                        _ref = Track(id=0, title='', artist=self.artist_ctx[1],
+                                     album='', year='????', track_no=0,
+                                     artist_id=self.artist_ctx[0])
+                    if _ref:
+                        # Bypass cache so the toggle always triggers a live refetch
+                        _cache_key = (_ref.artist_id or
+                                      (self.artist_ctx[0] if self.artist_ctx else None))
+                        if _cache_key:
+                            self._artist_cache.pop(int(_cache_key), None)
+                        self.fetch_artist_async(_ref)
                 self._full_redraw()
                 continue
             if ch in (curses.KEY_BACKSPACE, 127, 8):
@@ -5723,6 +5811,9 @@ class App:
                 continue
 
             if ch == ord("D"):
+                if self.tab == TAB_PLAYLISTS and self.playlist_view_name is None:
+                    self.playlists_download_prompt()
+                    continue
                 if not self._queue_context():
                     marked_albums, marked_artists, marked_playlists, _cancelled = self._marked_batch()
                     if _cancelled: continue
@@ -5860,11 +5951,11 @@ def parse_args(argv: List[str]) -> Dict[str, Any]:
                 f"Usage: {argv[0]} [options]\n"
                 "\n"
                 "Options:\n"
-                f"  --api URL, -a URL   API base URL (default: {DEFAULT_API})\n"
+                "  --api URL, -a URL   TIDAL HiFi API base URL (can also be set in settings.json)\n"
                 "  --verbose, -v       Write debug log to debug.log in the config directory\n"
                 "  --version, -V       Show version\n"
                 "\n"
-                f"Press ? in tuifi for more keybinds and more options (automatically saved in settings.json)\n"
+                f"Press ? in tuifi for keybinds more options\n"
             )
             sys.exit(0)
         i += 1
@@ -5894,8 +5985,21 @@ def main(argv: List[str]) -> int:
         _models_mod._DEBUG_LOG = os.path.join(STATE_DIR, "debug.log")
         debug_log(f"=== tuifi start {time.strftime('%Y-%m-%d %H:%M:%S')} ===")
 
+    _api_val = args.get("api", "") or ""
+    if args.get("_api_explicit") and _api_val:
+        _s = load_json(SETTINGS_FILE, {})
+        if isinstance(_s, dict) and _s.get("api") != _api_val:
+            _s["api"] = _api_val
+            save_json(SETTINGS_FILE, _s)
+            print(f"API saved to settings: {_api_val}")
+    if not _api_val:
+        print("ERROR: No TIDAL HiFi API URL configured.")
+        print("  Set it at runtime with:  tuifi --api https://api.example-hifi-instance.com")
+        print("  or in settings.json directly:  { \"api\": \"https://api.example-hifi-instance.com\" }")
+        sys.exit(1)
+
     def wrapped(stdscr: "curses._CursesWindow") -> None:
-        app = App(stdscr, args.get("api", DEFAULT_API), args)
+        app = App(stdscr, _api_val, args)
         if app.tab == TAB_QUEUE:
             app.focus = "queue"
         app.run()

@@ -13,35 +13,50 @@
 8.  [License](#license)
 9.  [Mirrors](#mirrors)
 
-A feature-rich-ish TUI music player built on top of [TIDAL HiFi API](https://github.com/binimum/hifi-api): browse, search, stream, download, organize and manage lossless music from your comfy terminal. While [HiFi API instances](https://github.com/monochrome-music/monochrome/blob/main/INSTANCES.md) with unrestricted access exist, music piracy is illegal almost everywhere and does not give artists the love they deserve. This project is intended for users who have an official TIDAL subscription, deployed their own HiFi instance for convenience, and favor a keyboard-driven terminal workflow over a web player.
+A feature-rich-ish TUI music player built on top of [TIDAL HiFi API](https://github.com/binimum/hifi-api): browse, search, stream, download, organize and manage lossless music from your comfy terminal.
 
-[![Click to play the demo](demo/screenshot.png)](https://github.com/Kabouik/tuifi/raw/refs/heads/main/demo/tuifi-demo.mp4)
-_Click to play the demo video._
+While [HiFi API instances with unrestricted access](https://github.com/monochrome-music/monochrome/blob/main/INSTANCES.md) exist, this may be considered as music piracy in many countries and does not give artists the love they deserve. This project is intended for TIDAL subscribers who also self host their own HiFi instance for convenience, and favor a keyboard-driven terminal workflow over a web player.
+
+[![Click to play the demo](demo/screenshot1.png)](https://github.com/Kabouik/tuifi/raw/refs/heads/main/demo/tuifi-demo.mp4)
+[![Click to play the demo](demo/screenshot2.png)](https://github.com/Kabouik/tuifi/raw/refs/heads/main/demo/tuifi-demo.mp4)
+[![Click to play the demo](demo/screenshot3.png)](https://github.com/Kabouik/tuifi/raw/refs/heads/main/demo/tuifi-demo.mp4)
+_Click to play the demo video. The video does not reflect the latest feature set and will be updated soonish._
 
 # Features
 
-- Playback control (play, pause, resume, seek, volume, repeat, shuffle)
-- Queue management with reordering and priority flags
-- Search, browse artists/albums, recommendations, mix
+## Playback & queue
+
+- Playback control (play, pause, (auto)resume, seek, volume, repeat, shuffle)
 - Autoplay mix or recommendations (infinite queue)
+- Queue management with reordering and priority flags
+- Playback history
+- Lyrics display
+- Cover art (requires a compatible terminal emulator)
+
+## Library management & discovery
+
+- Search, browse artists/albums, recommendations, mixes
 - Find similar artists
 - Playlists (create, delete, add/remove tracks)
 - Like tracks, albums, artists, and playlists
-- Lyrics display
-- Cover art (requires a compatible terminal emulator)
-- Download individual or multiple tracks for offline playback (e.g., marked, albums, playlists), or full artist discographies
+- Accountless: playlists, liked songs and queue are kept in standard json files that some popular TIDAL HiFi web players can import
+  
+## Downloads
+
+- Download individual or multiple tracks (_e.g._, marked, albums, playlists), or full artist discographies for offline playback in other music players; depending on the laws in your country, owning a physical copy of the media you download may be required even with a valid TIDAL subscription
+
+## Interface & interaction
+
 - Contextual menus on tracks, albums & artists
-- Playback history
-- Customizable (colors, optional TSV mode, show/hide fields, file hierarchy for downloads, autoplay buffer, resume playback, /etc./)
 - Keyboard-oriented control
-- Accountless: playlists, liked songs and queue are kept in standard json files that some TIDAL HiFi web players can import
+- Customizable (colors, optional TSV mode, show/hide metadata fields, file hierarchy for downloads, autoplay buffer, autoresume playback on launch, _etc._)
 
 # Usage
 
     Usage: ./tuifi [options]
 
     Options:
-      --api URL, -a URL   API base URL
+      --api URL, -a URL   TIDAL HiFi API base URL (can also be set in settings.json)
       --verbose, -v       Write debug log to debug.log in the config directory
       --version, -V       Show version
 
@@ -77,7 +92,9 @@ Then make a shortcut that uses Python 3.13 specifically, or the following comman
 
 # Configuration
 
-Settings are stored in `settings.json` and automatically updated upon using toggles within the TUI. On first run, `tuifi` will prompt before creating the config directory. While `tuifi` should be compatible with any HiFi API instance, some popular ones are made public and may therefore violate TIDAL's TOS. Consequently, the program is delivered with no default instance set, and users should set their preferred instance either using the `--api` runtime flag or by editing `settings.json`, preferably their own instance associated with their official subscription. User choosing to use a public HiFi instance with no legitimate TIDAL subscription do so at their own risk.
+While `tuifi` should be compatible with any HiFi API instance, some popular ones are made public and may therefore violate TIDAL's TOS. Consequently, the program is delivered with no default instance set, and users should set their preferred instance either using the `--api` runtime flag or by editing `settings.json`. Users choosing to use a public HiFi instance with no legitimate TIDAL subscription do so at their own risk.
+
+Settings are stored in `settings.json` and automatically updated upon using toggles within the TUI. On first run, `tuifi` will prompt before creating the config directory.
 
 Configuration file directory per platform:
 

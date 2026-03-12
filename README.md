@@ -4,6 +4,7 @@
 2.  [Usage](#usage)
 3.  [Requirements](#requirements)
 4.  [Installation](#installation)
+    1.  [Windows peculiarities](#windows-peculiarities)
 5.  [Configuration](#configuration)
 6.  [Development note](#development-note)
 7.  [Disclaimer](#disclaimer)
@@ -12,7 +13,7 @@
 8.  [License](#license)
 9.  [Mirrors](#mirrors)
 
-A feature-rich-ish TUI music player built on top of [TIDAL HiFi API](https://github.com/binimum/hifi-api): browse, search, stream, download, organize and manage lossless music from your comfy terminal. While you may be able to access HiFi API instances right away, music piracy is illegal in most countries and is bad for the karma, and this project is intended for users who have a paid subscription but still favor a keyboard-driven terminal workflow.
+A feature-rich-ish TUI music player built on top of [TIDAL HiFi API](https://github.com/binimum/hifi-api): browse, search, stream, download, organize and manage lossless music from your comfy terminal. While [HiFi API instances](https://github.com/monochrome-music/monochrome/blob/main/INSTANCES.md) with unrestricted access exist, music piracy is illegal almost everywhere and does not give artists the love they deserve. This project is intended for users who have an official TIDAL subscription, deployed their own HiFi instance for convenience, and favor a keyboard-driven terminal workflow over a web player.
 
 [![Click to play the demo](demo/screenshot.png)](https://github.com/Kabouik/tuifi/raw/refs/heads/main/demo/tuifi-demo.mp4)
 _Click to play the demo video._
@@ -27,9 +28,11 @@ _Click to play the demo video._
 - Playlists (create, delete, add/remove tracks)
 - Like tracks, albums, artists, and playlists
 - Lyrics display
-- Download individual or multiple tracks (e.g., marked, albums, playlists), or full artist discographies
+- Cover art (requires a compatible terminal emulator)
+- Download individual or multiple tracks for offline playback (e.g., marked, albums, playlists), or full artist discographies
+- Contextual menus on tracks, albums & artists
 - Playback history
-- Customizable (colors, optional TSV mode, show/hide fields, file hierarchy for downloads, autoplay buffer)
+- Customizable (colors, optional TSV mode, show/hide fields, file hierarchy for downloads, autoplay buffer, resume playback, /etc./)
 - Keyboard-oriented control
 - Accountless: playlists, liked songs and queue are kept in standard json files that some TIDAL HiFi web players can import
 
@@ -38,7 +41,7 @@ _Click to play the demo video._
     Usage: ./tuifi [options]
 
     Options:
-      --api URL, -a URL   API base URL (default: https://api.monochrome.tf)
+      --api URL, -a URL   API base URL
       --verbose, -v       Write debug log to debug.log in the config directory
       --version, -V       Show version
 
@@ -46,12 +49,13 @@ _Click to play the demo video._
 
 # Requirements
 
--   Python 3.7+ (3.13 on Windows)
--   [mpv](https://mpv.io)
+- Python 3.7+ (3.13 on Windows)
+- [mpv](https://mpv.io)
+- (Optional for cover art rendering) [chafa](https://github.com/hpjansson/chafa/) and/or [ueberzugpp](https://github.com/jstkdng/ueberzugpp) and a terminal emulator [compatible](https://www.arewesixelyet.com/) with Sixel or Kitty graphics
 
 # Installation
 
-`tuifi` so far is a standalone script and requires no installation, you can just clone this repository and execute the script:
+`tuifi` comes with a wrapper script (named `tuifi` too) at the root of the project, which will handle calling the different Python files. Threfore, it requires no system installation and this repository can just be cloned before executing the wrapper script:
 
     git clone https://git.sr.ht/~matf/tuifi cd tuifi
     ./tuifi
@@ -73,9 +77,9 @@ Then make a shortcut that uses Python 3.13 specifically, or the following comman
 
 # Configuration
 
-Settings are stored in `settings.json` and automatically updated upon using toggles within the TUI. On first run, `tuifi` will prompt before creating the config directory.
+Settings are stored in `settings.json` and automatically updated upon using toggles within the TUI. On first run, `tuifi` will prompt before creating the config directory. While `tuifi` should be compatible with any HiFi API instance, some popular ones are made public and may therefore violate TIDAL's TOS. Consequently, the program is delivered with no default instance set, and users should set their preferred instance either using the `--api` runtime flag or by editing `settings.json`, preferably their own instance associated with their official subscription. User choosing to use a public HiFi instance with no legitimate TIDAL subscription do so at their own risk.
 
-Config directory per platform:
+Configuration file directory per platform:
 
 <table border="2" cellspacing="0" cellpadding="6" rules="groups" frame="hsides">
 <colgroup>
@@ -117,7 +121,7 @@ Other state files stored in the same directory:
 - `playlists.json` stores playlists,
 - `history.json` keeps the playback history.
 
-`liked.json` and `playlists.json` are fully compatible with Monochrome instances (e.g., <https://monochrome.tf>) and can be imported there.
+`liked.json` and `playlists.json` are fully compatible with Monochrome (e.g., <https://monochrome.tf>) and can be imported there.
 
 # Development note
 

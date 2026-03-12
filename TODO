@@ -1,5 +1,8 @@
-- it should be possible to press 3 on a track in tab 3, and 4 in a track in tab 4
-- confirmation prompts for tabs 3, 4, 5, 6 should be an option (on by default as it is safer)
+- Done: it should be possible to press 3 on a track in tab 3, and 4 in a track in tab 4
+- confirmation prompts for tabs 3, 4, 5, 6 should be an option in settings.json (on by default as it is safer)
 - make a proper commit message and changelog for new tag based on diff with previous tag
-- Remove the default API instance for legal reasons, we don't want to encourae or facilitatepiracy, and shows a message stating that the user must enter their API instance at runtime with the --api flag, or set it in settings.json. If none is set in settings.json, the one set as --api should be saved to settings automatically, with a short output in the terminal to state it.
-
+- Done: Urgent: Removed the default API instance for legal reasons, we don't want to encourae or facilitate piracy. Now we need to show a message stating that the user must enter their API instance at runtime with the --api flag, or set it in settings.json (settings.json has no support for it so far iirc). If none is set in settings.json, the one set as --api should be saved to settings automatically, with a short output in the terminal to state it.
+- Done: Remove the logic of a default API URL set in __init__.py, or fetch it from settings.json; and if so, maybe populate --help accordingly to show the currently set API with something like `f"  --api URL, -a URL   API base URL (default: {DEFAULT_API or 'not set'})\n"`
+- Done: Searching (/) does not correctly jump to the search tab (1) and close the search prompt, this should be fixed urgently.
+- Pressing # in the tab view no longer refreshes with or without eps/singles, it should.
+- Hide the cover when showing the help, like is already done for lyrics popups. Potentially hide everything while in the help since no keybinds work and mpv status does not update, to be determined.

@@ -1,0 +1,5 @@
+- it should be possible to press 3 on a track in tab 3, and 4 in a track in tab 4
+- confirmation prompts for tabs 3, 4, 5, 6 should be an option (on by default as it is safer)
+- make a proper commit message and changelog for new tag based on diff with previous tag
+- Remove the default API instance for legal reasons, we don't want to encourae or facilitatepiracy, and shows a message stating that the user must enter their API instance at runtime with the --api flag, or set it in settings.json. If none is set in settings.json, the one set as --api should be saved to settings automatically, with a short output in the terminal to state it.
+

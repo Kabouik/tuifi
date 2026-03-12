@@ -167,6 +167,14 @@ class App:
         self._tab_positions: Dict[int, Tuple[int, int]] = {}
         self._prev_tab: int = self.tab
 
+        self._recommended_tab_has_content: bool = False
+        self._mix_tab_has_content: bool = False
+        self._artist_tab_has_content: bool = False
+        self._album_tab_has_content: bool = False
+        self._recommended_pending_ctx: Optional[Track] = None
+        self._mix_pending_ctx = None  # Track | Album | Artist
+        self._artist_pending_ctx: Optional[Track] = None
+        self._album_pending_ctx: Optional[Track] = None
         self.marked_left_idx: set = set(); self.marked_queue_idx: set = set()
         self.priority_queue: List[int] = []
         self.repeat_mode = 0; self.shuffle_on = False
@@ -462,6 +470,7 @@ class App:
 
             self.mix_tracks = tracks
             self.mix_title = mix_title
+            self._mix_tab_has_content = True
             self.toast(f"Mix: {len(tracks)} tracks")
 
         self._bg(worker, loading_key=key, on_error="Mix error", record_error=True)
@@ -517,6 +526,7 @@ class App:
             tracks = self._extract_tracks_from_mix_payload(mix_payload)
             self.mix_tracks = tracks
             self.mix_title = f"{album.artist} — {album.title} (Mix)"
+            self._mix_tab_has_content = True
             self.toast(f"Mix: {len(tracks)} tracks")
 
         self._bg(worker, loading_key=key, on_error="Mix error", record_error=True)
@@ -548,6 +558,7 @@ class App:
             if self._loading_key != key: return
             self.mix_tracks = tracks
             self.mix_title = f"{artist.name} (Mix)"
+            self._mix_tab_has_content = True
             self.toast(f"Mix: {len(tracks)} tracks")
 
         self._bg(worker, loading_key=key, on_error="Mix error", record_error=True)
@@ -1062,6 +1073,24 @@ class App:
             # For the Artist tab, fall through to show partial data while loading
             if not (self.tab == TAB_ARTIST and (self.artist_ctx or self.artist_albums or self.artist_tracks)):
                 return ("loading", [])
+        if self.tab == TAB_RECOMMENDED and getattr(self, "_recommended_pending_ctx", None):
+            _rc = self._recommended_pending_ctx
+            return ("tracks", [
+                ("pending_refetch_hint", f'Press 3 again to refetch recommendations for "{_rc.artist} - {_rc.title}".'),
+                ("pending_refetch_hint", ""),
+            ] + list(self.recommended_results))
+        if self.tab == TAB_MIX and getattr(self, "_mix_pending_ctx", None):
+            _mc = self._mix_pending_ctx
+            if isinstance(_mc, Track):
+                _mix_desc = f'"{_mc.artist} - {_mc.title}"'
+            elif isinstance(_mc, Album):
+                _mix_desc = f'album "{_mc.artist} - {_mc.title}"'
+            else:
+                _mix_desc = f'artist "{_mc.name}"'
+            return ("tracks", [
+                ("pending_refetch_hint", f"Press 4 again to refetch mix for {_mix_desc}."),
+                ("pending_refetch_hint", ""),
+            ] + list(self.mix_tracks))
         _simple_tabs = {TAB_QUEUE: ("queue_tab", self.queue_items), TAB_SEARCH: ("tracks", self.search_results),
                         TAB_RECOMMENDED: ("tracks", self.recommended_results), TAB_MIX: ("tracks", self.mix_tracks),
                         TAB_HISTORY: ("tracks", self.history_tracks), TAB_COVER: ("cover_tab", [])}
@@ -1069,6 +1098,11 @@ class App:
             return _simple_tabs[self.tab]
         if self.tab == TAB_ARTIST:
             items: List[Any] = []
+            if getattr(self, "_artist_pending_ctx", None):
+                _ar = self._artist_pending_ctx
+                items.append(("pending_refetch_hint",
+                              f'Press 5 again to refetch data for artist "{_ar.artist}".'))
+                items.append(("pending_refetch_hint", ""))
             if self.artist_ctx:
                 items.append(("artist_header", self.artist_ctx))
             if self.artist_albums:
@@ -1083,6 +1117,11 @@ class App:
             return ("artist_mixed", items)
         if self.tab == TAB_ALBUM:
             items = []
+            if getattr(self, "_album_pending_ctx", None):
+                _alp = self._album_pending_ctx
+                items.append(("pending_refetch_hint",
+                              f'Press 6 again to refetch album for "{_alp.artist} - {_alp.album}".'))
+                items.append(("pending_refetch_hint", ""))
             if self.album_header:
                 items.append(("album_title", self.album_header))
             items.extend(self.album_tracks)
@@ -3120,6 +3159,7 @@ class App:
             for t in self.album_tracks[:40]:
                 if (self.show_track_year and year_norm(t.year) == "????") or (self.show_track_duration and not t.duration):
                     self.meta.want(t.id)
+            self._album_tab_has_content = True
             self.toast(f"Album {len(self.album_tracks)}")
 
         self._bg(worker, loading_key=key, on_error="Error", record_error=True)
@@ -3141,6 +3181,7 @@ class App:
             tracks = self._fetch_recommended_tracks_for_track(ctx)
             if self._loading_key != key: return
             self.recommended_results = tracks
+            self._recommended_tab_has_content = True
             self.toast("Recommended")
 
         self._bg(worker, loading_key=key, on_error="Error", record_error=True)
@@ -3188,6 +3229,7 @@ class App:
                 self.artist_ctx = cached_ctx
                 self._loading_key = ""
                 self._loading = False
+                self._artist_tab_has_content = True
                 self._full_redraw()
                 return
 
@@ -3243,6 +3285,7 @@ class App:
             _commit_tracks()
             if aid:
                 self._artist_cache[int(aid)] = (self.artist_albums, self.artist_tracks, self.artist_ctx)
+            self._artist_tab_has_content = True
             self.toast("Artist")
 
         self._bg(worker, loading_key=key, on_error="Error", record_error=True)
@@ -4279,6 +4322,14 @@ class App:
             else:
                 selected = (not self._queue_context() and i == self.left_idx)
 
+            if isinstance(it, tuple) and it[0] == "pending_refetch_hint":
+                text = it[1]
+                attr = self.C(5) | curses.A_BOLD if text else 0
+                try:
+                    self.stdscr.addstr(yy, x, text[:max(0, w - 1)].ljust(max(0, w - 1)), attr)
+                except curses.error:
+                    pass
+                continue
             if typ in ("queue_tab", "tracks") and isinstance(it, Track):
                 marked = (i in (self.marked_queue_idx if typ == "queue_tab" else self.marked_left_idx))
                 ppos = pq_set.get(i, 0) if typ == "queue_tab" else 0
@@ -4874,6 +4925,14 @@ class App:
             self._prev_tab = self.tab
             if self.tab == TAB_COVER:
                 self._cover_clear_image()
+            if self.tab == TAB_RECOMMENDED:
+                self._recommended_pending_ctx = None  # type: ignore[attr-defined]
+            if self.tab == TAB_MIX:
+                self._mix_pending_ctx = None          # type: ignore[attr-defined]
+            if self.tab == TAB_ARTIST:
+                self._artist_pending_ctx = None       # type: ignore[attr-defined]
+            if self.tab == TAB_ALBUM:
+                self._album_pending_ctx = None        # type: ignore[attr-defined]
 
         self.tab = t
         self._loading = False
@@ -5306,63 +5365,127 @@ class App:
             if ord("1") <= ch <= ord("9"):
                 t_num = ch - ord("0")
                 if t_num == TAB_RECOMMENDED:
-                    if self.tab == TAB_COVER:
-                        self.switch_tab(TAB_RECOMMENDED)
-                    else:
-                        ctx = self._current_selection_track()
-                        if ctx:
+                    if self.tab == TAB_RECOMMENDED and not self._queue_context():
+                        if self._recommended_pending_ctx:
+                            _ctx2 = self._recommended_pending_ctx
+                            self._recommended_pending_ctx = None
+                            self.fetch_recommended_async(_ctx2)
+                        continue
+                    ctx = self._current_selection_track() or self.current_track
+                    _rc_no_confirm = bool(self.settings.get("recommended_tab_no_confirm_refetch", False))
+                    if ctx:
+                        if self._recommended_tab_has_content and not _rc_no_confirm:
+                            self._recommended_pending_ctx = ctx
+                            self.switch_tab(TAB_RECOMMENDED, refresh=False)
+                        else:
+                            self._recommended_pending_ctx = None
                             self.switch_tab(TAB_RECOMMENDED, refresh=False)
                             self.fetch_recommended_async(ctx)
-                        else:
-                            self.switch_tab(TAB_RECOMMENDED, refresh=False)
-                elif t_num == TAB_MIX:
-                    if self.tab == TAB_COVER:
-                        self.switch_tab(TAB_MIX)
                     else:
-                        it = self._selected_left_item() if not self._queue_context() else None
-                        ctx = self._current_selection_track()
+                        self._recommended_pending_ctx = None
+                        self.switch_tab(TAB_RECOMMENDED, refresh=False)
+                elif t_num == TAB_MIX:
+                    if self.tab == TAB_MIX and not self._queue_context():
+                        if self._mix_pending_ctx:
+                            _mctx = self._mix_pending_ctx
+                            self._mix_pending_ctx = None
+                            if isinstance(_mctx, Album):
+                                self.fetch_mix_from_album_async(_mctx)
+                            elif isinstance(_mctx, Artist):
+                                self.fetch_mix_from_artist_async(_mctx)
+                            else:
+                                self.fetch_mix_async(_mctx)
+                        continue
+                    it = self._selected_left_item() if not self._queue_context() else None
+                    ctx = self._current_selection_track() or self.current_track
+                    _mx_no_confirm = bool(self.settings.get("mix_tab_no_confirm_refetch", False))
+                    if isinstance(it, Album):
+                        _mix_seed = it
+                    elif isinstance(it, Artist):
+                        _mix_seed = it
+                    elif isinstance(it, tuple) and it[0] == "artist_header":
+                        _mix_seed = Artist(id=it[1][0], name=it[1][1])
+                    elif isinstance(it, tuple) and it[0] == "album_title" and isinstance(it[1], Album):
+                        _mix_seed = it[1]
+                    else:
+                        _mix_seed = ctx
+                    if _mix_seed:
+                        if self._mix_tab_has_content and not _mx_no_confirm:
+                            self._mix_pending_ctx = _mix_seed
+                            self.switch_tab(TAB_MIX, refresh=False)
+                        else:
+                            self._mix_pending_ctx = None
+                            self.switch_tab(TAB_MIX, refresh=False)
+                            if isinstance(_mix_seed, Album):
+                                self.fetch_mix_from_album_async(_mix_seed)
+                            elif isinstance(_mix_seed, Artist):
+                                self.fetch_mix_from_artist_async(_mix_seed)
+                            else:
+                                self.fetch_mix_async(_mix_seed)
+                    else:
+                        self._mix_pending_ctx = None
                         self.switch_tab(TAB_MIX, refresh=False)
-                        if isinstance(it, Album):
-                            self.fetch_mix_from_album_async(it)
-                        elif isinstance(it, Artist):
-                            self.fetch_mix_from_artist_async(it)
-                        elif isinstance(it, tuple) and it[0] == "artist_header":
-                            self.fetch_mix_from_artist_async(Artist(id=it[1][0], name=it[1][1]))
-                        elif ctx:
-                            self.fetch_mix_async(ctx)
 
                 elif t_num == TAB_ARTIST:
                     if self.tab == TAB_COVER:
                         self.switch_tab(TAB_ARTIST)
                         continue
-                    if self.tab == TAB_ARTIST and not self._queue_context(): continue
-                    if not self._queue_context() and self.tab == TAB_ALBUM and self.album_header:
-                        self._open_artist_from_album_async(self.album_header)
+                    if self.tab == TAB_ARTIST and not self._queue_context():
+                        if self._artist_pending_ctx:
+                            _ctx2 = self._artist_pending_ctx
+                            self._artist_pending_ctx = None
+                            self.fetch_artist_async(_ctx2)
                         continue
                     it = self._selected_left_item() if not self._queue_context() else None
-                    ctx = self._current_selection_track()
                     if isinstance(it, Artist):
+                        self._artist_pending_ctx = None
                         self.open_artist_by_id(it.id, it.name)
+                        continue
+                    if isinstance(it, tuple) and it[0] == "album_title" and isinstance(it[1], Album):
+                        _alb_it = it[1]
+                        ctx = Track(id=0, title="", artist=_alb_it.artist, album="",
+                                    year="????", track_no=0)
                     elif isinstance(it, Album):
-                        self._open_artist_from_album_async(it)
-                    elif ctx:
-                        self.switch_tab(TAB_ARTIST, refresh=False)
-                        self.fetch_artist_async(ctx)
+                        ctx = Track(id=0, title="", artist=it.artist, album="",
+                                    year="????", track_no=0)
                     else:
+                        ctx = self._current_selection_track() or self.current_track
+                    _ar_no_confirm = bool(self.settings.get("artist_tab_no_confirm_refetch", False))
+                    if ctx:
+                        if self._artist_tab_has_content and not _ar_no_confirm:
+                            self._artist_pending_ctx = ctx
+                            self.switch_tab(TAB_ARTIST, refresh=False)
+                        else:
+                            self._artist_pending_ctx = None
+                            self.switch_tab(TAB_ARTIST, refresh=False)
+                            self.fetch_artist_async(ctx)
+                    else:
+                        self._artist_pending_ctx = None
                         self.switch_tab(TAB_ARTIST, refresh=False)
 
                 elif t_num == TAB_ALBUM:
-                    if self.tab == TAB_COVER:
-                        self.switch_tab(TAB_ALBUM)
-                    else:
-                        it = self._selected_left_item() if not self._queue_context() else None
-                        ctx = self._current_selection_track()
-                        if isinstance(it, Album):
-                            self.open_album_from_album_obj(it)
-                        elif ctx:
-                            self.open_album_from_track(ctx)
-                        else:
+                    if self.tab == TAB_ALBUM and not self._queue_context():
+                        if self._album_pending_ctx:
+                            _ctx2 = self._album_pending_ctx
+                            self._album_pending_ctx = None
+                            self.open_album_from_track(_ctx2)
+                        continue
+                    it = self._selected_left_item() if not self._queue_context() else None
+                    ctx = self._current_selection_track() or self.current_track
+                    _al_no_confirm = bool(self.settings.get("album_tab_no_confirm_refetch", False))
+                    if isinstance(it, Album):
+                        self._album_pending_ctx = None
+                        self.open_album_from_album_obj(it)
+                    elif ctx:
+                        if self._album_tab_has_content and not _al_no_confirm:
+                            self._album_pending_ctx = ctx
                             self.switch_tab(TAB_ALBUM, refresh=False)
+                        else:
+                            self._album_pending_ctx = None
+                            self.open_album_from_track(ctx)
+                    else:
+                        self._album_pending_ctx = None
+                        self.switch_tab(TAB_ALBUM, refresh=False)
                 else:
                     self.switch_tab(t_num, refresh=True)
                 continue
@@ -5660,7 +5783,7 @@ class App:
                 else:
                     _typ, items = self._left_items()
                     new_idx = self.left_idx + d
-                    while (0 <= new_idx < len(items)) and isinstance(items[new_idx], tuple) and items[new_idx][0] == "sep":
+                    while (0 <= new_idx < len(items)) and isinstance(items[new_idx], tuple) and items[new_idx][0] in ("sep", "pending_refetch_hint"):
                         new_idx += d
                     self.left_idx = clamp(new_idx, 0, max(0, len(items) - 1))
                 continue

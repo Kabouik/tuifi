@@ -5,7 +5,13 @@ A feature-rich-ish TUI music player built on top of [[https://github.com/binimum
 
 #+BEGIN_EXPORT html
 <a href="https://github.com/Kabouik/tuifi/raw/refs/heads/main/demo/tuifi-demo.mp4">
-  <img src="demo/screenshot.png" alt="Click to play the demo" />
+  <img src="demo/screenshot1.png" alt="Click to play the demo" />
+</a>
+#+END_<a href="https://github.com/Kabouik/tuifi/raw/refs/heads/main/demo/tuifi-demo.mp4">
+  <img src="demo/screenshot2.png" alt="Click to play the demo" />
+</a>
+#+END_<a href="https://github.com/Kabouik/tuifi/raw/refs/heads/main/demo/tuifi-demo.mp4">
+  <img src="demo/screenshot3.png" alt="Click to play the demo" />
 </a>
 #+END_EXPORT
 /Click to play the demo video. The video does not reflect the latest feature set and will be updated soonish./ 

@@ -41,7 +41,7 @@ _Click to play the demo video._
     Usage: ./tuifi [options]
 
     Options:
-      --api URL, -a URL   API base URL
+      --api URL, -a URL   HiFi API base URL
       --verbose, -v       Write debug log to debug.log in the config directory
       --version, -V       Show version
 

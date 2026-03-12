@@ -2,4 +2,4 @@
 - confirmation prompts for tabs 3, 4, 5, 6 should be an option (on by default as it is safer)
 - make a proper commit message and changelog for new tag based on diff with previous tag
 - Remove the default API instance for legal reasons, we don't want to encourae or facilitatepiracy, and shows a message stating that the user must enter their API instance at runtime with the --api flag, or set it in settings.json. If none is set in settings.json, the one set as --api should be saved to settings automatically, with a short output in the terminal to state it.
-
+- Remove the logic of a default API URL set in __init__.py, or fetch it from settings.json; and if so, maybe populate --help accordingly to show the currently set API with something like `f"  --api URL, -a URL   API base URL (default: {DEFAULT_API or 'not set'})\n"`

@@ -930,7 +930,7 @@ class App:
 
     def _dedupe_albums(self, albums: List[Album]) -> List[Album]:
         # Key by (artist, title, year) so that different-ID editions of the
-        # same album are collapsed into one entry (matching Monochrome.tf behaviour).
+        # same album are collapsed into one entry.
         best: Dict[Tuple[str, str, str], Album] = {}
         for a in albums:
             k = (
@@ -5860,7 +5860,7 @@ def parse_args(argv: List[str]) -> Dict[str, Any]:
                 f"Usage: {argv[0]} [options]\n"
                 "\n"
                 "Options:\n"
-                f"  --api URL, -a URL   API base URL (default: {DEFAULT_API})\n"
+                "  --api URL, -a URL   TIDAL HiFi API base URL\n"
                 "  --verbose, -v       Write debug log to debug.log in the config directory\n"
                 "  --version, -V       Show version\n"
                 "\n"

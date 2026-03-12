@@ -13,10 +13,10 @@ While [[https://github.com/monochrome-music/monochrome/blob/main/INSTANCES.md][H
   <img src="demo/ss20260312-191954.png" alt="Click to play the demo" />
 </a>
 <a href="https://github.com/Kabouik/tuifi/raw/refs/heads/main/demo/tuifi-demo.mp4">
-  <img src="demo/ss20260312-192026.png" alt="Click to play the demo" width="48%" />
+  <img src="demo/ss20260312-192026.png" alt="Click to play the demo" />
 </a>
 <a href="https://github.com/Kabouik/tuifi/raw/refs/heads/main/demo/tuifi-demo.mp4">
-  <img src="demo/ss20260312-192044.png" alt="Click to play the demo" width="48%" />
+  <img src="demo/ss20260312-192044.png" alt="Click to play the demo" />
 </a>
 #+END_EXPORT
 /Click any screenshot to play the demo video. Another video from an older version is available [[file:demo/tuifi-demo_old.mp4][here]], showing some other features./ 

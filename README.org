@@ -7,16 +7,19 @@ While [[https://github.com/monochrome-music/monochrome/blob/main/INSTANCES.md][H
 
 #+BEGIN_EXPORT html
 <a href="https://github.com/Kabouik/tuifi/raw/refs/heads/main/demo/tuifi-demo.mp4">
-  <img src="demo/screenshot1.png" alt="Click to play the demo" />
+  <img src="demo/ss20260312-191917.png" alt="Click to play the demo" />
 </a>
-#+END_<a href="https://github.com/Kabouik/tuifi/raw/refs/heads/main/demo/tuifi-demo.mp4">
-  <img src="demo/screenshot2.png" alt="Click to play the demo" />
+<a href="https://github.com/Kabouik/tuifi/raw/refs/heads/main/demo/tuifi-demo.mp4">
+  <img src="demo/ss20260312-191954.png" alt="Click to play the demo" />
 </a>
-#+END_<a href="https://github.com/Kabouik/tuifi/raw/refs/heads/main/demo/tuifi-demo.mp4">
-  <img src="demo/screenshot3.png" alt="Click to play the demo" />
+<a href="https://github.com/Kabouik/tuifi/raw/refs/heads/main/demo/tuifi-demo.mp4">
+  <img src="demo/ss20260312-192026.png" alt="Click to play the demo" width="48%" />
+</a>
+<a href="https://github.com/Kabouik/tuifi/raw/refs/heads/main/demo/tuifi-demo.mp4">
+  <img src="demo/ss20260312-192044.png" alt="Click to play the demo" width="48%" />
 </a>
 #+END_EXPORT
-/Click to play the demo video. The video does not reflect the latest feature set and will be updated soonish./ 
+/Click any screenshot to play the demo video. Another video from an older version is available [[file:demo/tuifi-demo_old.mp4][here]], showing some other features./ 
 
 * Features
 

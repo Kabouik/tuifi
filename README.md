@@ -17,10 +17,19 @@ A feature-rich-ish TUI music player built on top of [TIDAL HiFi API](https://git
 
 While [HiFi API instances with unrestricted access](https://github.com/monochrome-music/monochrome/blob/main/INSTANCES.md) exist, this may be considered as music piracy in many countries and does not give artists the love they deserve. This project is intended for TIDAL subscribers who also self host their own HiFi instance for convenience, and favor a keyboard-driven terminal workflow over a web player.
 
-[![Click to play the demo](demo/screenshot1.png)](https://github.com/Kabouik/tuifi/raw/refs/heads/main/demo/tuifi-demo.mp4)
-[![Click to play the demo](demo/screenshot2.png)](https://github.com/Kabouik/tuifi/raw/refs/heads/main/demo/tuifi-demo.mp4)
-[![Click to play the demo](demo/screenshot3.png)](https://github.com/Kabouik/tuifi/raw/refs/heads/main/demo/tuifi-demo.mp4)
-_Click to play the demo video. The video does not reflect the latest feature set and will be updated soonish._
+<a href="https://github.com/Kabouik/tuifi/raw/refs/heads/main/demo/tuifi-demo.mp4">
+  <img src="demo/ss20260312-191917.png" alt="Click to play the demo" />
+</a>
+<a href="https://github.com/Kabouik/tuifi/raw/refs/heads/main/demo/tuifi-demo.mp4">
+  <img src="demo/ss20260312-191954.png" alt="Click to play the demo" />
+</a>
+<a href="https://github.com/Kabouik/tuifi/raw/refs/heads/main/demo/tuifi-demo.mp4">
+  <img src="demo/ss20260312-192026.png" alt="Click to play the demo" width="48%" />
+</a>
+<a href="https://github.com/Kabouik/tuifi/raw/refs/heads/main/demo/tuifi-demo.mp4">
+  <img src="demo/ss20260312-192044.png" alt="Click to play the demo" width="48%" />
+</a>
+_Click any screenshot to play the demo video. Another video from an older version is available [here](demo/tuifi-demo_old.mp4), showing some other features._
 
 # Features
 

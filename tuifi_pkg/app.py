@@ -4741,7 +4741,7 @@ class App:
             "",
             "\x01 SETTINGS (edit settings.json manually)",
             " TIDAL HiFi API instance:",
-            f" api: API base URL (current: {DEFAULT_API if DEFAULT_API else 'not set'}"")",
+            f" api: API base URL (current: {self.settings.get('api', '') or 'not set'})",
             " if not set, the first invocation of tuifi with the --api runtime flag will set it",
             "",
             " Autoplay:",

@@ -24,12 +24,13 @@ While [HiFi API instances with unrestricted access](https://github.com/monochrom
   <img src="demo/ss20260312-191954.png" alt="Click to play the demo" />
 </a>
 <a href="https://github.com/Kabouik/tuifi/raw/refs/heads/main/demo/tuifi-demo.mp4">
-  <img src="demo/ss20260312-192026.png" alt="Click to play the demo" width="48%" />
+  <img src="demo/ss20260312-192026.png" alt="Click to play the demo" />
 </a>
 <a href="https://github.com/Kabouik/tuifi/raw/refs/heads/main/demo/tuifi-demo.mp4">
-  <img src="demo/ss20260312-192044.png" alt="Click to play the demo" width="48%" />
+  <img src="demo/ss20260312-192044.png" alt="Click to play the demo" />
 </a>
-_Click any screenshot to play the demo video. Another video from an older version is available [here](demo/tuifi-demo_old.mp4), showing some other features._
+
+*Click any screenshot to play the demo video. Another video from an older version is available [here](demo/tuifi-demo_old.mp4), showing some other features.*
 
 # Features
 

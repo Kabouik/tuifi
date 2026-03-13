@@ -75,10 +75,13 @@ Press ? in tuifi for keybindings
 =tuifi= comes with a wrapper script (named =tuifi= too) at the root of the project, which will handle calling the different Python files. Threfore, it requires no system installation and this repository can just be cloned before executing the wrapper script:
 
 #+begin_src shell
-git clone https://git.sr.ht/~matf/tuifi cd tuifi
+git clone https://git.sr.ht/~matf/tuifi && cd tuifi
 ./tuifi
+#+end_src
 
-# Or add it to your $PATH so that tuifi becomes a system wide command, e.g. with:
+You can also create a symbolic link between the script and a directory in your =$PATH= so that =tuifi= can be executed from any directory, /e.g./:
+
+#+begin_src shell
 mkdir -p ~/.local/bin
 ln -s /path/to/tuifi/tuifi ~/.local/bin/tuifi
 #+end_src

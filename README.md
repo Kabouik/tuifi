@@ -74,10 +74,11 @@ While [HiFi API instances with unrestricted access](https://github.com/monochrom
 
 `tuifi` comes with a wrapper script (named `tuifi` too) at the root of the project, which will handle calling the different Python files. Threfore, it requires no system installation and this repository can just be cloned before executing the wrapper script:
 
-    git clone https://git.sr.ht/~matf/tuifi cd tuifi
+    git clone https://git.sr.ht/~matf/tuifi && cd tuifi
     ./tuifi
 
-    # Or add it to your $PATH so that tuifi becomes a system wide command, e.g. with:
+You can also create a symbolic link between the script and a directory in your `$PATH` so that `tuifi` can be executed from any directory, *e.g.*:
+
     mkdir -p ~/.local/bin
     ln -s /path/to/tuifi/tuifi ~/.local/bin/tuifi
 

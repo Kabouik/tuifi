@@ -5621,17 +5621,17 @@ class App:
                 continue
 
             # Ctrl+Left/Ctrl+Right: cycle through all tabs including Liked subtabs
-            # Sequence: Queue Search Recommended Mix Artist Album
+            # Sequence: Search Queue Recommended Mix Artist Album
             #           Liked/All Liked/Tracks Liked/Artists Liked/Albums Liked/Playlists
-            #           Playlists History  (wraps)
+            #           Playlists History Cover (wraps)
             if isinstance(ch, int) and (_is_ctrl_left(ch) or _is_ctrl_right(ch)):
                 _NAV_SEQ = [
-                    (TAB_QUEUE, 0), (TAB_SEARCH, 0),
-                    (TAB_RECOMMENDED, 0), (TAB_MIX, 0),
+                    (TAB_SEARCH, 0),
+                    (TAB_QUEUE, 0), (TAB_RECOMMENDED, 0), (TAB_MIX, 0),
                     (TAB_ARTIST, 0), (TAB_ALBUM, 0),
                     (TAB_LIKED, 0), (TAB_LIKED, 1), (TAB_LIKED, 2),
                     (TAB_LIKED, 3), (TAB_LIKED, 4),
-                    (TAB_PLAYLISTS, 0), (TAB_HISTORY, 0),
+                    (TAB_PLAYLISTS, 0), (TAB_HISTORY, 0), (TAB_COVER, 0),
                 ]
                 cur_f = self.liked_filter if self.tab == TAB_LIKED else 0
                 cur_pos = next(

@@ -8,6 +8,7 @@ import hashlib
 import json
 import locale
 import os
+import unicodedata
 import random
 import re
 import shutil
@@ -50,6 +51,28 @@ from tuifi_pkg.persistence import (
 from tuifi_pkg.client import HiFiClient, http_get_bytes, http_get_json, http_stream_download
 from tuifi_pkg.audio import MPV, MPVPoller
 from tuifi_pkg.workers import MetaFetcher, DownloadManager
+
+
+def _char_display_width(c: str) -> int:
+    """Return the terminal display width of a single character (1 or 2 columns)."""
+    eaw = unicodedata.east_asian_width(c)
+    return 2 if eaw in ("W", "F") else 1
+
+
+def _str_display_width(s: str) -> int:
+    """Return the total terminal display width of a string."""
+    return sum(_char_display_width(c) for c in s)
+
+
+def _truncate_to_display_width(s: str, width: int) -> str:
+    """Truncate string so its display width does not exceed `width` columns."""
+    cols = 0
+    for i, c in enumerate(s):
+        cw = _char_display_width(c)
+        if cols + cw > width:
+            return s[:i]
+        cols += cw
+    return s
 
 
 def print_version(prog: str) -> None:
@@ -1061,7 +1084,7 @@ class App:
     def fmt_track_status(self, t: Track, width: int) -> str:
         yv = self._track_year(t)
         s = f"{t.artist} - {t.title} • {t.album}" + (f" • {yv}" if yv != "????" else "")
-        return s if len(s) <= width else (s[:max(0, width - 1)] + "…")
+        return s if _str_display_width(s) <= width else (_truncate_to_display_width(s, max(0, width - 1)) + "…")
 
     # ---------------------------------------------------------------------------
     # UI model
@@ -2720,7 +2743,7 @@ class App:
         pid_file = os.path.join(STATE_DIR, "ueberzugpp.pid")
         try:
             subprocess.Popen(
-                ["ueberzugpp", "layer", "--no-stdin", "--silent",
+                ["ueberzugpp", "-o", "sixel", "layer", "--no-stdin", "--silent",
                  "--use-escape-codes", "--pid-file", pid_file],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
@@ -4607,7 +4630,8 @@ class App:
         song = self.fmt_track_status(self.current_track, 10_000) if self.current_track else ""
         if self.last_error:
             song = f"ERROR: {self.last_error}"
-        line2 = (left + song)[:max(0, w - 1)].ljust(max(0, w - 1))
+        col_limit = max(0, w - 1)
+        line2 = _truncate_to_display_width(left + song, col_limit).ljust(col_limit)
 
         now = time.time()
         if not self.dl.active and self.dl.progress_clear_at and now > self.dl.progress_clear_at:
@@ -4621,11 +4645,14 @@ class App:
         elif now < self.toast_until and self.toast_msg:
             right = self.toast_msg
         if right:
-            right = right[:max(0, w - 2)]
-            tpos = max(0, (w - 1) - len(right))
+            right = _truncate_to_display_width(right, max(0, w - 2))
+            tpos = max(0, col_limit - _str_display_width(right))
             line2 = line2[:tpos] + right + line2[tpos + len(right):]
 
-        self.stdscr.addstr(y + 1, x, line2, self._status_color_pair(pa, alive))
+        try:
+            self.stdscr.addstr(y + 1, x, line2, self._status_color_pair(pa, alive))
+        except curses.error:
+            pass
 
     def _render_popup_lines(self, win, lines: List[str], start: int, inner_h: int, box_w: int) -> None:
         """Render lines into a popup window, supporting \\x01 highlighted headers."""

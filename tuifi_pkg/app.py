@@ -6021,9 +6021,9 @@ def main(argv: List[str]) -> int:
             save_json(SETTINGS_FILE, _s)
             print(f"API saved to settings: {_api_val}")
     if not _api_val:
-        print("ERROR: No TIDAL HiFi API URL configured.")
-        print("  Set it at runtime with:  tuifi --api https://api.example-hifi-instance.com")
-        print("  or in settings.json directly:  { \"api\": \"https://api.example-hifi-instance.com\" }")
+        print("ERROR: No TIDAL HiFi API URL configured. Check the README for guidelines.")
+        print("  Set one at runtime (and it will be saved in settings) with: tuifi --api https://api.example-hifi-instance.com")
+        print("  or in settings.json directly: { \"api\": \"https://api.example-hifi-instance.com\" }")
         sys.exit(1)
 
     def wrapped(stdscr: "curses._CursesWindow") -> None:

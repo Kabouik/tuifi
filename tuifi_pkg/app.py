@@ -1213,7 +1213,7 @@ class App:
     # ---------------------------------------------------------------------------
     def prompt_text(self, title: str, initial: str = "") -> Optional[str]:
         h, w = self.stdscr.getmaxyx()
-        box_w = clamp(max(63, len(title) + 8), 34, w - 6)
+        box_w = clamp(max(73, len(title) + 8), 34, w - 6)
         box_h = 5
         y0, x0, win = self._popup_win(box_h, box_w)
         win.box()
@@ -1221,11 +1221,12 @@ class App:
         label_len = len(label) + 1
         s = initial
         cur = len(s)
+        undo_stack: list = []
         curses.curs_set(1)
         self.stdscr.nodelay(False)
         inner_w = max(1, box_w - 4 - label_len)
         input_x = 2 + label_len
-        hint_text = " ^a/^e: home/end  ^u/^k: clear to left/right  ^w: del word "
+        hint_text = " ^a/^e: home/end  ^u/^k: clear to left/right  ^w: del word  ^/: undo "
         while True:
             view_start = max(0, cur - inner_w + 1) if cur >= inner_w else 0
             display = s[view_start:view_start + inner_w]
@@ -1246,6 +1247,7 @@ class App:
                 except TypeError:
                     ch = -1
             if isinstance(ch, str):
+                undo_stack.append((s, cur))
                 s = s[:cur] + ch + s[cur:]
                 cur += 1
             elif ch == 27:
@@ -1262,10 +1264,12 @@ class App:
                 return s.strip()
             elif ch in (curses.KEY_BACKSPACE, 127, 8):
                 if cur > 0:
+                    undo_stack.append((s, cur))
                     s = s[:cur - 1] + s[cur:]
                     cur -= 1
             elif ch == curses.KEY_DC:
                 if cur < len(s):
+                    undo_stack.append((s, cur))
                     s = s[:cur] + s[cur + 1:]
             elif ch in (curses.KEY_LEFT, 2):
                 cur = max(0, cur - 1)
@@ -1276,8 +1280,10 @@ class App:
             elif ch in (curses.KEY_END, 5):
                 cur = len(s)
             elif ch == 11:
+                undo_stack.append((s, cur))
                 s = s[:cur]
             elif ch == 21:
+                undo_stack.append((s, cur))
                 s = s[cur:]
                 cur = 0
             elif ch == 23:
@@ -1286,8 +1292,12 @@ class App:
                     i -= 1
                 while i > 0 and s[i - 1] != " ":
                     i -= 1
+                undo_stack.append((s, cur))
                 s = s[:i] + s[cur:]
                 cur = i
+            elif ch == 31:
+                if undo_stack:
+                    s, cur = undo_stack.pop()
 
     def prompt_yes_no(self, title: str) -> bool:
         _, w = self.stdscr.getmaxyx()

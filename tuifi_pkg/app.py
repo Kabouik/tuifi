@@ -1541,13 +1541,13 @@ class App:
             idx = clamp(self.queue_play_idx, 0, len(self.queue_items) - 1)
             t = self.queue_items[idx]
             self.queue_play_idx = idx
-            self.play_track(t, resume=True)
             self.toast("Resuming…")
+            self._bg(lambda: self.play_track(t, resume=True), on_error="")
             return
         t = self._current_selection_track() if not self.current_track else self.current_track
         if not t: self.toast("No track"); return
-        self.play_track(t, resume=True)
         self.toast("Resuming…")
+        self._bg(lambda: self.play_track(t, resume=True), on_error="")
 
     # ---------------------------------------------------------------------------
     # priority queue
@@ -1605,9 +1605,13 @@ class App:
         self.queue_cursor = idx
         if idx in self.priority_queue:
             self.priority_queue.remove(idx)
-        self.play_track(self.queue_items[idx], start_pos=start_pos)
-        if self.last_error and (self.current_track is None or self.current_track.id != self.queue_items[idx].id):
-            self.queue_play_idx = prev_play_idx
+        t = self.queue_items[idx]
+        def _worker() -> None:
+            self.play_track(t, start_pos=start_pos)
+            if self.last_error and (self.current_track is None or self.current_track.id != t.id):
+                self.queue_play_idx = prev_play_idx
+            self._full_redraw()
+        self._bg(_worker, on_error="")
         self._full_redraw()
 
     def next_track(self) -> None:
@@ -5868,6 +5872,11 @@ class App:
                     self.start_download_tracks(list(self.album_tracks))
                     continue
                 if not self._queue_context() and self.tab == TAB_ARTIST:
+                    _dit = self._selected_left_item()
+                    if isinstance(_dit, tuple) and _dit[0] == "artist_header":
+                        if self.artist_albums:
+                            self._download_marked_albums_async(self.artist_albums)
+                        continue
                     alb = self._selected_left_album()
                     if alb:
                         self._bg_download_album(alb)
@@ -5942,7 +5951,7 @@ class App:
                         continue
                 it = self._selected_left_track()
                 if it:
-                    self.play_track(it)
+                    self._bg(lambda _t=it: self.play_track(_t), on_error="")
                 continue
 
         # Cleanup

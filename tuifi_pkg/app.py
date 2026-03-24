@@ -218,7 +218,7 @@ class App:
         self._cover_backend_cache: Optional[str] = None   # "ueberzugpp"/"chafa-kitty"/"chafa"/"none"
         self._cover_render_key: str = ""           # "path:WxH" to detect when re-render needed
         self._cover_render_buf: Optional[bytes] = None    # cached chafa/ANSI output
-        self._cover_sixel_visible: bool = False; self._cover_sixel_cols: int = 0
+        self._cover_sixel_visible: bool = False; self._cover_sixel_cols: int = 0; self._cover_sixel_rows: int = 0
         self._cover_ub_socket: Optional[str] = None; self._cover_ub_pid: Optional[int] = None
         self._cover_lyrics: bool = True; self._cover_lyrics_max_scroll: int = 10_000
         self._show_singles_eps: bool = bool(self.settings.get("include_singles_and_eps_in_artist_tab", False))
@@ -2844,8 +2844,29 @@ class App:
             else:
                 self.stdscr.addstr(y, x, " No cover art available for this track"[:max(0, w - 1)], self.C(10))
 
-    def _cover_img_cols(self, w: int) -> int:
+    def _cover_portrait(self, h: int, w: int) -> bool:
+        """Portrait mode: window is portrait in pixel terms (2:1 cell aspect ratio assumed).
+        Triggers as soon as there is room for a near-square cover plus minimum lyrics."""
+        if not self._cover_lyrics or (self.queue_overlay and self.tab != TAB_QUEUE):
+            return False
+        usable = h - 2 - 2 - 1  # tab bar, status bar, bottom gap
+        # A square cover needs ~w//2 rows; reserve 1 gap row + 4 minimum lyrics rows.
+        return usable >= w // 2 + 5
+
+    def _cover_img_rows_portrait(self, h: int, w: int) -> int:
+        """Height of the cover image in portrait layout.
+        Targets a square render (w//2 rows), capped so at least 3 lyrics content lines
+        remain.  Any space below the cover is handed to the lyrics panel."""
+        usable = h - 2 - 2 - 1  # tab bar, status bar, bottom gap
+        min_lyrics_h = 4         # 1 title bar + 3 content lines
+        gap = 1                  # blank row between cover and lyrics panel
+        ideal = w // 2           # square image assuming ~2:1 cell pixel ratio
+        return max(4, min(ideal, usable - min_lyrics_h - gap))
+
+    def _cover_img_cols(self, w: int, h: int = 0) -> int:
         """Compute cover image display width accounting for side panels."""
+        if h and self._cover_portrait(h, w):
+            return w  # portrait: cover spans full width
         if self.queue_overlay and self.tab != TAB_QUEUE:
             right_w = 44
         elif self._cover_lyrics:
@@ -2867,8 +2888,12 @@ class App:
             return
         top_h = 2
         status_h = 2
-        img_rows = h - top_h - status_h - 1  # -1 matches _render_cover_image gap
-        img_cols = self._cover_img_cols(w)
+        if self._cover_portrait(h, w):
+            img_rows = self._cover_img_rows_portrait(h, w)
+            img_cols = w
+        else:
+            img_rows = h - top_h - status_h - 1  # -1 matches _render_cover_image gap
+            img_cols = self._cover_img_cols(w)
         if img_rows <= 0 or img_cols <= 0: return
         fmt = "kitty" if backend == "chafa-kitty" else "sixel"
         render_key = f"{path}:{img_cols}x{img_rows}:{fmt}"
@@ -2904,8 +2929,12 @@ class App:
         # edge.  Writing a sixel that ends at the very last terminal row can cause
         # some terminals to scroll the screen, shifting the image and corrupting
         # the layout.
-        img_rows = h - top_h - status_h - 1
-        img_cols = self._cover_img_cols(w)
+        if self._cover_portrait(h, w):
+            img_rows = self._cover_img_rows_portrait(h, w)
+            img_cols = w
+        else:
+            img_rows = h - top_h - status_h - 1
+            img_cols = self._cover_img_cols(w)
         if img_rows <= 0 or img_cols <= 0: return
 
         chafa_fmt = "kitty" if backend == "chafa-kitty" else "sixel"
@@ -2919,6 +2948,7 @@ class App:
             self._cover_render_key = render_key
             self._cover_sixel_visible = True
             self._cover_sixel_cols = img_cols
+            self._cover_sixel_rows = img_rows
             return
 
         is_kitty = backend == "chafa-kitty"
@@ -2935,7 +2965,7 @@ class App:
         # Sixel: always re-send because ncurses wipes the area on every refresh.
         if render_key == self._cover_render_key and self._cover_render_buf:
             self._write_image_to_terminal(top_h, self._cover_render_buf, img_cols,
-                                          kitty=is_kitty)
+                                          img_rows, kitty=is_kitty)
             return
 
         try:
@@ -2955,7 +2985,7 @@ class App:
                 self._cover_render_buf = result.stdout
                 self._cover_render_key = render_key
                 self._write_image_to_terminal(top_h, result.stdout, img_cols,
-                                              kitty=is_kitty)
+                                              img_rows, kitty=is_kitty)
         except Exception as e:
             debug_log(f"chafa render error: {e}")
 
@@ -2969,7 +2999,7 @@ class App:
         return data[:idx + 3] + b"z=-1," + data[idx + 3:]
 
     def _write_image_to_terminal(self, top_row: int, data: bytes, cols: int = 0,
-                                  kitty: bool = False) -> None:
+                                  rows: int = 0, kitty: bool = False) -> None:
         """Write image data (sixel or ANSI) directly to the terminal at the given row."""
         # Strip trailing newlines — chafa often appends one, and writing a newline
         # when the cursor is near the bottom of the terminal causes the terminal to
@@ -2988,6 +3018,8 @@ class App:
         self._cover_sixel_visible = True
         if cols:
             self._cover_sixel_cols = cols
+        if rows:
+            self._cover_sixel_rows = rows
 
     def _cover_erase_terminal(self) -> None:
         """Remove the cover image from the terminal before a full curses redraw."""
@@ -3004,7 +3036,7 @@ class App:
             h, w = self.stdscr.getmaxyx()
             top_h = 2
             status_h = 2
-            img_rows = h - top_h - status_h
+            img_rows = self._cover_sixel_rows if self._cover_sixel_rows > 0 else (h - top_h - status_h)
             img_cols = self._cover_sixel_cols if self._cover_sixel_cols > 0 else w
             if img_rows > 0 and img_cols > 0:
                 blank_line = b" " * img_cols
@@ -4988,8 +5020,13 @@ class App:
             if t_cov and not self.lyrics_loading and not (self.lyrics_track_id == t_cov.id and self.lyrics_lines):
                 self.toggle_lyrics(t_cov)
                 self.lyrics_overlay = False
-            lyrics_w = self._lyrics_panel_w(w)
-            self._draw_cover_lyrics_panel(top_h, w - lyrics_w, usable_h, lyrics_w)
+            if self._cover_portrait(h, w):  # portrait: lyrics below the cover image
+                cover_rows = self._cover_img_rows_portrait(h, w)
+                self._draw_cover_lyrics_panel(top_h + cover_rows + 1, 0,
+                                              usable_h - cover_rows - 1, w)
+            else:       # landscape: lyrics on the right
+                lyrics_w = self._lyrics_panel_w(w)
+                self._draw_cover_lyrics_panel(top_h, w - lyrics_w, usable_h, lyrics_w)
 
         if self.tab == TAB_COVER and self.cover_path:
             # Prevent ncurses scroll-region optimisation for the content rows.

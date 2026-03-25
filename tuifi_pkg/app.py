@@ -3903,7 +3903,7 @@ class App:
                     self._popup_refresh(y0, x0, box_h, box_w)
 
                 t_ref = track
-                title = f"Lyrics – {t_ref.artist} - {t_ref.title}"
+                title = f" Lyrics – {t_ref.artist} - {t_ref.title} "
                 if self.lyrics_loading and self.lyrics_track_id == track.id:
                     lines: List[str] = ["Loading lyrics…"]
                 else:

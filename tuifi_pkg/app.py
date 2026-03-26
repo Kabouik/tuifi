@@ -1635,13 +1635,6 @@ class App:
                     return
         self.play_queue_index(self.queue_play_idx)
 
-    def prev_track(self) -> None:
-        if not self.queue_items: return
-        self.queue_play_idx -= 1
-        if self.queue_play_idx < 0:
-            self.queue_play_idx = len(self.queue_items) - 1 if self.repeat_mode == 1 else 0
-        self.play_queue_index(self.queue_play_idx)
-
     # ---------------------------------------------------------------------------
     # likes
     # ---------------------------------------------------------------------------
@@ -1951,35 +1944,6 @@ class App:
 
     def _download_marked_albums_async(self, albums: List[Album]) -> None:
         self._process_marked_albums_async(albums, self.start_download_tracks)
-
-    def _open_artist_from_album_async(self, album: Album) -> None:
-        """Switch to Artist tab and load the artist, resolving artist_id via the album API."""
-        self.switch_tab(TAB_ARTIST, refresh=False)
-        self.toast("Loading artist…")
-        def worker() -> None:
-            ar_id: Optional[int] = None
-            ar_name = album.artist
-            aid = album.id if album.id else None
-            if not aid and album.track_id:
-                aid = self._resolve_album_id_for_album(album)
-            if aid:
-                payload = self.client.album(aid)
-                data = payload.get("data") if isinstance(payload, dict) else None
-                if isinstance(data, dict):
-                    ar = data.get("artist")
-                    if isinstance(ar, dict) and ar.get("id"):
-                        ar_id = int(ar["id"])
-                        ar_name = ar.get("name") or ar_name
-                    if not ar_id:
-                        ars = data.get("artists")
-                        if isinstance(ars, list) and ars and isinstance(ars[0], dict):
-                            if ars[0].get("id"):
-                                ar_id = int(ars[0]["id"])
-                                ar_name = ars[0].get("name") or ar_name
-            ctx = Track(id=album.track_id or 0, title="", artist=ar_name,
-                        album="", year="????", track_no=0, artist_id=ar_id or 0)
-            self.fetch_artist_async(ctx)
-        self._bg(worker)
 
     def _enqueue_marked_artists_async(self, artists: List[Artist], insert_after_playing: bool) -> None:
         self.toast(f"Fetching {len(artists)} artists…")
@@ -2814,35 +2778,35 @@ class App:
 
     def _draw_cover_hint(self, y: int, x: int, h: int, w: int) -> None:
         """Draw status text in the cover tab area (image rendering happens after curses refresh)."""
+        backend = self._cover_backend()
+        t = self._current_selection_track() or self.current_track
+        if not t:
+            self.stdscr.addstr(y, x, " Play or select a track to show its cover art"[:max(0, w - 1)], self.C(10))
+            return
+        if backend == "none":
+            lines = [
+                " No image renderer found. Install one of:",
+                "   chafa   — terminal image renderer (sixel/symbols, recommended)",
+                "   ueberzugpp — overlay image renderer",
+                " On Arch:   pacman -S chafa",
+                " On Debian: apt install chafa",
+                " On macOS:  brew install chafa",
+                "",
+                " Check sixel support: printf '\\033[c' in your terminal",
+                " (look for '4;' in the response, e.g. foot, WezTerm, xterm -ti vt340)",
+            ]
+            for i, line in enumerate(lines):
+                if y + i < h - 1:
+                    self.stdscr.addstr(y + i, x, line[:max(0, w - 1)], self.C(10))
+            return
         # If a cover is already on screen (old or newly loaded), skip all text so
         # ncurses doesn't write to the same row where the sixel starts, which
         # would briefly erase that row and cause a subtle flicker.
         if self.cover_path: return
-        backend = self._cover_backend()
         if self.cover_loading:
             self.stdscr.addstr(y, x, " Loading cover…"[:max(0, w - 1)], self.C(4))
-        elif not self.cover_path:
-            t = self._current_selection_track() or self.current_track
-            if not t:
-                self.stdscr.addstr(y, x, " Play or select a track to show its cover art"[:max(0, w - 1)], self.C(10))
-                return
-            if backend == "none":
-                lines = [
-                    " No image renderer found. Install one of:",
-                    "   chafa   — terminal image renderer (sixel/symbols, recommended)",
-                    "   ueberzugpp — overlay image renderer",
-                    " On Arch:   pacman -S chafa",
-                    " On Debian: apt install chafa",
-                    " On macOS:  brew install chafa",
-                    "",
-                    " Check sixel support: printf '\\033[c' in your terminal",
-                    " (look for '4;' in the response, e.g. foot, WezTerm, xterm -ti vt340)",
-                ]
-                for i, line in enumerate(lines):
-                    if y + i < h - 1:
-                        self.stdscr.addstr(y + i, x, line[:max(0, w - 1)], self.C(10))
-            else:
-                self.stdscr.addstr(y, x, " No cover art available for this track"[:max(0, w - 1)], self.C(10))
+        else:
+            self.stdscr.addstr(y, x, " No cover art available for this track"[:max(0, w - 1)], self.C(10))
 
     def _cover_portrait(self, h: int, w: int) -> bool:
         """Portrait mode: window is portrait in pixel terms (2:1 cell aspect ratio assumed).
@@ -4012,9 +3976,6 @@ class App:
         else:
             self.left_idx = idx
 
-    def _get_filter_cursor(self) -> int:
-        return self.queue_cursor if self.tab == TAB_QUEUE else self.left_idx
-
     def filter_prompt(self) -> None:
         q = self.prompt_text("Filter:", self.filter_q)
         if q is None: return
@@ -4902,33 +4863,6 @@ class App:
             self.help_scroll = scroll
             self.stdscr.nodelay(True)
             self._full_redraw()
-
-    def _draw_info(self, _erase_bg: bool = True) -> None:
-        title, lines = self._info_lines()
-        if self.info_artist and not self.info_track and not self.info_album:
-            self._draw_overlay_box(title, lines, self.info_scroll, box_w=76, box_h=20, _erase_bg=_erase_bg)
-        elif self.info_album and not self.info_track:
-            self._draw_overlay_box(title, lines, self.info_scroll, box_w=76, box_h=16, _erase_bg=_erase_bg)
-        else:
-            box_h = 10 if not self.info_track else 20
-            self._draw_overlay_box(title, lines, self.info_scroll, box_w=72, box_h=box_h, _erase_bg=_erase_bg)
-
-    def _draw_lyrics(self, _erase_bg: bool = True) -> None:
-        t_id = self.lyrics_track_id
-        title = "Lyrics"
-        t_ref = self.lyrics_track
-        if t_ref is None and self.current_track and self.current_track.id == t_id:
-            t_ref = self.current_track
-        if t_ref:
-            title = f"Lyrics – {t_ref.artist} - {t_ref.title}"
-        if self.lyrics_loading:
-            lines = ["Loading lyrics…"]
-        else:
-            lines = self.lyrics_lines or ["(empty)"]
-        h, _ = self.stdscr.getmaxyx()
-        inner_h = min(h - 8, 30 - 2)
-        self._lyrics_overlay_max_scroll = max(0, len(lines) - inner_h)
-        self._draw_overlay_box(title[:80], lines, self.lyrics_scroll, box_w=84, box_h=30, _erase_bg=_erase_bg)
 
     def _draw_liked_row(self, yy: int, x: int, w: int, i: int, selected: bool, marked: bool,
                         content: str, color: int = 0) -> None:

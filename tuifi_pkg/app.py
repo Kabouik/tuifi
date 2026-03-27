@@ -1303,6 +1303,17 @@ class App:
             elif ch == 31:
                 if undo_stack:
                     s, cur = undo_stack.pop()
+            elif ch == curses.KEY_MOUSE:
+                try:
+                    _, mx, my, _, bstate = curses.getmouse()
+                except curses.error:
+                    continue
+                if (not (y0 <= my < y0 + box_h and x0 <= mx < x0 + box_w)
+                        and bstate & (curses.BUTTON1_PRESSED | curses.BUTTON3_PRESSED)):
+                    curses.curs_set(0)
+                    self.stdscr.nodelay(True)
+                    self._full_redraw()
+                    return None
 
     def prompt_yes_no(self, title: str) -> bool:
         _, w = self.stdscr.getmaxyx()

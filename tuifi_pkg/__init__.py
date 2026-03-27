@@ -28,6 +28,19 @@ TAB_NAMES = {
     TAB_COVER:       "Cover\u2070",
 }
 
+TAB_SHORT_NAMES = {
+    TAB_SEARCH:      "Src\u00b9",
+    TAB_QUEUE:       "Que\u00b2",
+    TAB_RECOMMENDED: "Rec\u00b3",
+    TAB_MIX:         "Mix\u2074",
+    TAB_ARTIST:      "Art\u2075",
+    TAB_ALBUM:       "Alb\u2076",
+    TAB_LIKED:       "Lkd\u2077",
+    TAB_PLAYLISTS:   "Pls\u2078",
+    TAB_HISTORY:     "Hist\u2079",
+    TAB_COVER:       "Cov\u2070",
+}
+
 # Autoplay modes
 AUTOPLAY_OFF         = 0
 AUTOPLAY_MIX         = 1

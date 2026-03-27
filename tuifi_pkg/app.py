@@ -645,9 +645,11 @@ class App:
         curses.cbreak()
         curses.mousemask(curses.ALL_MOUSE_EVENTS)
         curses.mouseinterval(0)
-        # SGR extended mouse protocol: coordinates as decimals, required for
-        # wide terminals and touch input (e.g. Termux on Android).
-        sys.stdout.write("\033[?1006h")
+        # Explicitly enable mouse button tracking (?1000h) and SGR extended
+        # coordinates (?1006h). Sending these directly bypasses ncurses's
+        # terminfo check so Termux/Android receives the sequences even when
+        # its terminfo entry lacks the mouse capability.
+        sys.stdout.write("\033[?1000h\033[?1006h")
         sys.stdout.flush()
         if curses.has_colors():
             curses.start_color()
@@ -6170,7 +6172,7 @@ class App:
                     self.settings["_resume_position"] = float(_tp)
         except Exception:
             pass
-        sys.stdout.write("\033[?1006l")
+        sys.stdout.write("\033[?1006l\033[?1000l")
         sys.stdout.flush()
         self._persist_settings()
         self.meta.stop()

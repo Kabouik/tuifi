@@ -220,6 +220,9 @@ class App:
         self._cover_render_buf: Optional[bytes] = None    # cached chafa/ANSI output
         self._cover_sixel_visible: bool = False; self._cover_sixel_cols: int = 0; self._cover_sixel_rows: int = 0; self._cover_sixel_x: int = 0
         self._cover_ub_socket: Optional[str] = None; self._cover_ub_pid: Optional[int] = None
+        self._q_overlay_scroll: int = 0
+        self._mouse_last_press: tuple = (0.0, -1, -1)  # (time, row, col) for double-click / long-press
+        self._mouse_long_press_pending: bool = False
         self._cover_lyrics: bool = True; self._cover_lyrics_max_scroll: int = 10_000
         self._show_singles_eps: bool = bool(self.settings.get("include_singles_and_eps_in_artist_tab", False))
         self._last_artist_fetch_track: Optional["Track"] = None
@@ -640,6 +643,8 @@ class App:
         self.stdscr.keypad(True)
         curses.noecho()
         curses.cbreak()
+        curses.mousemask(curses.ALL_MOUSE_EVENTS)
+        curses.mouseinterval(0)
         if curses.has_colors():
             curses.start_color()
             curses.use_default_colors()
@@ -2222,6 +2227,25 @@ class App:
                         ch = ord(ch)
                     except TypeError:
                         ch = -1
+
+                if ch == curses.KEY_MOUSE:
+                    try:
+                        _, mx, my, _, bstate = curses.getmouse()
+                    except curses.error:
+                        continue
+                    if not (y0 <= my < y0 + box_h and x0 <= mx < x0 + box_w):
+                        if bstate & (curses.BUTTON1_PRESSED | curses.BUTTON3_PRESSED):
+                            return -1                                          # press outside → close
+                        continue                                               # release outside → ignore
+                    if bstate & curses.BUTTON1_PRESSED:
+                        row_in_box = my - y0 - item_row
+                        if 0 <= row_in_box < inner_h:
+                            fi = scroll + row_in_box
+                            if 0 <= fi < len(visible):
+                                if fi == idx:
+                                    return visible[idx][0]                    # re-click selected → confirm
+                                idx = fi
+                    continue
 
                 # Esc always closes the popup regardless of mode
                 if ch == 27:
@@ -4571,7 +4595,12 @@ class App:
         if not self.queue_items: return
 
         self.queue_cursor = clamp(self.queue_cursor, 0, len(self.queue_items) - 1)
-        q_scroll = max(0, self.queue_cursor - h + 1) if self.queue_cursor >= h else 0
+        if self.queue_cursor < self._q_overlay_scroll:
+            self._q_overlay_scroll = self.queue_cursor
+        if self.queue_cursor >= self._q_overlay_scroll + h:
+            self._q_overlay_scroll = self.queue_cursor - h + 1
+        self._q_overlay_scroll = clamp(self._q_overlay_scroll, 0, max(0, len(self.queue_items) - h))
+        q_scroll = self._q_overlay_scroll
 
         for i in range(q_scroll, min(len(self.queue_items), q_scroll + min(h, 14))):
             t = self.queue_items[i]
@@ -5275,10 +5304,77 @@ class App:
 
             ch = self.stdscr.getch()
             if ch == -1:
+                if self._mouse_long_press_pending:
+                    t0, _, _ = self._mouse_last_press
+                    if time.time() - t0 >= 0.5:
+                        self._mouse_long_press_pending = False
+                        self.context_actions_popup()
                 time.sleep(0.004)
                 continue
 
             self._full_redraw()
+
+            if ch == curses.KEY_MOUSE:
+                try:
+                    _, mx, my, _, bstate = curses.getmouse()
+                except curses.error:
+                    continue
+                h, w = self.stdscr.getmaxyx()
+                top_h = 3 if self.tab == TAB_LIKED else 2
+                usable_h = h - top_h - 2
+                queue_panel = self.queue_overlay and self.tab != TAB_QUEUE
+                left_w = w if not queue_panel else max(20, w - 44)
+                _btn5 = getattr(curses, 'BUTTON5_PRESSED', 0x200000)
+                if bstate & (curses.BUTTON4_PRESSED | _btn5):               # wheel
+                    delta = -1 if bstate & curses.BUTTON4_PRESSED else 1
+                    if queue_panel and mx >= left_w:
+                        self._q_overlay_scroll = clamp(
+                            self._q_overlay_scroll + delta, 0,
+                            max(0, len(self.queue_items) - (usable_h - 1)))
+                    else:
+                        curses.ungetch(ord('k') if delta < 0 else ord('j'))
+                elif my < 2 and bstate & curses.BUTTON1_PRESSED:             # tab bar
+                    order = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
+                    full = "  ".join(TAB_NAMES[i] for i in order)
+                    ns = TAB_NAMES if len(full) < w else (
+                         TAB_SHORT_NAMES if len("  ".join(TAB_SHORT_NAMES[i] for i in order)) < w
+                         else {i: TAB_NAMES[i][-1] for i in order})
+                    pos = 0
+                    for i in order:
+                        nm = ns[i]
+                        if pos <= mx < pos + len(nm):
+                            curses.ungetch(ord(str(i % 10)))  # reuse full key handler (context, confirm dialogs, etc.)
+                            break
+                        pos += len(nm) + 2
+                elif top_h <= my < top_h + usable_h:
+                    if bstate & curses.BUTTON1_PRESSED:
+                        now = time.time()
+                        t0, ly, lx = self._mouse_last_press
+                        is_dbl = now - t0 < 0.35 and ly == my and lx == mx
+                        self._mouse_last_press = (now, my, mx)
+                        self._mouse_long_press_pending = not is_dbl
+                        if queue_panel and mx >= left_w:                      # queue overlay
+                            clicked = self._q_overlay_scroll + (my - top_h - 1)
+                            if 0 <= clicked < len(self.queue_items):
+                                self.queue_cursor = clamp(clicked, 0, len(self.queue_items) - 1)
+                                self.focus = "queue"
+                                if is_dbl: curses.ungetch(10)
+                        else:                                                  # left panel
+                            _, items = self._left_items()
+                            clicked = self.left_scroll + (my - top_h)
+                            if 0 <= clicked < len(items):
+                                if self.tab == TAB_QUEUE:
+                                    self.queue_cursor = clamp(clicked, 0, len(items) - 1)
+                                    self.focus = "queue"
+                                else:
+                                    self.left_idx = clicked
+                                    self.focus = "left"
+                                if is_dbl: curses.ungetch(10)
+                    elif bstate & curses.BUTTON3_PRESSED:                     # RMB → context menu
+                        self.context_actions_popup()
+                    elif bstate & curses.BUTTON1_RELEASED:
+                        self._mouse_long_press_pending = False
+                continue
 
             if ch == 27:
                 # Peek for an escape sequence or Alt+digit

@@ -645,6 +645,10 @@ class App:
         curses.cbreak()
         curses.mousemask(curses.ALL_MOUSE_EVENTS)
         curses.mouseinterval(0)
+        # SGR extended mouse protocol: coordinates as decimals, required for
+        # wide terminals and touch input (e.g. Termux on Android).
+        sys.stdout.write("\033[?1006h")
+        sys.stdout.flush()
         if curses.has_colors():
             curses.start_color()
             curses.use_default_colors()
@@ -6166,6 +6170,8 @@ class App:
                     self.settings["_resume_position"] = float(_tp)
         except Exception:
             pass
+        sys.stdout.write("\033[?1006l")
+        sys.stdout.flush()
         self._persist_settings()
         self.meta.stop()
         self.mp_poller.stop()

@@ -26,7 +26,7 @@ from tuifi_pkg import (
     APP_NAME, VERSION, DEFAULT_API,
     TAB_SEARCH, TAB_QUEUE, TAB_RECOMMENDED, TAB_MIX, TAB_ARTIST,
     TAB_ALBUM, TAB_LIKED, TAB_PLAYLISTS, TAB_HISTORY, TAB_COVER,
-    TAB_NAMES,
+    TAB_NAMES, TAB_SHORT_NAMES,
     AUTOPLAY_OFF, AUTOPLAY_MIX, AUTOPLAY_RECOMMENDED, AUTOPLAY_NAMES,
     QUALITY_ORDER,
     LIKED_FILTER_NAMES,
@@ -218,7 +218,7 @@ class App:
         self._cover_backend_cache: Optional[str] = None   # "ueberzugpp"/"chafa-kitty"/"chafa"/"none"
         self._cover_render_key: str = ""           # "path:WxH" to detect when re-render needed
         self._cover_render_buf: Optional[bytes] = None    # cached chafa/ANSI output
-        self._cover_sixel_visible: bool = False; self._cover_sixel_cols: int = 0; self._cover_sixel_rows: int = 0
+        self._cover_sixel_visible: bool = False; self._cover_sixel_cols: int = 0; self._cover_sixel_rows: int = 0; self._cover_sixel_x: int = 0
         self._cover_ub_socket: Optional[str] = None; self._cover_ub_pid: Optional[int] = None
         self._cover_lyrics: bool = True; self._cover_lyrics_max_scroll: int = 10_000
         self._show_singles_eps: bool = bool(self.settings.get("include_singles_and_eps_in_artist_tab", False))
@@ -2809,13 +2809,11 @@ class App:
             self.stdscr.addstr(y, x, " No cover art available for this track"[:max(0, w - 1)], self.C(10))
 
     def _cover_portrait(self, h: int, w: int) -> bool:
-        """Portrait mode: window is portrait in pixel terms (2:1 cell aspect ratio assumed).
-        Triggers as soon as there is room for a near-square cover plus minimum lyrics."""
+        """Portrait mode: terminal is square or taller in pixel terms (2:1 cell ratio assumed).
+        Triggers as soon as pixel height >= pixel width, i.e. w <= 2*h."""
         if not self._cover_lyrics or (self.queue_overlay and self.tab != TAB_QUEUE):
             return False
-        usable = h - 2 - 2 - 1  # tab bar, status bar, bottom gap
-        # A square cover needs ~w//2 rows; reserve 1 gap row + 4 minimum lyrics rows.
-        return usable >= w // 2 + 5
+        return w <= h * 2
 
     def _cover_img_rows_portrait(self, h: int, w: int) -> int:
         """Height of the cover image in portrait layout.
@@ -2823,7 +2821,7 @@ class App:
         remain.  Any space below the cover is handed to the lyrics panel."""
         usable = h - 2 - 2 - 1  # tab bar, status bar, bottom gap
         min_lyrics_h = 4         # 1 title bar + 3 content lines
-        gap = 1                  # blank row between cover and lyrics panel
+        gap = 1                  # blank row between lyrics panel and status bar
         ideal = w // 2           # square image assuming ~2:1 cell pixel ratio
         return max(4, min(ideal, usable - min_lyrics_h - gap))
 
@@ -2854,7 +2852,7 @@ class App:
         status_h = 2
         if self._cover_portrait(h, w):
             img_rows = self._cover_img_rows_portrait(h, w)
-            img_cols = w
+            img_cols = min(w, img_rows * 2)
         else:
             img_rows = h - top_h - status_h - 1  # -1 matches _render_cover_image gap
             img_cols = self._cover_img_cols(w)
@@ -2895,10 +2893,12 @@ class App:
         # the layout.
         if self._cover_portrait(h, w):
             img_rows = self._cover_img_rows_portrait(h, w)
-            img_cols = w
+            img_cols = min(w, img_rows * 2)
+            img_x = (w - img_cols) // 2
         else:
             img_rows = h - top_h - status_h - 1
             img_cols = self._cover_img_cols(w)
+            img_x = 0
         if img_rows <= 0 or img_cols <= 0: return
 
         chafa_fmt = "kitty" if backend == "chafa-kitty" else "sixel"
@@ -2907,12 +2907,13 @@ class App:
         if backend == "ueberzugpp":
             if not self._ueberzug_start(): return
             # ueberzugpp is idempotent — send on every render
-            self._ueberzug_show(self.cover_path, x=0, y=top_h,
+            self._ueberzug_show(self.cover_path, x=img_x, y=top_h,
                                 w=img_cols, h=img_rows)
             self._cover_render_key = render_key
             self._cover_sixel_visible = True
             self._cover_sixel_cols = img_cols
             self._cover_sixel_rows = img_rows
+            self._cover_sixel_x = img_x
             return
 
         is_kitty = backend == "chafa-kitty"
@@ -2929,7 +2930,7 @@ class App:
         # Sixel: always re-send because ncurses wipes the area on every refresh.
         if render_key == self._cover_render_key and self._cover_render_buf:
             self._write_image_to_terminal(top_h, self._cover_render_buf, img_cols,
-                                          img_rows, kitty=is_kitty)
+                                          img_rows, kitty=is_kitty, x_offset=img_x)
             return
 
         try:
@@ -2949,7 +2950,7 @@ class App:
                 self._cover_render_buf = result.stdout
                 self._cover_render_key = render_key
                 self._write_image_to_terminal(top_h, result.stdout, img_cols,
-                                              img_rows, kitty=is_kitty)
+                                              img_rows, kitty=is_kitty, x_offset=img_x)
         except Exception as e:
             debug_log(f"chafa render error: {e}")
 
@@ -2963,8 +2964,9 @@ class App:
         return data[:idx + 3] + b"z=-1," + data[idx + 3:]
 
     def _write_image_to_terminal(self, top_row: int, data: bytes, cols: int = 0,
-                                  rows: int = 0, kitty: bool = False) -> None:
-        """Write image data (sixel or ANSI) directly to the terminal at the given row."""
+                                  rows: int = 0, kitty: bool = False,
+                                  x_offset: int = 0) -> None:
+        """Write image data (sixel or ANSI) directly to the terminal at the given row/col."""
         # Strip trailing newlines — chafa often appends one, and writing a newline
         # when the cursor is near the bottom of the terminal causes the terminal to
         # scroll, shifting the cover image and corrupting the layout.
@@ -2973,10 +2975,10 @@ class App:
             data = self._kitty_set_z_below(data)
         # Save cursor, move to content area, write image, restore cursor
         sys.stdout.buffer.write(
-            b"\0337"                                          # save cursor (VT100)
-            + f"\033[{top_row + 1};1H".encode()              # move to row, col 1
+            b"\0337"                                                   # save cursor (VT100)
+            + f"\033[{top_row + 1};{x_offset + 1}H".encode()          # move to row, col
             + data
-            + b"\0338"                                        # restore cursor
+            + b"\0338"                                                 # restore cursor
         )
         sys.stdout.buffer.flush()
         self._cover_sixel_visible = True
@@ -2984,6 +2986,7 @@ class App:
             self._cover_sixel_cols = cols
         if rows:
             self._cover_sixel_rows = rows
+        self._cover_sixel_x = x_offset
 
     def _cover_erase_terminal(self) -> None:
         """Remove the cover image from the terminal before a full curses redraw."""
@@ -3004,8 +3007,9 @@ class App:
             img_cols = self._cover_sixel_cols if self._cover_sixel_cols > 0 else w
             if img_rows > 0 and img_cols > 0:
                 blank_line = b" " * img_cols
+                col = self._cover_sixel_x + 1
                 buf = b"".join(
-                    f"\033[{top_h + 1 + r};1H".encode() + blank_line
+                    f"\033[{top_h + 1 + r};{col}H".encode() + blank_line
                     for r in range(img_rows)
                 )
                 sys.stdout.buffer.write(buf)
@@ -4181,9 +4185,19 @@ class App:
 
     def _draw_tabs(self, y: int, x: int, w: int) -> None:
         order = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
-        s = "  ".join([TAB_NAMES[i] for i in order])[:max(0, w - 1)]
+        full = "  ".join(TAB_NAMES[i] for i in order)
+        if len(full) < w:
+            names, s = TAB_NAMES, full
+        else:
+            short = "  ".join(TAB_SHORT_NAMES[i] for i in order)
+            if len(short) < w:
+                names, s = TAB_SHORT_NAMES, short
+            else:
+                names = {i: TAB_NAMES[i][-1] for i in order}
+                s = "  ".join(names[i] for i in order)
+        s = s[:max(0, w - 1)]
         self.stdscr.addstr(y, x, s, self.C(4))
-        cur = TAB_NAMES.get(self.tab, "")
+        cur = names.get(self.tab, "")
         idx = s.find(cur)
         if idx >= 0:
             self.stdscr.addstr(y + 1, x + idx, "─" * min(len(cur), max(0, w - idx - 1)), self.C(5) or curses.A_BOLD)
@@ -4956,7 +4970,7 @@ class App:
                 self.lyrics_overlay = False
             if self._cover_portrait(h, w):  # portrait: lyrics below the cover image
                 cover_rows = self._cover_img_rows_portrait(h, w)
-                self._draw_cover_lyrics_panel(top_h + cover_rows + 1, 0,
+                self._draw_cover_lyrics_panel(top_h + cover_rows, 0,
                                               usable_h - cover_rows - 1, w)
             else:       # landscape: lyrics on the right
                 lyrics_w = self._lyrics_panel_w(w)

@@ -2379,6 +2379,8 @@ class App:
                 ("Like & save corresponding mix…", lambda: (
                     self.save_mix_as_playlist_async(n, it)
                     if (n := self.prompt_text("Mix name:", f"(Mix) {it.artist} - {it.title}")) else None)),
+                ("Show lyrics [v]",           lambda: curses.ungetch(ord("v"))),
+                ("Show info [i]",             lambda: curses.ungetch(ord("i"))),
             ]
             self._run_actions(f"{it.artist} — {it.title}", actions)
 
@@ -2399,6 +2401,8 @@ class App:
                 ("Like & save corresponding mix…", lambda: (
                     self.save_mix_as_playlist_async(n, it)
                     if (n := self.prompt_text("Mix name:", f"(Mix) {it.artist} - {it.title}")) else None)),
+                ("Show lyrics [v]",      lambda: curses.ungetch(ord("v"))),
+                ("Show info [i]",        lambda: curses.ungetch(ord("i"))),
             ]
             self._run_actions(f"{it.artist} — {it.title}", actions)
 
@@ -2413,7 +2417,8 @@ class App:
                 ("Add to playlist [a]",              lambda: self._add_artist_to_playlist_async(it)),
                 ("Download artist [d]",              lambda: self._download_artist_async(it)),
                 ("Similar artists [s]",              lambda: self.show_similar_artists_dialog(it)),
-            ]
+                ("Show lyrics [v]",                  lambda: curses.ungetch(ord("v"))),
+            ] + ([] if self.tab == TAB_ARTIST else [("Show info [i]", lambda: curses.ungetch(ord("i")))])
             self._run_actions(it.name, actions)
 
         elif isinstance(it, str):
@@ -2425,6 +2430,8 @@ class App:
                 ("Add to playlist [a]",                            lambda: self._add_playlist_to_playlist_async(it)),
                 ("Download with subfolders [d]",                   lambda: self._download_playlist_async(it, flat=False)),
                 ("Download flat [D]",                              lambda: self._download_playlist_async(it, flat=True)),
+                ("Show lyrics [v]",                                lambda: curses.ungetch(ord("v"))),
+                ("Show info [i]",                                  lambda: curses.ungetch(ord("i"))),
             ]
             self._run_actions(it, actions)
 
@@ -2849,10 +2856,8 @@ class App:
         ideal = w // 2           # square image assuming ~2:1 cell pixel ratio
         return max(4, min(ideal, usable - min_lyrics_h - gap))
 
-    def _cover_img_cols(self, w: int, h: int = 0) -> int:
+    def _cover_img_cols(self, w: int) -> int:
         """Compute cover image display width accounting for side panels."""
-        if h and self._cover_portrait(h, w):
-            return w  # portrait: cover spans full width
         if self.queue_overlay and self.tab != TAB_QUEUE:
             right_w = 44
         elif self._cover_lyrics:
@@ -3503,6 +3508,22 @@ class App:
                 if ch == -1:
                     continue
 
+                if ch == curses.KEY_MOUSE:
+                    try:
+                        _, mx, my, _, bstate = curses.getmouse()
+                    except curses.error:
+                        continue
+                    if not (y0 <= my < y0 + box_h and x0 <= mx < x0 + box_w):
+                        if bstate & (curses.BUTTON1_PRESSED | curses.BUTTON3_PRESSED):
+                            break
+                        continue
+                    _btn5 = getattr(curses, 'BUTTON5_PRESSED', 0x200000)
+                    if bstate & curses.BUTTON4_PRESSED:
+                        info_scroll = max(0, info_scroll - 3)
+                    elif bstate & _btn5:
+                        info_scroll = min(max_scroll, info_scroll + 3)
+                    continue
+
                 if ch in (27, ord("q"), ord("i"), ord("I")):
                     break
                 elif ch in (ord("j"), curses.KEY_DOWN, ord("k"), curses.KEY_UP):
@@ -3687,6 +3708,7 @@ class App:
         box_h = min(h - 6, max(8, len(artists) + 4))
         y0, x0, win = self._popup_win(box_h, box_w)
         idx = 0
+        _last_click: tuple = (0.0, -1)
         hint = " j/k ^n/^p: navigate  Enter/5: go to  Esc/q: close "
         hint2 = " a: add to playlist   e/E: enqueue    l: like "
         try:
@@ -3714,6 +3736,29 @@ class App:
                 self.stdscr.timeout(100)
                 ch = self._get_wch_int()
                 if ch == -1:
+                    continue
+
+                if ch == curses.KEY_MOUSE:
+                    try:
+                        _, mx, my, _, bstate = curses.getmouse()
+                    except curses.error:
+                        continue
+                    if not (y0 <= my < y0 + box_h and x0 <= mx < x0 + box_w):
+                        if bstate & (curses.BUTTON1_PRESSED | curses.BUTTON3_PRESSED):
+                            break
+                        continue
+                    if bstate & curses.BUTTON1_PRESSED:
+                        row_in_box = my - y0 - 1
+                        if 0 <= row_in_box < inner_h and scroll + row_in_box < len(artists):
+                            fi = scroll + row_in_box
+                            now_t = time.time()
+                            is_dbl = now_t - _last_click[0] < 0.35 and _last_click[1] == fi
+                            _last_click = (now_t, fi)
+                            if is_dbl:
+                                ar = artists[fi]
+                                self.open_artist_by_id(ar.id, ar.name)
+                                break
+                            idx = fi
                     continue
 
                 if ch in (ord("j"), curses.KEY_DOWN, 14):
@@ -3928,6 +3973,22 @@ class App:
 
                 ch = self._get_wch_int()
                 if ch == -1:
+                    continue
+
+                if ch == curses.KEY_MOUSE:
+                    try:
+                        _, mx, my, _, bstate = curses.getmouse()
+                    except curses.error:
+                        continue
+                    if not (y0 <= my < y0 + box_h and x0 <= mx < x0 + box_w):
+                        if bstate & (curses.BUTTON1_PRESSED | curses.BUTTON3_PRESSED):
+                            break
+                        continue
+                    _btn5 = getattr(curses, 'BUTTON5_PRESSED', 0x200000)
+                    if bstate & curses.BUTTON4_PRESSED:
+                        scroll = max(0, scroll - 3)
+                    elif bstate & _btn5:
+                        scroll = min(max_scroll, scroll + 3)
                     continue
 
                 if ch in (27, ord("v"), ord("V"), ord("q")):
@@ -4207,19 +4268,19 @@ class App:
             return curses.color_pair(1)
         return curses.color_pair(4)
 
+    def _tab_names_dict(self, w: int) -> dict:
+        """Return the appropriate tab-name mapping for the available width (full/short/digit)."""
+        order = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
+        if len("  ".join(TAB_NAMES[i] for i in order)) < w:
+            return TAB_NAMES
+        if len("  ".join(TAB_SHORT_NAMES[i] for i in order)) < w:
+            return TAB_SHORT_NAMES
+        return {i: TAB_NAMES[i][-1] for i in order}
+
     def _draw_tabs(self, y: int, x: int, w: int) -> None:
         order = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
-        full = "  ".join(TAB_NAMES[i] for i in order)
-        if len(full) < w:
-            names, s = TAB_NAMES, full
-        else:
-            short = "  ".join(TAB_SHORT_NAMES[i] for i in order)
-            if len(short) < w:
-                names, s = TAB_SHORT_NAMES, short
-            else:
-                names = {i: TAB_NAMES[i][-1] for i in order}
-                s = "  ".join(names[i] for i in order)
-        s = s[:max(0, w - 1)]
+        names = self._tab_names_dict(w)
+        s = "  ".join(names[i] for i in order)[:max(0, w - 1)]
         self.stdscr.addstr(y, x, s, self.C(4))
         cur = names.get(self.tab, "")
         idx = s.find(cur)
@@ -4964,17 +5025,32 @@ class App:
         self._redraw_status_only = False
         self._need_redraw = False
 
-        # On the cover tab with a valid cover, keep the existing sixel in place
-        # while curses repaints the UI chrome — the new cover is written after
-        # stdscr.refresh(), and overlays are drawn on top of it afterwards.
-        # On any other tab (or if cover_path is unset), erase any stale sixel first.
-        if hide_cover or not (self.tab == TAB_COVER and self.cover_path): # Specific line to hide cover when the lyrics popup (v) is visible
-            self._cover_erase_terminal()
-        # Full redraw: stdscr.erase()+refresh() will overwrite the sixel area with
-        # spaces, so mark it as no longer visible.  This ensures _render_cover_image
-        # re-writes it even if the render key is unchanged.
-        self._cover_sixel_visible = False
-        self.stdscr.erase()
+        # Throttle: when the sixel cover is already visible and more input is queued
+        # (user is still scrolling), skip the erase+sixel cycle entirely.  Curses
+        # will only send the changed text cells (lyrics, status), leaving the sixel
+        # undisturbed in the terminal.  On the quiet frame (no pending input) the
+        # full erase+render runs inside the \033[?2026h sync block so terminals that
+        # support DEC 2026 present the transition atomically with no flicker.
+        _throttle_cover = False
+        if (self.tab == TAB_COVER and self.cover_path and self._cover_sixel_visible
+                and not self.show_help and not hide_cover):
+            _next = self.stdscr.getch()
+            if _next != -1:
+                curses.ungetch(_next)
+                _throttle_cover = True
+
+        if not _throttle_cover:
+            # On the cover tab with a valid cover, keep the existing sixel in place
+            # while curses repaints the UI chrome — the new cover is written after
+            # stdscr.refresh(), and overlays are drawn on top of it afterwards.
+            # On any other tab (or if cover_path is unset), erase any stale sixel first.
+            if hide_cover or not (self.tab == TAB_COVER and self.cover_path): # Specific line to hide cover when the lyrics popup (v) is visible
+                self._cover_erase_terminal()
+            # Full redraw: stdscr.erase()+refresh() will overwrite the sixel area with
+            # spaces, so mark it as no longer visible.  This ensures _render_cover_image
+            # re-writes it even if the render key is unchanged.
+            self._cover_sixel_visible = False
+            self.stdscr.erase()
 
         # When TAB_QUEUE is active the queue fills the full left panel; don't also
         # draw it as a right-side overlay (that would show the queue twice).
@@ -5005,7 +5081,7 @@ class App:
                 lyrics_w = self._lyrics_panel_w(w)
                 self._draw_cover_lyrics_panel(top_h, w - lyrics_w, usable_h, lyrics_w)
 
-        if self.tab == TAB_COVER and self.cover_path:
+        if self.tab == TAB_COVER and self.cover_path and not _throttle_cover:
             # Prevent ncurses scroll-region optimisation for the content rows.
             # redrawln marks those rows as physically corrupted so ncurses
             # rewrites each cell individually on the next refresh instead of
@@ -5022,7 +5098,7 @@ class App:
 
             # After curses has refreshed, write the cover image.  Overlays (info,
             # lyrics, help) are drawn AFTER the image so they appear on top of it.
-            if self.tab == TAB_COVER and self.cover_path and not self.show_help and not hide_cover:
+            if self.tab == TAB_COVER and self.cover_path and not self.show_help and not hide_cover and not _throttle_cover:
                 # _cover_sixel_visible was cleared at the top of this full-redraw
                 # path, so _render_cover_image always re-writes after erase+refresh.
                 self._render_cover_image()
@@ -5330,10 +5406,7 @@ class App:
                     curses.ungetch(ord('j'))
                 elif my < 2 and bstate & curses.BUTTON1_PRESSED:             # tab bar
                     order = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
-                    full = "  ".join(TAB_NAMES[i] for i in order)
-                    ns = TAB_NAMES if len(full) < w else (
-                         TAB_SHORT_NAMES if len("  ".join(TAB_SHORT_NAMES[i] for i in order)) < w
-                         else {i: TAB_NAMES[i][-1] for i in order})
+                    ns = self._tab_names_dict(w)
                     pos = 0
                     for i in order:
                         nm = ns[i]
@@ -5341,6 +5414,11 @@ class App:
                             curses.ungetch(ord(str(i % 10)))  # reuse full key handler (context, confirm dialogs, etc.)
                             break
                         pos += len(nm) + 2
+                elif my >= h - 2 and bstate & curses.BUTTON1_PRESSED:        # status bar
+                    if my == h - 2:                                            # toggles line
+                        _tog("show_toggles", "Toggles: on", "Toggles: off")
+                    else:                                                       # playback line
+                        _DISPATCH[ord("p")]()
                 elif top_h <= my < top_h + usable_h:
                     if bstate & curses.BUTTON1_PRESSED:
                         now = time.time()
@@ -5365,6 +5443,29 @@ class App:
                                     self.left_idx = clicked
                                     self.focus = "left"
                                 if is_dbl: curses.ungetch(10)
+                            elif self.tab == TAB_COVER:                       # click on cover image
+                                _on_cover = True
+                                if self._cover_lyrics and not self.queue_overlay:
+                                    if self._cover_portrait(h, w):
+                                        _on_cover = (my - top_h) < self._cover_img_rows_portrait(h, w)
+                                    else:
+                                        _on_cover = mx < w - self._lyrics_panel_w(w)
+                                if _on_cover:                                  # cycle pane: lyrics→queue→none→lyrics
+                                    if not self.queue_overlay and self._cover_lyrics:
+                                        self._cover_lyrics = False
+                                        self.queue_overlay = True
+                                        self.focus = "queue"
+                                        self.queue_cursor = clamp(self.queue_play_idx, 0, len(self.queue_items) - 1)
+                                    elif self.queue_overlay:
+                                        self.queue_overlay = False
+                                        self.focus = "left"
+                                    else:
+                                        self._cover_lyrics = True
+                                        if self.current_track and not self.lyrics_lines and not self.lyrics_loading:
+                                            self.toggle_lyrics(self.current_track)
+                                            self.lyrics_overlay = False
+                                    self._cover_render_key = ""
+                                    self._cover_render_buf = None
                     elif bstate & curses.BUTTON3_PRESSED:                     # RMB → context menu
                         self.context_actions_popup()
                     elif bstate & curses.BUTTON1_RELEASED:

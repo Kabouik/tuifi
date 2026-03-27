@@ -5324,15 +5324,10 @@ class App:
                 usable_h = h - top_h - 2
                 queue_panel = self.queue_overlay and self.tab != TAB_QUEUE
                 left_w = w if not queue_panel else max(20, w - 44)
-                _btn5 = getattr(curses, 'BUTTON5_PRESSED', 0x200000)
-                if bstate & (curses.BUTTON4_PRESSED | _btn5):               # wheel
-                    delta = -1 if bstate & curses.BUTTON4_PRESSED else 1
-                    if queue_panel and mx >= left_w:
-                        self._q_overlay_scroll = clamp(
-                            self._q_overlay_scroll + delta, 0,
-                            max(0, len(self.queue_items) - (usable_h - 1)))
-                    else:
-                        curses.ungetch(ord('k') if delta < 0 else ord('j'))
+                if bstate & curses.BUTTON4_PRESSED:                           # wheel up
+                    curses.ungetch(ord('k'))
+                elif bstate & getattr(curses, 'BUTTON5_PRESSED', 0x200000):  # wheel down
+                    curses.ungetch(ord('j'))
                 elif my < 2 and bstate & curses.BUTTON1_PRESSED:             # tab bar
                     order = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
                     full = "  ".join(TAB_NAMES[i] for i in order)

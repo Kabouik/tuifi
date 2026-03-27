@@ -5404,6 +5404,14 @@ class App:
                     curses.ungetch(ord('k'))
                 elif bstate & getattr(curses, 'BUTTON5_PRESSED', 0x200000):  # wheel down
                     curses.ungetch(ord('j'))
+                elif self.tab == TAB_LIKED and my == 2 and bstate & curses.BUTTON1_PRESSED:  # liked filter bar
+                    _flabels = ["Allᴹ⁻¹", "Tracksᴹ⁻²", "Artistsᴹ⁻³", "Albumsᴹ⁻⁴", "Playlistsᴹ⁻⁵"]
+                    cx = 1
+                    for i, label in enumerate(_flabels):
+                        if cx <= mx < cx + len(label):
+                            self._goto_liked_filter(i)
+                            break
+                        cx += len(label) + 2
                 elif my < 2 and bstate & curses.BUTTON1_PRESSED:             # tab bar
                     order = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
                     ns = self._tab_names_dict(w)

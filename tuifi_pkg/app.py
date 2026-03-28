@@ -52,6 +52,9 @@ from tuifi_pkg.client import HiFiClient, http_get_bytes, http_get_json, http_str
 from tuifi_pkg.audio import MPV, MPVPoller
 from tuifi_pkg.workers import MetaFetcher, DownloadManager
 
+# Populated by _probe_sixel_support() in main() before curses starts.
+_SIXEL_SUPPORTED: bool = False
+
 
 def _char_display_width(c: str) -> int:
     """Return the terminal display width of a single character (1 or 2 columns)."""
@@ -215,7 +218,7 @@ class App:
 
         # Cover tab state
         self.cover_track: Optional[Track] = None; self.cover_path: Optional[str] = None; self.cover_loading: bool = False
-        self._cover_backend_cache: Optional[str] = None   # "ueberzugpp"/"chafa-kitty"/"chafa"/"none"
+        self._cover_backend_cache: Optional[str] = None   # "ueberzugpp"/"chafa-kitty"/"chafa"/"chafa-symbols"/"none"
         self._cover_render_key: str = ""           # "path:WxH" to detect when re-render needed
         self._cover_render_buf: Optional[bytes] = None    # cached chafa/ANSI output
         self._cover_sixel_visible: bool = False; self._cover_sixel_cols: int = 0; self._cover_sixel_rows: int = 0; self._cover_sixel_x: int = 0
@@ -2683,17 +2686,22 @@ class App:
     def _cover_backend(self) -> str:
         """Detect the best available image rendering backend (cached).
 
-        Priority: ueberzugpp > chafa-kitty (Kitty graphics protocol) > chafa (sixel) > none.
+        Priority: ueberzugpp > chafa-kitty > chafa (sixel) > chafa-symbols > none.
         chafa-kitty is preferred over sixel because the Kitty protocol renders images
         in the terminal's compositor layer, so ncurses redraws cannot overwrite them.
+        chafa-symbols is used when chafa is available but the terminal does not support sixel
+        (as determined by _probe_sixel_support() / DA1 query before curses starts).
         """
         if self._cover_backend_cache is None:
             if shutil.which("ueberzugpp"):
                 self._cover_backend_cache = "ueberzugpp"
             elif shutil.which("chafa"):
-                self._cover_backend_cache = (
-                    "chafa-kitty" if self._supports_kitty_protocol() else "chafa"
-                )
+                if self._supports_kitty_protocol():
+                    self._cover_backend_cache = "chafa-kitty"
+                elif _SIXEL_SUPPORTED:
+                    self._cover_backend_cache = "chafa"
+                else:
+                    self._cover_backend_cache = "chafa-symbols"
             else:
                 self._cover_backend_cache = "none"
         return self._cover_backend_cache
@@ -2882,7 +2890,7 @@ class App:
         Populates _cover_render_buf/_cover_render_key so the main thread can
         write the image instantly without running chafa again."""
         backend = self._cover_backend()
-        if backend not in ("chafa", "chafa-kitty"):
+        if backend not in ("chafa", "chafa-kitty", "chafa-symbols"):
             return
         try:
             h, w = self.stdscr.getmaxyx()
@@ -2897,7 +2905,7 @@ class App:
             img_rows = h - top_h - status_h - 1  # -1 matches _render_cover_image gap
             img_cols = self._cover_img_cols(w)
         if img_rows <= 0 or img_cols <= 0: return
-        fmt = "kitty" if backend == "chafa-kitty" else "sixel"
+        fmt = "kitty" if backend == "chafa-kitty" else ("sixel" if backend == "chafa" else "symbols")
         render_key = f"{path}:{img_cols}x{img_rows}:{fmt}"
         try:
             result = subprocess.run(
@@ -2941,7 +2949,7 @@ class App:
             img_x = 0
         if img_rows <= 0 or img_cols <= 0: return
 
-        chafa_fmt = "kitty" if backend == "chafa-kitty" else "sixel"
+        chafa_fmt = "kitty" if backend == "chafa-kitty" else ("sixel" if backend == "chafa" else "symbols")
         render_key = f"{self.cover_path}:{img_cols}x{img_rows}:{chafa_fmt}"
 
         if backend == "ueberzugpp":
@@ -6205,6 +6213,56 @@ def parse_args(argv: List[str]) -> Dict[str, Any]:
     return out
 
 
+def _probe_sixel_support() -> bool:
+    """Detect sixel support via the DA1 terminal query (Primary Device Attributes).
+
+    Sends ESC[c to /dev/tty and waits up to 500 ms for the response.  A terminal
+    that supports sixel includes attribute 4 in its reply, e.g.:
+        ESC[?64;1;2;4;6c
+    This is the only truly reliable method; environment-variable heuristics (TERM,
+    COLORTERM, …) do not indicate sixel capability.  Must be called before
+    curses.wrapper() while the terminal is in its normal cooked/echo state.
+    """
+    import select
+    import termios
+
+    if not sys.stdin.isatty():
+        return False
+    try:
+        fd = os.open("/dev/tty", os.O_RDWR)
+        try:
+            old = termios.tcgetattr(fd)
+            raw = termios.tcgetattr(fd)
+            raw[3] &= ~(termios.ICANON | termios.ECHO | termios.ECHONL)  # type: ignore[index]
+            raw[6][termios.VMIN] = 0   # type: ignore[index]
+            raw[6][termios.VTIME] = 0  # type: ignore[index]
+            termios.tcsetattr(fd, termios.TCSAFLUSH, raw)
+            os.write(fd, b"\033[c")
+            resp = b""
+            deadline = time.monotonic() + 0.5
+            while time.monotonic() < deadline:
+                rem = deadline - time.monotonic()
+                r, _, _ = select.select([fd], [], [], rem)
+                if not r:
+                    break
+                chunk = os.read(fd, 64)
+                if not chunk:
+                    break
+                resp += chunk
+                if b"c" in resp:
+                    break
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+            os.close(fd)
+        m = re.search(rb"\x1b\[\?([0-9;]+)c", resp)
+        if m:
+            return b"4" in m.group(1).split(b";")
+        return False
+    except Exception as e:
+        debug_log(f"sixel probe error: {e}")
+        return False
+
+
 def main(argv: List[str]) -> int:
     locale.setlocale(locale.LC_ALL, "")
     args = parse_args(argv)
@@ -6246,6 +6304,9 @@ def main(argv: List[str]) -> int:
         if app.tab == TAB_QUEUE:
             app.focus = "queue"
         app.run()
+
+    global _SIXEL_SUPPORTED
+    _SIXEL_SUPPORTED = _probe_sixel_support()
 
     os.environ.setdefault("ESCDELAY", "25")  # shorten ncurses ESC wait (ms)
     curses.wrapper(wrapped)

@@ -2976,9 +2976,11 @@ class App:
 
         # chafa/chafa-kitty path: cache rendered bytes, re-run only on content/size change.
         # Sixel: always re-send because ncurses wipes the area on every refresh.
+        is_symbols = backend == "chafa-symbols"
         if render_key == self._cover_render_key and self._cover_render_buf:
             self._write_image_to_terminal(top_h, self._cover_render_buf, img_cols,
-                                          img_rows, kitty=is_kitty, x_offset=img_x)
+                                          img_rows, kitty=is_kitty, x_offset=img_x,
+                                          symbols=is_symbols)
             return
 
         try:
@@ -2998,7 +3000,8 @@ class App:
                 self._cover_render_buf = result.stdout
                 self._cover_render_key = render_key
                 self._write_image_to_terminal(top_h, result.stdout, img_cols,
-                                              img_rows, kitty=is_kitty, x_offset=img_x)
+                                              img_rows, kitty=is_kitty, x_offset=img_x,
+                                              symbols=is_symbols)
         except Exception as e:
             debug_log(f"chafa render error: {e}")
 
@@ -3013,21 +3016,33 @@ class App:
 
     def _write_image_to_terminal(self, top_row: int, data: bytes, cols: int = 0,
                                   rows: int = 0, kitty: bool = False,
-                                  x_offset: int = 0) -> None:
-        """Write image data (sixel or ANSI) directly to the terminal at the given row/col."""
+                                  x_offset: int = 0, symbols: bool = False) -> None:
+        """Write image data (sixel, kitty, or ANSI symbols) directly to the terminal."""
         # Strip trailing newlines — chafa often appends one, and writing a newline
         # when the cursor is near the bottom of the terminal causes the terminal to
         # scroll, shifting the cover image and corrupting the layout.
         data = data.rstrip(b"\r\n")
         if kitty:
             data = self._kitty_set_z_below(data)
-        # Save cursor, move to content area, write image, restore cursor
-        sys.stdout.buffer.write(
-            b"\0337"                                                   # save cursor (VT100)
-            + f"\033[{top_row + 1};{x_offset + 1}H".encode()          # move to row, col
-            + data
-            + b"\0338"                                                 # restore cursor
-        )
+        if symbols:
+            # ANSI/symbols output contains raw '\n' line separators.  Curses disables
+            # OPOST/ONLCR, so '\n' is a pure linefeed (cursor-down only, no CR): each
+            # line would start at the column where the previous one ended.  Absolutely
+            # position every line to avoid misalignment, especially at x_offset > 0.
+            col = x_offset + 1
+            buf = b"\0337"
+            for i, line in enumerate(data.split(b"\n")):
+                buf += f"\033[{top_row + 1 + i};{col}H".encode() + line
+            buf += b"\0338"
+        else:
+            # Save cursor, move to content area, write image, restore cursor
+            buf = (
+                b"\0337"                                                   # save cursor (VT100)
+                + f"\033[{top_row + 1};{x_offset + 1}H".encode()          # move to row, col
+                + data
+                + b"\0338"                                                 # restore cursor
+            )
+        sys.stdout.buffer.write(buf)
         sys.stdout.buffer.flush()
         self._cover_sixel_visible = True
         if cols:

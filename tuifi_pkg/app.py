@@ -4818,22 +4818,6 @@ class App:
                 except curses.error:
                     pass
 
-    def _draw_overlay_box(self, title: str, lines: List[str], scroll: int, box_w: int, box_h: int, _erase_bg: bool = True) -> None:
-        h, w = self.stdscr.getmaxyx()
-        box_w = min(w - 6, box_w)
-        box_h = min(h - 6, box_h)
-        y0 = (h - box_h) // 2
-        x0 = (w - box_w) // 2
-        self._popup_clear_bg(y0, x0, box_h, box_w, _erase_bg)
-        win = self.stdscr.derwin(box_h, box_w, y0, x0)
-        win.erase()
-        win.box()
-        win.addstr(0, 2, f" {title} ", self.C(4))
-        inner_h = box_h - 2
-        self._render_popup_lines(win, lines, clamp(scroll, 0, max(0, len(lines) - inner_h)), inner_h, box_w)
-        win.touchwin()  # force full resend so popup is visible over any sixel residue
-        win.refresh()
-
     def show_help_dialog(self) -> None:
         """Inner-loop help popup - no flicker (same pattern as show_similar_artists_dialog)."""
         lines = [

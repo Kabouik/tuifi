@@ -15,10 +15,12 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
 import urllib.parse
+import webbrowser
 from queue import Queue, Empty
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -802,7 +804,7 @@ class App:
 
     def open_url(self, url: str) -> None:
         try:
-            subprocess.Popen(["xdg-open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            webbrowser.open(url)
             self.toast("Opened")
         except Exception:
             self.toast("Open failed")
@@ -1447,7 +1449,7 @@ class App:
                 debug_log(f"  DASH: extracted direct URL from MPD: {direct_url[:120]}")
                 return direct_url
 
-            mpd_path = f"{os.environ.get('TMPDIR', '/tmp')}/{APP_NAME}-{track_id}-{int(time.time()*1000)}.mpd"
+            mpd_path = os.path.join(os.environ.get("TMPDIR") or tempfile.gettempdir(), f"{APP_NAME}-{track_id}-{int(time.time()*1000)}.mpd")
             with open(mpd_path, "w", encoding="utf-8") as f:
                 f.write(raw_text)
             debug_log(f"  DASH .mpd path: {mpd_path}")
@@ -2764,7 +2766,7 @@ class App:
             try:
                 os.kill(self._cover_ub_pid, 0)
                 return True
-            except OSError:
+            except (OSError, PermissionError):
                 self._cover_ub_socket = None
                 self._cover_ub_pid = None
 
@@ -2782,7 +2784,7 @@ class App:
                     break
             with open(pid_file) as f:
                 pid = int(f.read().strip())
-            tmpdir = os.environ.get("TMPDIR", "/tmp")
+            tmpdir = os.environ.get("TMPDIR") or tempfile.gettempdir()
             socket_path = os.path.join(tmpdir, f"ueberzugpp-{pid}.socket")
             self._cover_ub_pid = pid
             self._cover_ub_socket = socket_path
@@ -4823,7 +4825,7 @@ class App:
         lines = [
             "",
             "\x01 TABS",
-            " 1 Queue  2 Search  3 Recommended  4 Mix  5 Artist  6 Album  7 Liked  8 Playlists  9 History  0 Cover",
+            " 1 Queue  2 Search  3 Recommended  4 Mix  5 Artist  6 Album  7 Liked (cycles subtabs)  8 Playlists  9 History  0 Cover",
             "",
             "\x01 PLAYBACK                                           PLAYLISTS (8)",
             " p         play/pause                               n     new list",
@@ -4862,6 +4864,7 @@ class App:
             " /         search TIDAL",
             " f         filter term in current view (in cover tab: filter lyrics)",
             " (/)       prev/next filter hit (in cover tab: prev/next lyrics match)",
+            " h/?       help (also: right-click on empty area)",
             " Esc       close prompts",
             " Q         quit",
             "",
@@ -4955,7 +4958,7 @@ class App:
                 self._render_popup_lines(win, lines, scroll, inner_h, box_w)
                 try:
                     win.addstr(box_h - 1, 2,
-                               " j/k: scroll   PgUp/PgDn: scroll pages   g/G: top/bottom   ?/q/Esc: close "[:box_w - 4],
+                               " j/k/wheel: scroll   PgUp/PgDn: pages   g/G: top/bottom   h/?/q/Esc: close "[:box_w - 4],
                                self.C(10))
                 except curses.error:
                     pass
@@ -4965,7 +4968,21 @@ class App:
                 ch = self._get_wch_int()
                 if ch == -1:
                     continue
-                if ch in (27, ord("?"), ord("Q"), ord("q")):
+                if ch == curses.KEY_MOUSE:
+                    try:
+                        _, mx, my, _, bstate = curses.getmouse()
+                    except curses.error:
+                        continue
+                    _btn5 = getattr(curses, "BUTTON5_PRESSED", 0x200000)
+                    if bstate & curses.BUTTON4_PRESSED:
+                        scroll = max(0, scroll - 3)
+                    elif bstate & _btn5:
+                        scroll = min(max_scroll, scroll + 3)
+                    elif bstate & (curses.BUTTON1_PRESSED | curses.BUTTON3_PRESSED):
+                        if not (y0 <= my < y0 + box_h and x0 <= mx < x0 + box_w):
+                            break  # click outside dialog → close
+                    continue
+                if ch in (27, ord("?"), ord("Q"), ord("q"), ord("h")):
                     break
                 _p = self._page_step()
                 if ch in (curses.KEY_DOWN, ord("j")):
@@ -5492,8 +5509,13 @@ class App:
                                             self.lyrics_overlay = False
                                     self._cover_render_key = ""
                                     self._cover_render_buf = None
-                    elif bstate & curses.BUTTON3_PRESSED:                     # RMB → context menu
-                        self.context_actions_popup()
+                    elif bstate & curses.BUTTON3_PRESSED:                     # RMB → context menu or help
+                        _, _items = self._left_items()
+                        _clicked = self.left_scroll + (my - top_h)
+                        if 0 <= _clicked < len(_items):
+                            self.context_actions_popup()
+                        else:
+                            self.show_help_dialog()
                     elif bstate & curses.BUTTON1_RELEASED:
                         self._mouse_long_press_pending = False
                 continue
@@ -5561,7 +5583,7 @@ class App:
                 self._ueberzug_stop()
                 break
 
-            if ch == ord("?"):
+            if ch in (ord("?"), ord("h")):
                 self.show_help_dialog()
                 continue
 
@@ -5808,6 +5830,13 @@ class App:
                     else:
                         self._album_pending_ctx = None
                         self.switch_tab(TAB_ALBUM, refresh=False)
+                elif t_num == TAB_LIKED:
+                    if self.tab == TAB_LIKED:
+                        self._goto_liked_filter(
+                            (self.liked_filter + 1) % len(LIKED_FILTER_NAMES)
+                        )
+                    else:
+                        self.switch_tab(TAB_LIKED, refresh=True)
                 else:
                     self.switch_tab(t_num, refresh=True)
                 continue
@@ -6222,6 +6251,8 @@ def _probe_sixel_support() -> bool:
     COLORTERM, …) do not indicate sixel capability.  Must be called before
     curses.wrapper() while the terminal is in its normal cooked/echo state.
     """
+    if sys.platform == "win32":
+        return False
     import select
     import termios
 

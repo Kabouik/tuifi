@@ -3,7 +3,7 @@ title: tuifi
 
 A feature-rich-ish TUI music player built on top of [[https://github.com/binimum/hifi-api][TIDAL HiFi API]]: browse, search, stream, download, organize and manage lossless music from your comfy terminal.
 
-While [[https://github.com/monochrome-music/monochrome/blob/main/INSTANCES.md][HiFi API instances with unrestricted access]] exist, this may be considered as music piracy in many countries and does not give artists the love they deserve. This project is intended for TIDAL subscribers who also self host their own HiFi instance for convenience, and favor a keyboard-driven terminal workflow over a web player.
+While [[https://github.com/monochrome-music/monochrome/blob/main/INSTANCES.md#official--community-apis][HiFi API instances with unrestricted access]] exist, this may be considered as music piracy in many countries and does not give artists the love they deserve. This project is intended for TIDAL subscribers who also self host their own HiFi instance for convenience, and favor a keyboard-driven terminal workflow over a web player.
 
 #+BEGIN_EXPORT html
 <a href="https://github.com/Kabouik/tuifi/raw/refs/heads/main/demo/tuifi-demo.mp4">
@@ -86,7 +86,7 @@ mkdir -p ~/.local/bin
 ln -s /path/to/tuifi/tuifi ~/.local/bin/tuifi
 #+end_src
 
-** Windwos peculiarities
+** Windows peculiarities
 
 The =ncurses= libary does not exist officially for Windows, but =windows-curses= can be used. It is available /via/ =pip= up to Python 3.13. The easiest way to install a specific Python version on Windows as well as the other dependency, =mpv=, is probably using [[https://chocolatey.org/install][Chocolatey]]:
 

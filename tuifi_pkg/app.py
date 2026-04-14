@@ -4488,7 +4488,7 @@ class App:
                                    " Press 4 on a track, album or artist in any tab to load its track mix\n\n If Autoplay is set to \"mix\", the queue will expand with mix suggestions\n based on last queue items"),
                 TAB_ARTIST:      " Press 5 on a track or album in any tab to show its artist",
                 TAB_ALBUM:       " Press 6 on a track in any tab to show its album",
-                TAB_LIKED:       "\n Nothing liked here — press l on items to like them\n Cycle sub-categories with [/], Alt+7, or ^←/^→, or jump directly with Alt+1-5",
+                TAB_LIKED:       "\n Nothing liked here — press l on items to like them\n Cycle sub-categories with 7/[/] or ^←/^→, or jump directly with Alt+1-5",
                 TAB_HISTORY:     " Play tracks to build history",
                 TAB_PLAYLISTS:   (" Empty playlist — press a on a track to add it" if self.playlist_view_name is not None else " Press n to create a new playlist"),
             }
@@ -4765,7 +4765,7 @@ class App:
                 fetching = self._autoplay_prefetch_running
             if self.autoplay != AUTOPLAY_OFF and (buf_n > 0 or fetching):
                 parts.append(f"buffer: {'…' if fetching else buf_n}")
-            line1 = " " + "   ".join(parts)
+            line1 = " ? help  |  " + "   ".join(parts)
             self.stdscr.addstr(y, x, line1[:max(0, w - 1)].ljust(max(0, w - 1)), curses.A_DIM if self.color_mode else 0)
         else:
             self.stdscr.addstr(y, x, " " * max(0, w - 1))
@@ -4825,7 +4825,7 @@ class App:
         lines = [
             "",
             "\x01 TABS",
-            " 1 Queue  2 Search  3 Recommended  4 Mix  5 Artist  6 Album  7 Liked (cycles subtabs)  8 Playlists  9 History  0 Cover",
+            " 1 Queue  2 Search  3 Recommended  4 Mix  5 Artist  6 Album  7 Liked  8 Playlists  9 History  0 Cover",
             "",
             "\x01 PLAYBACK                                           PLAYLISTS (8)",
             " p         play/pause                               n     new list",
@@ -4873,9 +4873,8 @@ class App:
             " Tab       move cursor between main view and mini-queue overlay",
             " z         jump to playing track",
             " ^\u2190/^\u2192/1-9 Navigate main tabs and sub-tabs",
+            " 7/[/]     jump to Liked tab then cycle its sub-tabs",
             " Alt+1-5   jump directly to Liked sub-tabs (Allᴹ⁻¹ Tracksᴹ⁻² Artistsᴹ⁻³ Albumsᴹ⁻⁴ Playlistsᴹ⁻⁵)",
-            " Alt+7     jump to Liked tab then cycle its sub-tabs",
-            " [/]       cycle Liked sub-tabs",
             " ;/Bkspc   go back to last tab without refreshing",
             " g/G       go to top/bottom",
             " j/k/\u2193/\u2191   go down/up",
@@ -5562,10 +5561,6 @@ class App:
                 if _ctrl_digit:
                     if 1 <= _ctrl_digit <= 5:
                         self._goto_liked_filter(_ctrl_digit - 1)
-                    elif _ctrl_digit == 7:
-                        self._goto_liked_filter(
-                            (self.liked_filter + 1) % len(LIKED_FILTER_NAMES)
-                            if self.tab == TAB_LIKED else self.liked_filter)
                     continue
                 # Plain ESC: dismiss overlays
                 elif self.tab == TAB_COVER and self._lyrics_filter_q:

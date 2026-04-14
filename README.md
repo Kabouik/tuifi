@@ -15,7 +15,7 @@
 
 A feature-rich-ish TUI music player built on top of [TIDAL HiFi API](https://github.com/binimum/hifi-api): browse, search, stream, download, organize and manage lossless music from your comfy terminal.
 
-While [HiFi API instances with unrestricted access](https://github.com/monochrome-music/monochrome/blob/main/INSTANCES.md) exist, this may be considered as music piracy in many countries and does not give artists the love they deserve. This project is intended for TIDAL subscribers who also self host their own HiFi instance for convenience, and favor a keyboard-driven terminal workflow over a web player.
+While [HiFi API instances with unrestricted access](https://github.com/monochrome-music/monochrome/blob/main/INSTANCES.md#official--community-apis) exist, this may be considered as music piracy in many countries and does not give artists the love they deserve. This project is intended for TIDAL subscribers who also self host their own HiFi instance for convenience, and favor a keyboard-driven terminal workflow over a web player.
 
 [![Click to play the demo](demo/ss20260312-191917.png)](https://github.com/Kabouik/tuifi/raw/refs/heads/main/demo/tuifi-demo.mp4)
 [![Click to play the demo](demo/ss20260312-191954.png)](https://github.com/Kabouik/tuifi/raw/refs/heads/main/demo/tuifi-demo.mp4)

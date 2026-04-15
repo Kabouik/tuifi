@@ -27,7 +27,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from tuifi_pkg import (
     APP_NAME, VERSION, DEFAULT_API,
     TAB_SEARCH, TAB_QUEUE, TAB_RECOMMENDED, TAB_MIX, TAB_ARTIST,
-    TAB_ALBUM, TAB_LIKED, TAB_PLAYLISTS, TAB_HISTORY, TAB_COVER,
+    TAB_ALBUM, TAB_LIKED, TAB_PLAYLISTS, TAB_HISTORY, TAB_PLAYBACK,
     TAB_NAMES, TAB_SHORT_NAMES,
     AUTOPLAY_OFF, AUTOPLAY_MIX, AUTOPLAY_RECOMMENDED, AUTOPLAY_NAMES,
     QUALITY_ORDER,
@@ -169,7 +169,7 @@ class App:
         self.focus = "left"
 
         self.tab = int(self.settings.get("initial_tab") or TAB_QUEUE)
-        self.tab = clamp(self.tab, TAB_QUEUE, TAB_COVER)
+        self.tab = clamp(self.tab, TAB_QUEUE, TAB_PLAYBACK)
 
         self.search_q = ""
         self.search_results: List[Track] = []
@@ -218,13 +218,30 @@ class App:
         self.lyrics_overlay = False; self.lyrics_scroll = 0; self.lyrics_loading = False
         self.lyrics_lines: List[str] = []; self.lyrics_track_id: Optional[int] = None; self.lyrics_track: Optional["Track"] = None
 
-        # Cover tab state
+        # Playback tab state
         self.cover_track: Optional[Track] = None; self.cover_path: Optional[str] = None; self.cover_loading: bool = False
         self._cover_backend_cache: Optional[str] = None   # "ueberzugpp"/"chafa-kitty"/"chafa"/"chafa-symbols"/"none"
         self._cover_render_key: str = ""           # "path:WxH" to detect when re-render needed
         self._cover_render_buf: Optional[bytes] = None    # cached chafa/ANSI output
         self._cover_sixel_visible: bool = False; self._cover_sixel_cols: int = 0; self._cover_sixel_rows: int = 0; self._cover_sixel_x: int = 0
         self._cover_ub_socket: Optional[str] = None; self._cover_ub_pid: Optional[int] = None
+
+        # Side cover preview pane (toggled with C, persists across sessions)
+        self._album_cover_pane: bool = bool(self.settings.get("cover_pane", True))
+        self._album_cover_item_key: str = ""   # "a:{album_id}" or "t:{track_id}"
+        self._album_cover_path: Optional[str] = None
+        self._album_cover_loading: bool = False
+        self._album_cover_render_buf: Optional[bytes] = None
+        self._album_cover_render_key: str = ""
+        self._album_cover_visible: bool = False
+        self._album_cover_visible_top: int = 0
+        self._album_cover_visible_x: int = 0
+        self._album_cover_visible_rows: int = 0
+        self._album_cover_visible_cols: int = 0
+        self._album_cover_tmpdir: Optional[str] = None
+        self._cover_url_cache: Dict[int, str] = {}   # track_id → cover URL (in-memory, avoids re-fetching)
+        self._album_cover_rows_offset: int = 0       # rows reserved for minicover above miniqueue (used by mouse handler)
+
         self._q_overlay_scroll: int = 0
         self._mouse_last_press: tuple = (0.0, -1, -1)  # (time, row, col) for double-click / long-press
         self._mouse_long_press_pending: bool = False
@@ -1127,7 +1144,7 @@ class App:
             ] + list(self.mix_tracks))
         _simple_tabs = {TAB_QUEUE: ("queue_tab", self.queue_items), TAB_SEARCH: ("tracks", self.search_results),
                         TAB_RECOMMENDED: ("tracks", self.recommended_results), TAB_MIX: ("tracks", self.mix_tracks),
-                        TAB_HISTORY: ("tracks", self.history_tracks), TAB_COVER: ("cover_tab", [])}
+                        TAB_HISTORY: ("tracks", self.history_tracks), TAB_PLAYBACK: ("playback_tab", [])}
         if self.tab in _simple_tabs:
             return _simple_tabs[self.tab]
         if self.tab == TAB_ARTIST:
@@ -1214,7 +1231,7 @@ class App:
     def _current_selection_track(self) -> Optional[Track]:
         if self._queue_context():
             return self._queue_selected_track()
-        if self.tab == TAB_COVER:
+        if self.tab == TAB_PLAYBACK:
             return self.current_track
         return self._selected_left_track()
 
@@ -1739,7 +1756,7 @@ class App:
 
     def like_selected(self) -> None:
         if not self._queue_context():
-            if self.tab == TAB_COVER:
+            if self.tab == TAB_PLAYBACK:
                 if self.current_track: self.toggle_like(self.current_track)
                 return
             marked_albums, marked_artists, marked_playlists, cancelled = self._marked_batch()
@@ -2349,7 +2366,7 @@ class App:
         """Show a context-sensitive actions popup for the current selection."""
         if self._queue_context():
             it = self._queue_selected_track()
-        elif self.tab == TAB_COVER:
+        elif self.tab == TAB_PLAYBACK:
             it = self.current_track
         else:
             it = self._selected_left_item()
@@ -2672,7 +2689,7 @@ class App:
         return None
 
     # ---------------------------------------------------------------------------
-    # Cover tab
+    # Playback tab
     # ---------------------------------------------------------------------------
 
     def _supports_kitty_protocol(self) -> bool:
@@ -2715,7 +2732,7 @@ class App:
         return os.path.join(cache_dir, f"{h}.jpg")
 
     def fetch_cover_async(self, t: Optional[Track]) -> None:
-        """Download cover art for track t. Called on playback start and when entering Cover tab."""
+        """Download cover art for track t. Called on playback start and when entering Playback tab."""
         if not t: return
         if self.cover_track and self.cover_track.id == t.id and self.cover_path:
             return  # already loaded for this track
@@ -2723,7 +2740,7 @@ class App:
         # Keep existing cover_path/render_buf until new cover is ready so the
         # old artwork remains visible on screen while the new one loads (no blank gap).
         self.cover_loading = True
-        if self.tab == TAB_COVER:
+        if self.tab == TAB_PLAYBACK:
             self._need_redraw = True
 
         def worker() -> None:
@@ -2754,7 +2771,7 @@ class App:
                     self._cover_render_buf = None
             finally:
                 self.cover_loading = False
-                if self.tab == TAB_COVER:
+                if self.tab == TAB_PLAYBACK:
                     self._full_redraw()
 
         threading.Thread(target=worker, daemon=True).start()
@@ -2828,8 +2845,8 @@ class App:
         self._cover_ub_pid = None
         self._cover_ub_socket = None
 
-    def _draw_cover_hint(self, y: int, x: int, h: int, w: int) -> None:
-        """Draw status text in the cover tab area (image rendering happens after curses refresh)."""
+    def _draw_playback_hint(self, y: int, x: int, h: int, w: int) -> None:
+        """Draw status text in the playback tab area (image rendering happens after curses refresh)."""
         backend = self._cover_backend()
         t = self._current_selection_track() or self.current_track
         if not t:
@@ -2880,11 +2897,16 @@ class App:
     def _cover_img_cols(self, w: int) -> int:
         """Compute cover image display width accounting for side panels."""
         if self.queue_overlay and self.tab != TAB_QUEUE:
-            right_w = 44
+            # 1-col gap between main cover and right panel (miniqueue / minicover / both).
+            right_w = 45
         elif self._cover_lyrics:
             right_w = self._lyrics_panel_w(w) + 2
         else:
             right_w = 0
+        # When the standalone album cover pane is visible (no miniqueue), reserve its
+        # width + 1-col gap — consistent with the miniqueue case above.
+        if self._album_cover_pane and not (self.queue_overlay and self.tab != TAB_QUEUE):
+            right_w = max(right_w, self._album_cover_pane_w(w) + 1)
         return w - right_w
 
     def _prerender_cover(self, path: str) -> None:
@@ -2928,7 +2950,7 @@ class App:
 
     def _render_cover_image(self) -> None:
         """Write cover image to the terminal after curses has refreshed.
-        Called only when self.tab == TAB_COVER and cover_path is set."""
+        Called only when self.tab == TAB_PLAYBACK and cover_path is set."""
         if not self.cover_path or not os.path.exists(self.cover_path): return
         backend = self._cover_backend()
         if backend == "none":
@@ -3082,13 +3104,13 @@ class App:
         self._cover_sixel_visible = False
 
     def _lyrics_panel_w(self, w: int) -> int:
-        """Width of the lyrics panel in the cover tab (adapts to terminal width)."""
+        """Width of the lyrics panel in the playback tab (adapts to terminal width)."""
         # Give lyrics up to half the terminal; cover gets the rest (plus 2-col gap).
         return max(44, min(w // 2, w - 50))
 
     def _erase_popup_bg(self, y0: int, x0: int, rows: int, cols: int) -> None:
         """Erase a popup area with raw ANSI writes to clear any sixel underneath."""
-        if not self._cover_sixel_visible: return
+        if not self._cover_sixel_visible and not self._album_cover_visible: return
         blank = b" " * cols
         buf = b"".join(
             f"\033[{y0 + 1 + r};{x0 + 1}H".encode() + blank
@@ -3153,8 +3175,8 @@ class App:
                 except curses.error:
                     pass
 
-    def _draw_cover_lyrics_panel(self, y: int, x: int, h: int, w: int) -> None:
-        """Draw lyrics as a right-side panel in the cover tab."""
+    def _draw_playback_lyrics_panel(self, y: int, x: int, h: int, w: int) -> None:
+        """Draw lyrics as a right-side panel in the playback tab."""
         if w < 10: return
         lyr_attr = curses.color_pair(int(self.settings.get("cover_lyrics_color_pair", 0))) if self.color_mode and curses.has_colors() else 0
         # Title bar: show filter state or navigation hint
@@ -3195,7 +3217,7 @@ class App:
             self.stdscr.addstr(y + 1 + row, x, text[:w].ljust(w), attr)
 
     def _cover_clear_image(self) -> None:
-        """Clear the displayed cover image (called when leaving cover tab or before full redraw)."""
+        """Clear the displayed cover image (called when leaving playback tab or before full redraw)."""
         if self._cover_backend_cache == "ueberzugpp":
             self._ueberzug_remove()
         self._cover_erase_terminal()
@@ -3203,6 +3225,354 @@ class App:
         self._cover_render_buf = None
         # Force ncurses to do a full repaint on next refresh so sixel residue is
         # overwritten even in cells with transparent background.
+        self.stdscr.clearok(True)
+
+    # ---------------------------------------------------------------------------
+    # Artist tab cover preview pane
+    # ---------------------------------------------------------------------------
+
+    def _album_cover_pane_w(self, w: int) -> int:
+        """Width of the side cover preview pane (matches miniqueue column width)."""
+        return min(44, max(20, w - 20))
+
+    def _album_cover_tmp_path(self, album_id: int) -> str:
+        """Return cache path for artist cover; create tmpdir on first call."""
+        if not self._album_cover_tmpdir:
+            self._album_cover_tmpdir = tempfile.mkdtemp(prefix="tuifi_artist_")
+        return os.path.join(self._album_cover_tmpdir, f"{album_id}.jpg")
+
+    def _fetch_cover_url_for_album(self, album: Album) -> Optional[str]:
+        """Fetch cover URL for album via client.album()."""
+        try:
+            payload = self.client.album(album.id)
+            if not isinstance(payload, dict):
+                return None
+            # Payload may be wrapped: {"data": {...}} or the album dict directly.
+            data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+            for search in (data, data.get("album") or {}):
+                if not isinstance(search, dict):
+                    continue
+                for k in ("coverUrl", "imageUrl", "squareImageUrl"):
+                    v = search.get(k)
+                    if isinstance(v, str) and v.startswith("http"):
+                        return v
+                for k in ("cover", "coverArt", "squareImage", "image"):
+                    v = search.get(k)
+                    if isinstance(v, str) and v:
+                        url = self._tidal_cover_uuid_to_url(v)
+                        if url:
+                            return url
+        except Exception as e:
+            debug_log(f"_fetch_cover_url_for_album error: {e}")
+        return None
+
+    def _prefetch_album_covers_async(self, albums: List[Album], artist_id: int) -> None:
+        """Pre-download covers for all albums in a single background thread.
+        Aborts early if the artist changes. Does not update render state."""
+        def worker() -> None:
+            for alb in albums:
+                if not alb.id or alb.id <= 0:
+                    continue
+                if not self.artist_ctx or self.artist_ctx[0] != artist_id:
+                    return  # artist changed
+                try:
+                    dest = self._album_cover_tmp_path(alb.id)
+                    if os.path.exists(dest):
+                        continue
+                    url = self._fetch_cover_url_for_album(alb)
+                    if not url:
+                        continue
+                    data = http_get_bytes(url, timeout=15.0)
+                    if not self.artist_ctx or self.artist_ctx[0] != artist_id:
+                        return
+                    with open(dest, "wb") as f:
+                        f.write(data)
+                except Exception as e:
+                    debug_log(f"_prefetch_album_covers_async error alb={alb.id}: {e}")
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _fetch_album_cover_async(self, album: Album) -> None:
+        """Download and pre-render cover for album in a background thread.
+        The previous cover stays visible until the new one is ready (no flicker).
+        If no cover is found, the pane is cleared after a short delay."""
+        if not album.id or album.id <= 0:
+            debug_log(f"_fetch_album_cover_async: skipping album with id={album.id!r}")
+            return
+        item_key = f"a:{album.id}"
+        if self._album_cover_loading and self._album_cover_item_key == item_key:
+            return
+        if self._album_cover_item_key == item_key and self._album_cover_path:
+            return  # already loaded
+        # Update item key immediately so subsequent draw() calls know what we're loading.
+        # Do NOT clear _album_cover_path/_render_buf: keep showing old cover until new is ready.
+        self._album_cover_item_key = item_key
+        self._album_cover_loading = True
+
+        def worker() -> None:
+            try:
+                dest = self._album_cover_tmp_path(album.id)
+                if not os.path.exists(dest):
+                    url = self._fetch_cover_url_for_album(album)
+                    if not url:
+                        # No cover found; blank the pane after a short delay.
+                        time.sleep(2.0)
+                        if self._album_cover_item_key == item_key:
+                            self._album_cover_path = None
+                            self._album_cover_render_buf = None
+                            self._album_cover_render_key = ""
+                            self._need_redraw = True
+                        return
+                    data = http_get_bytes(url, timeout=15.0)
+                    with open(dest, "wb") as f:
+                        f.write(data)
+                if self._album_cover_item_key != item_key:
+                    return  # selection changed while downloading
+                self._prerender_album_cover(dest)
+                self._album_cover_path = dest
+                self._need_redraw = True
+            except Exception as e:
+                debug_log(f"_fetch_album_cover_async error: {e}")
+            finally:
+                if self._album_cover_item_key == item_key:
+                    self._album_cover_loading = False
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _fetch_track_cover_async(self, track: Track) -> None:
+        """Download and pre-render cover for a track in a background thread.
+        Uses the persistent cover cache (same as the playback tab).
+        Fast path: if the URL was already fetched (cached in _cover_url_cache) and the
+        file is on disk, skips the API call and goes straight to prerender.
+        The previous cover stays visible until the new one is ready (no flicker)."""
+        if not track.id or track.id <= 0:
+            return
+        item_key = f"t:{track.id}"
+        if self._album_cover_loading and self._album_cover_item_key == item_key:
+            return
+        if self._album_cover_item_key == item_key and self._album_cover_path:
+            return  # already loaded
+
+        # Update item key; keep old path/buf visible until new cover is ready.
+        self._album_cover_item_key = item_key
+        self._album_cover_loading = True
+
+        # Fast path: URL known + file on disk → only prerender needed, no API call.
+        cached_url = self._cover_url_cache.get(track.id)
+        if cached_url:
+            dest = self._cover_cache_path(cached_url)
+            if os.path.exists(dest):
+                def fast_worker(_dest=dest) -> None:
+                    try:
+                        if self._album_cover_item_key != item_key:
+                            return
+                        self._prerender_album_cover(_dest)
+                        self._album_cover_path = _dest
+                        self._need_redraw = True
+                    except Exception as e:
+                        debug_log(f"_fetch_track_cover_async fast error: {e}")
+                    finally:
+                        if self._album_cover_item_key == item_key:
+                            self._album_cover_loading = False
+                threading.Thread(target=fast_worker, daemon=True).start()
+                return
+
+        def worker() -> None:
+            try:
+                url = self._cover_url_cache.get(track.id) or self._fetch_cover_url_for_track(track)
+                if not url:
+                    time.sleep(2.0)
+                    if self._album_cover_item_key == item_key:
+                        self._album_cover_path = None
+                        self._album_cover_render_buf = None
+                        self._album_cover_render_key = ""
+                        self._need_redraw = True
+                    return
+                self._cover_url_cache[track.id] = url
+                dest = self._cover_cache_path(url)
+                if not os.path.exists(dest):
+                    data = http_get_bytes(url, timeout=15.0)
+                    with open(dest, "wb") as f:
+                        f.write(data)
+                if self._album_cover_item_key != item_key:
+                    return
+                self._prerender_album_cover(dest)
+                self._album_cover_path = dest
+                self._need_redraw = True
+            except Exception as e:
+                debug_log(f"_fetch_track_cover_async error: {e}")
+            finally:
+                if self._album_cover_item_key == item_key:
+                    self._album_cover_loading = False
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _prerender_album_cover(self, path: str) -> None:
+        """Pre-render artist cover with chafa (called from background thread)."""
+        backend = self._cover_backend()
+        if backend not in ("chafa", "chafa-kitty", "chafa-symbols"):
+            return
+        try:
+            h, w = self.stdscr.getmaxyx()
+        except Exception:
+            return
+        top_h = 2
+        status_h = 2
+        pane_w = self._album_cover_pane_w(w)
+        img_rows = h - top_h - status_h - 1
+        img_cols = pane_w
+        if img_rows <= 0 or img_cols <= 0:
+            return
+        fmt = "kitty" if backend == "chafa-kitty" else ("sixel" if backend == "chafa" else "symbols")
+        render_key = f"{path}:{img_cols}x{img_rows}:{fmt}"
+        try:
+            result = subprocess.run(
+                ["chafa", f"--format={fmt}", f"--size={img_cols}x{img_rows}", path],
+                capture_output=True, timeout=8,
+            )
+            if result.returncode != 0 or not result.stdout:
+                result = subprocess.run(
+                    ["chafa", "--format=symbols", f"--size={img_cols}x{img_rows}", path],
+                    capture_output=True, timeout=8,
+                )
+            if result.returncode == 0 and result.stdout:
+                self._album_cover_render_buf = result.stdout
+                self._album_cover_render_key = render_key
+        except Exception as e:
+            debug_log(f"_prerender_album_cover error: {e}")
+
+    def _render_album_cover_pane(self, top_h: int, x: int, pane_w: int, pane_h: int) -> None:
+        """Write artist cover image to terminal. Called after stdscr.refresh()."""
+        if not self._album_cover_path or not os.path.exists(self._album_cover_path):
+            return
+        backend = self._cover_backend()
+        if backend == "none":
+            return
+
+        img_rows = pane_h
+        img_cols = pane_w
+
+        if backend == "ueberzugpp":
+            if not self._ueberzug_start():
+                return
+            try:
+                subprocess.run(
+                    ["ueberzugpp", "cmd", "-s", self._cover_ub_socket,
+                     "-i", "tuifi_artist", "-a", "add",
+                     "-x", str(x), "-y", str(top_h),
+                     "--max-width", str(img_cols), "--max-height", str(img_rows),
+                     "-f", self._album_cover_path],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2,
+                )
+            except Exception as e:
+                debug_log(f"_render_album_cover_pane ueberzugpp error: {e}")
+            self._album_cover_visible = True
+            self._album_cover_visible_top = top_h
+            self._album_cover_visible_x = x
+            self._album_cover_visible_rows = img_rows
+            self._album_cover_visible_cols = img_cols
+            return
+
+        is_kitty = backend == "chafa-kitty"
+        is_symbols = backend == "chafa-symbols"
+        fmt = "kitty" if is_kitty else ("sixel" if backend == "chafa" else "symbols")
+        render_key = f"{self._album_cover_path}:{img_cols}x{img_rows}:{fmt}"
+
+        if render_key == self._album_cover_render_key and self._album_cover_render_buf:
+            buf = self._album_cover_render_buf
+        else:
+            try:
+                result = subprocess.run(
+                    ["chafa", f"--format={fmt}", f"--size={img_cols}x{img_rows}",
+                     self._album_cover_path],
+                    capture_output=True, timeout=8,
+                )
+                if result.returncode != 0 or not result.stdout:
+                    result = subprocess.run(
+                        ["chafa", "--format=symbols", f"--size={img_cols}x{img_rows}",
+                         self._album_cover_path],
+                        capture_output=True, timeout=8,
+                    )
+                if result.returncode == 0 and result.stdout:
+                    self._album_cover_render_buf = result.stdout
+                    self._album_cover_render_key = render_key
+                    buf = result.stdout
+                else:
+                    return
+            except Exception as e:
+                debug_log(f"_render_album_cover_pane chafa error: {e}")
+                return
+
+        # Write directly (not via _write_image_to_terminal) to avoid touching
+        # _cover_sixel_visible/_cover_sixel_* which belong to the playback tab.
+        buf = buf.rstrip(b"\r\n")
+        if is_kitty:
+            buf = self._kitty_set_z_below(buf)
+        if is_symbols:
+            col = x + 1
+            raw = b"\0337"
+            for i, line in enumerate(buf.split(b"\n")):
+                raw += f"\033[{top_h + 1 + i};{col}H".encode() + line
+            raw += b"\0338"
+        else:
+            raw = (b"\0337"
+                   + f"\033[{top_h + 1};{x + 1}H".encode()
+                   + buf
+                   + b"\0338")
+        sys.stdout.buffer.write(raw)
+        sys.stdout.buffer.flush()
+        self._album_cover_visible = True
+        self._album_cover_visible_top = top_h
+        self._album_cover_visible_x = x
+        self._album_cover_visible_rows = img_rows
+        self._album_cover_visible_cols = img_cols
+
+    def _erase_album_cover_terminal(self) -> None:
+        """Remove artist cover image from the terminal."""
+        if not self._album_cover_visible:
+            return
+        backend = self._cover_backend()
+        if backend == "ueberzugpp":
+            if self._cover_ub_socket:
+                try:
+                    subprocess.run(
+                        ["ueberzugpp", "cmd", "-s", self._cover_ub_socket,
+                         "-i", "tuifi_artist", "-a", "remove"],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2,
+                    )
+                except Exception:
+                    pass
+        elif backend == "chafa-kitty":
+            sys.stdout.buffer.write(b"\033_Ga=d,d=A\033\\")
+            sys.stdout.buffer.flush()
+        else:
+            rows = self._album_cover_visible_rows
+            cols = self._album_cover_visible_cols
+            top = self._album_cover_visible_top
+            col = self._album_cover_visible_x + 1
+            if rows > 0 and cols > 0:
+                blank = b" " * cols
+                buf = b"".join(
+                    f"\033[{top + 1 + r};{col}H".encode() + blank
+                    for r in range(rows)
+                )
+                sys.stdout.buffer.write(buf)
+                sys.stdout.buffer.flush()
+        self._album_cover_visible = False
+
+    def _album_cover_clear(self) -> None:
+        """Full artist cover cleanup: erase from terminal, reset state, clean tmpdir."""
+        self._erase_album_cover_terminal()
+        self._album_cover_item_key = ""
+        self._album_cover_path = None
+        self._album_cover_loading = False
+        self._album_cover_render_buf = None
+        self._album_cover_render_key = ""
+        if self._album_cover_tmpdir and os.path.isdir(self._album_cover_tmpdir):
+            try:
+                shutil.rmtree(self._album_cover_tmpdir, ignore_errors=True)
+            except Exception:
+                pass
+        self._album_cover_tmpdir = None
         self.stdscr.clearok(True)
 
     def start_download_tracks(self, tracks: List[Track]) -> None:
@@ -3370,6 +3740,8 @@ class App:
                 self.artist_ctx = (int(aid), ctx.artist)
                 self.artist_albums = albums[:500]
                 self._full_redraw()
+                # Pre-download all album covers in the background so C toggle is instant.
+                self._prefetch_album_covers_async(albums[:500], int(aid))
 
                 # Fetch tracks album by album and update UI after each one
                 for alb in albums:
@@ -3961,7 +4333,7 @@ class App:
 
             threading.Thread(target=_worker, daemon=True).start()
 
-        self._hide_cover_for_popup = True # Specific line to hide cover when the lyrics popup (v) is visible
+        self._hide_cover_for_popup = True
         self._need_redraw = True
         self.draw()
         h, w = self.stdscr.getmaxyx()
@@ -4038,7 +4410,7 @@ class App:
                        max_scroll if ch in (curses.KEY_END, ord("G")) else None)
                 if _nv is not None: scroll = _nv
         finally:
-            self._hide_cover_for_popup = False # Specific line to hide cover when the lyrics popup (v) is visible
+            self._hide_cover_for_popup = False
             self.stdscr.nodelay(True)
             self._full_redraw()
 
@@ -4472,9 +4844,9 @@ class App:
 
         pq_set = {qi: pos+1 for pos, qi in enumerate(self.priority_queue)}
 
-        # Cover tab: leave content area blank for image; show status/hint text only
-        if typ == "cover_tab":
-            self._draw_cover_hint(y, x, h, w)
+        # Playback tab: leave content area blank for image; show status/hint text only
+        if typ == "playback_tab":
+            self._draw_playback_hint(y, x, h, w)
             return
 
         # Empty-tab hints
@@ -4825,7 +5197,7 @@ class App:
         lines = [
             "",
             "\x01 TABS",
-            " 1 Queue  2 Search  3 Recommended  4 Mix  5 Artist  6 Album  7 Liked  8 Playlists  9 History  0 Cover",
+            " 1 Queue  2 Search  3 Recommended  4 Mix  5 Artist  6 Album  7 Liked  8 Playlists  9 History  0 Playback",
             "",
             "\x01 PLAYBACK                                           PLAYLISTS (8)",
             " p         play/pause                               n     new list",
@@ -4862,16 +5234,17 @@ class App:
             "",
             "\x01 GENERAL",
             " /         search TIDAL",
-            " f         filter term in current view (in cover tab: filter lyrics)",
-            " (/)       prev/next filter hit (in cover tab: prev/next lyrics match)",
+            " f         filter term in current view (in playback tab: filter lyrics)",
+            " (/)       prev/next filter hit (in playback tab: prev/next lyrics match)",
             " h/?       help (also: right-click on empty area)",
             " Esc       close prompts",
             " Q         quit",
             "",
             "\x01 VIEW",
             " q         mini-queue overlay",
+            " C         side cover pane",
             " Tab       move cursor between main view and mini-queue overlay",
-            " z         jump to playing track",
+            " z         jump to playing track in the mini-queue",
             " ^\u2190/^\u2192/1-9 Navigate main tabs and sub-tabs",
             " 7/[/]     jump to Liked tab then cycle its sub-tabs",
             " Alt+1-5   jump directly to Liked sub-tabs (Allᴹ⁻¹ Tracksᴹ⁻² Artistsᴹ⁻³ Albumsᴹ⁻⁴ Playlistsᴹ⁻⁵)",
@@ -4914,6 +5287,9 @@ class App:
             "",
             " Artist tab:",
             " include_singles_and_eps_in_artist_tab: show singles/EPs (default: false, toggle with #)",
+            " cover_pane: show side cover pane on startup (default: true, toggle with C)",
+            " playback_tab_layout: default layout when entering tab 0",
+            "   values: \"lyrics\" (default), \"miniqueue\", \"miniqueue_cover\"",
             "",
             " Download file structure:",
             " download_dir (Linux default: /tmp/tuifi/)",
@@ -4935,12 +5311,12 @@ class App:
             f"\x01 tuifi v{VERSION}",
         ]
         h, w = self.stdscr.getmaxyx()
-        box_w = min(w - 6, 97)
+        box_w = min(w - 4, 109)
         box_h = min(h - 6, 38)
         inner_h = box_h - 2
         max_scroll = max(0, len(lines) - inner_h)
         scroll = clamp(getattr(self, "help_scroll", 0), 0, max_scroll)
-        self._hide_cover_for_popup = True  # hide cover art while help is shown
+        self._hide_cover_for_popup = True
         self._need_redraw = True
         self.draw()
         y0, x0, win = self._popup_win(box_h, box_w)
@@ -4997,7 +5373,7 @@ class App:
                 elif ch in (curses.KEY_END, ord("G")):
                     scroll = max_scroll
         finally:
-            self._hide_cover_for_popup = False  # restore cover art after help closes
+            self._hide_cover_for_popup = False
             self.help_scroll = scroll
             self.stdscr.nodelay(True)
             self._full_redraw()
@@ -5039,8 +5415,6 @@ class App:
         top_h = 3 if self.tab == TAB_LIKED else 2
         status_h = 2
         usable_h = h - top_h - status_h
-        hide_cover = getattr(self, "_hide_cover_for_popup", False) # Specific line to hide cover when the lyrics popup (v) is visible
-
         if self._redraw_status_only:
             self._draw_status(h - status_h, 0, w)
             sys.stdout.buffer.write(b"\033[?2026h")
@@ -5065,21 +5439,28 @@ class App:
         # undisturbed in the terminal.  On the quiet frame (no pending input) the
         # full erase+render runs inside the \033[?2026h sync block so terminals that
         # support DEC 2026 present the transition atomically with no flicker.
+        # Scrollable popups (Help, Lyrics) set this flag so both cover images are
+        # fully erased for the duration: ncurses scroll corrupts residual sixel rows.
+        hide_cover = getattr(self, "_hide_cover_for_popup", False)
+
         _throttle_cover = False
-        if (self.tab == TAB_COVER and self.cover_path and self._cover_sixel_visible
-                and not self.show_help and not hide_cover):
+        if (self.tab == TAB_PLAYBACK and self.cover_path and self._cover_sixel_visible
+                and not hide_cover):
             _next = self.stdscr.getch()
             if _next != -1:
                 curses.ungetch(_next)
                 _throttle_cover = True
 
         if not _throttle_cover:
-            # On the cover tab with a valid cover, keep the existing sixel in place
+            # On the playback tab with a valid cover, keep the existing sixel in place
             # while curses repaints the UI chrome — the new cover is written after
             # stdscr.refresh(), and overlays are drawn on top of it afterwards.
             # On any other tab (or if cover_path is unset), erase any stale sixel first.
-            if hide_cover or not (self.tab == TAB_COVER and self.cover_path): # Specific line to hide cover when the lyrics popup (v) is visible
+            if hide_cover or not (self.tab == TAB_PLAYBACK and self.cover_path):
                 self._cover_erase_terminal()
+            # Artist cover pane: always erase before full redraw; re-rendered after refresh.
+            if self._album_cover_visible:
+                self._erase_album_cover_terminal()
             # Full redraw: stdscr.erase()+refresh() will overwrite the sixel area with
             # spaces, so mark it as no longer visible.  This ensures _render_cover_image
             # re-writes it even if the render key is unchanged.
@@ -5091,17 +5472,57 @@ class App:
         queue_panel = self.queue_overlay and self.tab != TAB_QUEUE
         left_w = w if not queue_panel else max(20, w - 44)
 
+        # Side cover pane (C toggle): works on all tabs.
+        # When the miniqueue is also shown, share its right column (cover on top, queue below).
+        # Hidden when on Playback tab in lyrics mode (main cover already fills the screen).
+        artist_pane_w = 0
+        artist_cover_rows = 0   # non-zero only when stacked with miniqueue
+        # Minicover is suppressed on Playback tab unless the miniqueue is also open
+        # (there's no cursor on the bare Playback tab to drive cover selection).
+        _pane_active = self._album_cover_pane and not hide_cover and not (
+            self.tab == TAB_PLAYBACK and not queue_panel
+        )
+        if _pane_active:
+            # Determine what's focused and trigger fetch if needed.
+            _sel_item_key = ""
+            if self._queue_context() and self.queue_items:
+                qt = self.queue_items[clamp(self.queue_cursor, 0, len(self.queue_items) - 1)]
+                if isinstance(qt, Track):
+                    _sel_item_key = f"t:{qt.id}"
+                    if _sel_item_key != self._album_cover_item_key:
+                        self._fetch_track_cover_async(qt)
+            else:
+                sel_alb = self._selected_left_album()
+                if sel_alb and sel_alb.id:
+                    _sel_item_key = f"a:{sel_alb.id}"
+                    if _sel_item_key != self._album_cover_item_key:
+                        self._fetch_album_cover_async(sel_alb)
+                else:
+                    sel_trk = self._selected_left_track()
+                    if sel_trk:
+                        _sel_item_key = f"t:{sel_trk.id}"
+                        if _sel_item_key != self._album_cover_item_key:
+                            self._fetch_track_cover_async(sel_trk)
+
+            if queue_panel:
+                artist_pane_w = w - left_w  # share the queue column
+                artist_cover_rows = min(artist_pane_w // 2, max(6, usable_h - 8))
+            else:
+                artist_pane_w = self._album_cover_pane_w(w)
+                left_w = max(10, left_w - artist_pane_w)
+
         self._draw_tabs(0, 0, w)
         if self.tab == TAB_LIKED:
             self._draw_liked_filter_bar(2, 0, w)
         self._draw_left(top_h, 0, usable_h, left_w)
 
         if queue_panel:
-            self._draw_queue(top_h, left_w, usable_h, w - left_w)
+            self._draw_queue(top_h + artist_cover_rows, left_w,
+                             usable_h - artist_cover_rows, w - left_w)
 
         self._draw_status(h - status_h, 0, w)
 
-        if self.tab == TAB_COVER and self._cover_lyrics and not queue_panel:
+        if self.tab == TAB_PLAYBACK and self._cover_lyrics and not queue_panel:
             # Auto-fetch lyrics for the playing track if not already loaded.
             t_cov = self.current_track
             if t_cov and not self.lyrics_loading and not (self.lyrics_track_id == t_cov.id and self.lyrics_lines):
@@ -5109,18 +5530,26 @@ class App:
                 self.lyrics_overlay = False
             if self._cover_portrait(h, w):  # portrait: lyrics below the cover image
                 cover_rows = self._cover_img_rows_portrait(h, w)
-                self._draw_cover_lyrics_panel(top_h + cover_rows, 0,
+                self._draw_playback_lyrics_panel(top_h + cover_rows, 0,
                                               usable_h - cover_rows - 1, w)
             else:       # landscape: lyrics on the right
                 lyrics_w = self._lyrics_panel_w(w)
-                self._draw_cover_lyrics_panel(top_h, w - lyrics_w, usable_h, lyrics_w)
+                self._draw_playback_lyrics_panel(top_h, w - lyrics_w, usable_h, lyrics_w)
 
-        if self.tab == TAB_COVER and self.cover_path and not _throttle_cover:
+        if self.tab == TAB_PLAYBACK and self.cover_path and not _throttle_cover:
             # Prevent ncurses scroll-region optimisation for the content rows.
             # redrawln marks those rows as physically corrupted so ncurses
             # rewrites each cell individually on the next refresh instead of
             # issuing ESC[S/ESC[T sequences that shift the sixel image.
             self.stdscr.redrawln(top_h, usable_h)
+
+        # Persist offset so the mouse handler can compute correct queue click rows.
+        self._album_cover_rows_offset = artist_cover_rows if queue_panel else 0
+
+        if _pane_active and self._album_cover_path and artist_pane_w > 0:
+            _ar_rows = artist_cover_rows if queue_panel else usable_h
+            if _ar_rows > 0:
+                self.stdscr.redrawln(top_h, _ar_rows)
 
         # Synchronized output (DEC mode 2026): tells the terminal to buffer all
         # output until the ESU marker, presenting the entire frame atomically.
@@ -5132,7 +5561,7 @@ class App:
 
             # After curses has refreshed, write the cover image.  Overlays (info,
             # lyrics, help) are drawn AFTER the image so they appear on top of it.
-            if self.tab == TAB_COVER and self.cover_path and not self.show_help and not hide_cover and not _throttle_cover:
+            if self.tab == TAB_PLAYBACK and self.cover_path and not hide_cover and not _throttle_cover:
                 # _cover_sixel_visible was cleared at the top of this full-redraw
                 # path, so _render_cover_image always re-writes after erase+refresh.
                 self._render_cover_image()
@@ -5143,6 +5572,17 @@ class App:
                     self.stdscr.redrawln(0, top_h)
                     self.stdscr.redrawln(h - status_h - 1, status_h + 1)
                     self.stdscr.refresh()
+
+            # Side cover pane: render cover in the right pane after curses refresh.
+            if _pane_active and self._album_cover_path and artist_pane_w > 0:
+                artist_x = w - artist_pane_w
+                _render_h = artist_cover_rows if queue_panel else (usable_h - 1)
+                if _render_h > 0:
+                    self._render_album_cover_pane(top_h, artist_x, artist_pane_w, _render_h)
+                    if self._album_cover_visible:
+                        self.stdscr.redrawln(0, top_h)
+                        self.stdscr.redrawln(h - status_h - 1, status_h + 1)
+                        self.stdscr.refresh()
         finally:
             sys.stdout.buffer.write(b"\033[?2026l")
             sys.stdout.buffer.flush()
@@ -5165,7 +5605,7 @@ class App:
         self._tab_positions[self.tab] = (self.left_idx, self.left_scroll)
         if t != self.tab:
             self._prev_tab = self.tab
-            if self.tab == TAB_COVER:
+            if self.tab == TAB_PLAYBACK:
                 self._cover_clear_image()
             if self.tab == TAB_RECOMMENDED:
                 self._recommended_pending_ctx = None  # type: ignore[attr-defined]
@@ -5173,6 +5613,21 @@ class App:
                 self._mix_pending_ctx = None          # type: ignore[attr-defined]
             if self.tab == TAB_ARTIST:
                 self._artist_pending_ctx = None       # type: ignore[attr-defined]
+                # Clean up artist album cover tmpdir; track covers use persistent cache.
+                if self._album_cover_tmpdir and os.path.isdir(self._album_cover_tmpdir):
+                    try:
+                        shutil.rmtree(self._album_cover_tmpdir, ignore_errors=True)
+                    except Exception:
+                        pass
+                self._album_cover_tmpdir = None
+            # Reset current displayed cover when switching tabs (new context needs fresh cover).
+            if self._album_cover_visible:
+                self._erase_album_cover_terminal()
+            self._album_cover_item_key = ""
+            self._album_cover_path = None
+            self._album_cover_render_buf = None
+            self._album_cover_render_key = ""
+            self.stdscr.clearok(True)
             if self.tab == TAB_ALBUM:
                 self._album_pending_ctx = None        # type: ignore[attr-defined]
 
@@ -5206,7 +5661,18 @@ class App:
             self.playlist_names = sorted(self.playlists.keys())
             self.playlist_view_name = None
             self.playlist_view_tracks = []
-        elif t == TAB_COVER:
+        elif t == TAB_PLAYBACK:
+            _layout = self.settings.get("playback_tab_layout", "lyrics")
+            if _layout == "lyrics":
+                self._cover_lyrics = True
+            elif _layout == "miniqueue":
+                self._cover_lyrics = False
+                self.queue_overlay = True
+            elif _layout == "miniqueue_cover":
+                self._cover_lyrics = False
+                self.queue_overlay = True
+                self._album_cover_pane = True
+                self.settings["cover_pane"] = True
             self.fetch_cover_async(self.current_track)
             if self.queue_overlay:
                 self.jump_to_playing_in_queue()
@@ -5348,7 +5814,7 @@ class App:
             ord("/"): self.do_search_prompt_anywhere,
             ord(" "): self.toggle_mark_and_advance,
             ord("a"): self.playlists_add_from_context,
-            ord("0"): lambda: self.switch_tab(TAB_COVER),
+            ord("0"): lambda: self.switch_tab(TAB_PLAYBACK),
             ord("e"): lambda: self.enqueue_key(insert_after_playing=False),
             ord("E"): lambda: self.enqueue_key(insert_after_playing=True),
             ord("R"): lambda: (setattr(self, "repeat_mode", (self.repeat_mode + 1) % 3),
@@ -5365,9 +5831,9 @@ class App:
             ord(">"): lambda: _skip(+1),
             ord("."): lambda: _skip(+1),
             ord("\\"): lambda: _tog("tab_align", "TSV: on", "TSV: off"),
-            ord("f"): lambda: self.lyrics_filter_prompt() if self.tab == TAB_COVER and self._cover_lyrics and not self.queue_overlay else self.filter_prompt(),
-            ord("("): lambda: self.lyrics_filter_next(-1) if self.tab == TAB_COVER and self._cover_lyrics and not self.queue_overlay else self.filter_next(-1),
-            ord(")"): lambda: self.lyrics_filter_next(1) if self.tab == TAB_COVER and self._cover_lyrics and not self.queue_overlay else self.filter_next(+1),
+            ord("f"): lambda: self.lyrics_filter_prompt() if self.tab == TAB_PLAYBACK and self._cover_lyrics and not self.queue_overlay else self.filter_prompt(),
+            ord("("): lambda: self.lyrics_filter_next(-1) if self.tab == TAB_PLAYBACK and self._cover_lyrics and not self.queue_overlay else self.filter_next(-1),
+            ord(")"): lambda: self.lyrics_filter_next(1) if self.tab == TAB_PLAYBACK and self._cover_lyrics and not self.queue_overlay else self.filter_next(+1),
             ord("p"): lambda: self.play_queue_index(self.queue_play_idx) if not self.mp.alive() and self.queue_items else self.toggle_pause(),
             ord(";"): lambda: self.switch_tab(self._prev_tab, refresh=False) if self._prev_tab != self.tab else None,
             ord("n"): lambda: self.playlists_create() if self.tab == TAB_PLAYLISTS else _tog("show_numbers", "Line numbers: on", "Line numbers: off"),
@@ -5469,8 +5935,9 @@ class App:
                         self._mouse_last_press = (now, my, mx)
                         self._mouse_long_press_pending = not is_dbl
                         if queue_panel and mx >= left_w:                      # queue overlay
-                            clicked = self._q_overlay_scroll + (my - top_h - 1)
-                            if 0 <= clicked < len(self.queue_items):
+                            _q_top = top_h + self._album_cover_rows_offset + 1
+                            clicked = self._q_overlay_scroll + (my - _q_top)
+                            if my >= _q_top and 0 <= clicked < len(self.queue_items):
                                 self.queue_cursor = clamp(clicked, 0, len(self.queue_items) - 1)
                                 self.focus = "queue"
                                 if is_dbl: curses.ungetch(10)
@@ -5485,7 +5952,7 @@ class App:
                                     self.left_idx = clicked
                                     self.focus = "left"
                                 if is_dbl: curses.ungetch(10)
-                            elif self.tab == TAB_COVER:                       # click on cover image
+                            elif self.tab == TAB_PLAYBACK:                       # click on cover image
                                 _on_cover = True
                                 if self._cover_lyrics and not self.queue_overlay:
                                     if self._cover_portrait(h, w):
@@ -5563,7 +6030,7 @@ class App:
                         self._goto_liked_filter(_ctrl_digit - 1)
                     continue
                 # Plain ESC: dismiss overlays
-                elif self.tab == TAB_COVER and self._lyrics_filter_q:
+                elif self.tab == TAB_PLAYBACK and self._lyrics_filter_q:
                     self._lyrics_filter_q = ""
                     self._lyrics_filter_hits = []
                     self._lyrics_filter_pos = -1
@@ -5589,10 +6056,10 @@ class App:
                     _fn()
                     continue
 
-            # V in cover tab:
+            # V in playback tab:
             #   - If miniqueue is open → close it and show lyrics (one action, no toggle).
             #   - If miniqueue is closed → toggle inline lyrics panel on/off.
-            if ch == ord("V") and self.tab == TAB_COVER:
+            if ch == ord("V") and self.tab == TAB_PLAYBACK:
                 if self.queue_overlay:
                     # Always: close miniqueue and ensure lyrics are shown.
                     self.queue_overlay = False
@@ -5643,7 +6110,7 @@ class App:
                     if _t:
                         _sar = Artist(id=_t.artist_id or 0, name=_t.artist,
                                       track_id=_t.id if not _t.artist_id else None)
-                if not _sar and self.tab == TAB_COVER and self.current_track:
+                if not _sar and self.tab == TAB_PLAYBACK and self.current_track:
                     _t = self.current_track
                     _sar = Artist(id=_t.artist_id or 0, name=_t.artist,
                                   track_id=_t.id if not _t.artist_id else None)
@@ -5677,7 +6144,7 @@ class App:
                 self.queue_overlay = not self.queue_overlay
                 if not self.queue_overlay and self.focus == "queue":
                     self.focus = "left"
-                elif self.queue_overlay and self.tab == TAB_COVER:
+                elif self.queue_overlay and self.tab == TAB_PLAYBACK:
                     self.focus = "queue"
                 self.toast("Queue overlay: on" if self.queue_overlay else "Queue overlay: off")
                 continue
@@ -5766,7 +6233,7 @@ class App:
                         self.switch_tab(TAB_MIX, refresh=False)
 
                 elif t_num == TAB_ARTIST:
-                    if self.tab == TAB_COVER:
+                    if self.tab == TAB_PLAYBACK:
                         self.switch_tab(TAB_ARTIST)
                         continue
                     if self.tab == TAB_ARTIST and not self._queue_context():
@@ -5859,6 +6326,15 @@ class App:
                 if self.autoplay != AUTOPLAY_OFF:
                     self._autoplay_trigger_prefetch()
                 continue
+            if ch == ord("C"):
+                self._album_cover_pane = not self._album_cover_pane
+                self.settings["cover_pane"] = self._album_cover_pane
+                if not self._album_cover_pane:
+                    # Only erase the rendered image; keep cached paths/tmpdir intact.
+                    self._erase_album_cover_terminal()
+                self._full_redraw()
+                continue
+
             if ch == ord("#"):
                 self._show_singles_eps = not self._show_singles_eps
                 self.settings["include_singles_and_eps_in_artist_tab"] = self._show_singles_eps
@@ -5892,7 +6368,7 @@ class App:
             # Ctrl+Left/Ctrl+Right: cycle through all tabs including Liked subtabs
             # Sequence: Search Queue Recommended Mix Artist Album
             #           Liked/All Liked/Tracks Liked/Artists Liked/Albums Liked/Playlists
-            #           Playlists History Cover (wraps)
+            #           Playlists History Playback (wraps)
             if isinstance(ch, int) and (_is_ctrl_left(ch) or _is_ctrl_right(ch)):
                 _NAV_SEQ = [
                     (TAB_SEARCH, 0),
@@ -5900,7 +6376,7 @@ class App:
                     (TAB_ARTIST, 0), (TAB_ALBUM, 0),
                     (TAB_LIKED, 0), (TAB_LIKED, 1), (TAB_LIKED, 2),
                     (TAB_LIKED, 3), (TAB_LIKED, 4),
-                    (TAB_PLAYLISTS, 0), (TAB_HISTORY, 0), (TAB_COVER, 0),
+                    (TAB_PLAYLISTS, 0), (TAB_HISTORY, 0), (TAB_PLAYBACK, 0),
                 ]
                 cur_f = self.liked_filter if self.tab == TAB_LIKED else 0
                 cur_pos = next(
@@ -6114,9 +6590,9 @@ class App:
                 self.start_download_tracks(self._target_tracks())
                 continue
 
-            # In the cover tab with the inline lyrics panel (no queue overlay, no
+            # In the playback tab with the inline lyrics panel (no queue overlay, no
             # full-screen overlay), intercept navigation keys to scroll the panel.
-            if (self.tab == TAB_COVER and self._cover_lyrics and not self.queue_overlay):
+            if (self.tab == TAB_PLAYBACK and self._cover_lyrics and not self.queue_overlay):
                 _lmax = self._cover_lyrics_max_scroll; _p = self._page_step()
                 _nv = (min(self.lyrics_scroll + 1, _lmax) if ch in (curses.KEY_DOWN, ord("j"), 14) else
                        max(0, self.lyrics_scroll - 1) if ch in (curses.KEY_UP, ord("k"), 16) else

@@ -1,7 +1,7 @@
 """tuifi package — a TUI music player for TIDAL HiFi API."""
 
 APP_NAME = "tuifi"
-VERSION = "1.4.3"
+VERSION = "1.5.0"
 DEFAULT_API = ""
 
 TAB_SEARCH      = 1
@@ -13,7 +13,7 @@ TAB_ALBUM       = 6
 TAB_LIKED       = 7
 TAB_PLAYLISTS   = 8
 TAB_HISTORY     = 9
-TAB_COVER       = 10
+TAB_PLAYBACK    = 10
 
 TAB_NAMES = {
     TAB_SEARCH:      "Search\u00b9",
@@ -25,7 +25,7 @@ TAB_NAMES = {
     TAB_LIKED:       "Liked\u2077",
     TAB_PLAYLISTS:   "Playlists\u2078",
     TAB_HISTORY:     "History\u2079",
-    TAB_COVER:       "Cover\u2070",
+    TAB_PLAYBACK:    "Playback\u2070",
 }
 
 TAB_SHORT_NAMES = {
@@ -38,7 +38,7 @@ TAB_SHORT_NAMES = {
     TAB_LIKED:       "Lkd\u2077",
     TAB_PLAYLISTS:   "Pls\u2078",
     TAB_HISTORY:     "Hist\u2079",
-    TAB_COVER:       "Cov\u2070",
+    TAB_PLAYBACK:    "Plb\u2070",
 }
 
 # Autoplay modes

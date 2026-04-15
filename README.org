@@ -88,8 +88,6 @@ ln -s /path/to/tuifi/tuifi ~/.local/bin/tuifi
 
 ** Windows peculiarities
 
-NOTE: Windows support may be partly broken in the latest commit, I will investigate it but have no machine to test it, hence why it is not done already.
-
 The =ncurses= libary does not exist officially for Windows, but =windows-curses= can be used. It is available /via/ =pip= up to Python 3.13. The easiest way to install a specific Python version on Windows as well as the other dependency, =mpv=, is probably using [[https://chocolatey.org/install][Chocolatey]]:
 
 #+begin_src shell

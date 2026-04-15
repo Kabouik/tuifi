@@ -84,8 +84,6 @@ You can also create a symbolic link between the script and a directory in your `
 
 ## Windows peculiarities
 
-NOTE: Windows support may be partly broken in the latest commit, I will investigate it but have no machine to test it, hence why it is not done already.
-
 The `ncurses` library does not exist officially for Windows, but `windows-curses` can be used. It is available via `pip` up to Python 3.13. The easiest way to install a specific Python version on Windows as well as the other dependency, `mpv`, is probably using [Chocolatey](https://chocolatey.org/install):
 
     choco install python313 mpv git -y # In an admin PowerShell

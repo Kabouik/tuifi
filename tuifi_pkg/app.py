@@ -206,6 +206,7 @@ class App:
         self._album_pending_ctx: Optional[Track] = None
         self.marked_left_idx: set = set(); self.marked_queue_idx: set = set()
         self.priority_queue: List[int] = []
+        self._queue_resume_idx: Optional[int] = None  # queue_play_idx to return to after priorities
         self.repeat_mode = 0; self.shuffle_on = False
         self.current_track: Optional[Track] = None; self.last_error: Optional[str] = None
         self.toast_msg = ""; self.toast_until = 0.0
@@ -1624,8 +1625,12 @@ class App:
     def toggle_priority(self, queue_idx: int) -> None:
         if queue_idx in self.priority_queue:
             self.priority_queue.remove(queue_idx)
+            if not self.priority_queue:
+                self._queue_resume_idx = None
             self.toast("Priority removed")
         else:
+            if not self.priority_queue:
+                self._queue_resume_idx = self.queue_play_idx
             self.priority_queue.append(queue_idx)
             self._toast_redraw(f"Priority {len(self.priority_queue)}")
 
@@ -1634,6 +1639,7 @@ class App:
         if not n: self.toast("Priority queue empty"); return
         if self.prompt_yes_no(f"Clear {n} priority track(s)? (y/n)"):
             self.priority_queue.clear()
+            self._queue_resume_idx = None
             self._toast_redraw("Priority cleared")
 
     def _remap_priority_after_delete(self, deleted_indices: List[int]) -> None:
@@ -1644,9 +1650,14 @@ class App:
             shift = sum(1 for d in deleted_indices if d < pi)
             new_pq.append(pi - shift)
         self.priority_queue = new_pq
+        if self._queue_resume_idx is not None:
+            shift = sum(1 for d in deleted_indices if d < self._queue_resume_idx)
+            self._queue_resume_idx -= shift
 
     def _remap_priority_after_insert(self, insert_pos: int, count: int) -> None:
         self.priority_queue = [pi + count if pi >= insert_pos else pi for pi in self.priority_queue]
+        if self._queue_resume_idx is not None and self._queue_resume_idx >= insert_pos:
+            self._queue_resume_idx += count
 
     # ---------------------------------------------------------------------------
     # queue playback
@@ -1674,6 +1685,10 @@ class App:
             next_idx = self.priority_queue[0]
             self.play_queue_index(next_idx)
             return
+        if self._queue_resume_idx is not None:
+            # All priorities exhausted — restore the position we had before they started
+            self.queue_play_idx = clamp(self._queue_resume_idx, 0, len(self.queue_items) - 1)
+            self._queue_resume_idx = None
         if self.repeat_mode == 2:
             self.play_queue_index(self.queue_play_idx)
             return

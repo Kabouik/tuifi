@@ -3697,6 +3697,12 @@ class App:
         self._last_artist_fetch_track = ctx
         self.artist_albums, self.artist_tracks = [], []
         self.artist_ctx = None
+        if self._album_cover_visible:
+            self._erase_album_cover_terminal()
+        self._album_cover_item_key = ""
+        self._album_cover_path = None
+        self._album_cover_render_buf = None
+        self._album_cover_render_key = ""
         key = f"artist:{ctx.id}:{time.time()}"
         self._set_loading(key)
 
@@ -4474,7 +4480,7 @@ class App:
             self.left_idx = idx
 
     def filter_prompt(self) -> None:
-        q = self.prompt_text("Filter:", self.filter_q)
+        q = self.prompt_text("Filter:", "")
         if q is None: return
         self.filter_q = q
         self._compute_filter_hits()
@@ -4503,7 +4509,7 @@ class App:
             self._lyrics_filter_pos = 0
 
     def lyrics_filter_prompt(self) -> None:
-        q = self.prompt_text("Lyrics filter:", self._lyrics_filter_q)
+        q = self.prompt_text("Lyrics filter:", "")
         if q is None: return
         self._lyrics_filter_q = q
         self._compute_lyrics_filter_hits()
@@ -5979,6 +5985,8 @@ class App:
                         _, _items = self._left_items()
                         _clicked = self.left_scroll + (my - top_h)
                         if 0 <= _clicked < len(_items):
+                            self.left_idx = _clicked
+                            self.focus = "left"
                             self.context_actions_popup()
                         else:
                             self.show_help_dialog()
@@ -6617,8 +6625,9 @@ class App:
             if ch in (curses.KEY_END, ord("G")):
                 self.nav_end()
                 continue
-            if ch in (curses.KEY_DOWN, ord("j"), curses.KEY_UP, ord("k")):
-                d = 1 if ch in (curses.KEY_DOWN, ord("j")) else -1
+            if ch in (curses.KEY_DOWN, ord("j"), curses.KEY_UP, ord("k"),
+                      getattr(curses, "KEY_SF", -997), getattr(curses, "KEY_SR", -998)):
+                d = 1 if ch in (curses.KEY_DOWN, ord("j"), getattr(curses, "KEY_SF", -997)) else -1
                 if self._queue_context():
                     self.queue_cursor = clamp(self.queue_cursor + d, 0, max(0, len(self.queue_items) - 1))
                 else:

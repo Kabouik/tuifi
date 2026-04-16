@@ -1,0 +1,4 @@
+- RMB should select before showing the context menu
+- RMB in tab 0 is partly broken
+- fix o/O without hardcoding monochrome.tf
+- Error: urlopen error (errno -3) Temporary failure on name resolution: happened when scrolling songs

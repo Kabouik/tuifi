@@ -6,3 +6,5 @@
 - when changing the artist, the previous cover shows until a new album is hovered: we probably need to force an erase in that situation
 - switching minicovers flickers in kitty
 - clear filter and search prompts by default, add a setting to keep last input
+- when no song is in queue but one is played with Return, currently seeking backwards after the song ends does not play it again until p is pressed. Expected behaviour: song ends, seek backwards, play automatically from there
+- double check that the queue resumes position where it left off after it was interrupted by some priority (B) tracks, and not just at the position next to the priority track (i.e., it should remember what was the next non-priority track)

@@ -2,3 +2,6 @@
 - RMB in tab 0 is partly broken
 - fix o/O without hardcoding monochrome.tf
 - Error: urlopen error (errno -3) Temporary failure on name resolution: happened when scrolling songs
+- artist page: consider an artist pic when hovering artist name
+- when changing the artist, the previous cover shows until a new album is hovered: we probably need to force an erase in that situation
+- switching minicovers flickers in kitty

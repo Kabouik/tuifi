@@ -6080,19 +6080,6 @@ class App:
                                     _ctrl_digit = _key_n2 - 48
                                 elif 1 <= _key_n2 <= 9:
                                     _ctrl_digit = _key_n2
-                    # Format 3 — xterm modifier+arrow: "1;MA" / "1;MB" etc.
-                    # Foot (and other xterm-compatible terminals) sends ESC[1;2A for
-                    # Shift+Up and ESC[1;2B for Shift+Down, which ncurses doesn't
-                    # always map to KEY_SR/KEY_SF via terminfo.
-                    if not _ctrl_digit:
-                        _m3 = re.match(r'^\d+;(\d+)([AB])$', _seq)
-                        if _m3:
-                            _mod3, _dir3 = int(_m3.group(1)), _m3.group(2)
-                            if (_mod3 - 1) & 1:  # Shift bit set (xterm: modifier = bits+1, shift=bit0)
-                                if _dir3 == 'A':
-                                    curses.ungetch(ord('k'))
-                                else:
-                                    curses.ungetch(ord('j'))
                 elif ord('1') <= _c2 <= ord('9'):
                     # Alt+digit (ESC immediately followed by a digit, nodelay so no gap)
                     _ctrl_digit = _c2 - ord('0')

@@ -5987,6 +5987,7 @@ class App:
                         if 0 <= _clicked < len(_items):
                             self.left_idx = _clicked
                             self.focus = "left"
+                            self.draw()
                             self.context_actions_popup()
                         else:
                             self.show_help_dialog()

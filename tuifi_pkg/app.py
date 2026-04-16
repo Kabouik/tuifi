@@ -258,6 +258,8 @@ class App:
         self._queue_redraw_only = False; self._loading = False; self._loading_key = ""; self._liked_refresh_due: float = 0.0
 
         self._last_mpd_path: Optional[str] = None
+        self._play_serial: int = 0          # bumped on every play_track call; stale threads bail
+        self._play_lock = threading.Lock()  # serializes mp.start() so only one runs at a time
 
         self._init_curses()
 
@@ -1501,6 +1503,9 @@ class App:
                 pass
 
     def play_track(self, t: Track, resume: bool = False, start_pos: float = 0.0) -> None:
+        self._play_serial += 1
+        _my_serial = self._play_serial
+
         if self._last_mpd_path:
             try:
                 if os.path.exists(self._last_mpd_path):
@@ -1516,15 +1521,26 @@ class App:
             mpd_path: Optional[str] = None
             try:
                 url = self._resolve_stream_url_for_quality(t.id, quality)
+                # Bail if a newer play was requested while we were fetching the URL
+                if _my_serial != self._play_serial:
+                    return
                 is_mpd = url.endswith(".mpd") and os.path.isfile(url)
                 mpd_path = url if is_mpd else None
-                self.mp.start(url, resume=resume, start_pos=start_pos)
+                with self._play_lock:
+                    # Bail if superseded while waiting for the lock
+                    if _my_serial != self._play_serial:
+                        return
+                    self.mp.start(url, resume=resume, start_pos=start_pos)
                 self._apply_mpv_prefs()
                 if is_mpd:
                     time.sleep(0.5)
                     if not self.mp.alive():
                         debug_log(f"play_track: mpv died on DASH for {quality} — trying lower quality")
                         raise RuntimeError("dash playback failed")
+                # Bail if superseded after start; the newer thread's mp.start() will
+                # have already called stop() on our proc via its own start sequence
+                if _my_serial != self._play_serial:
+                    return
                 # success
                 if qi != start_qi:
                     debug_log(f"  Quality fallback: {QUALITY_ORDER[start_qi]} → {quality}")

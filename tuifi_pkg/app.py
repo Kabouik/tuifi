@@ -5982,15 +5982,24 @@ class App:
                                     self._cover_render_key = ""
                                     self._cover_render_buf = None
                     elif bstate & curses.BUTTON3_PRESSED:                     # RMB → context menu or help
-                        _, _items = self._left_items()
-                        _clicked = self.left_scroll + (my - top_h)
-                        if 0 <= _clicked < len(_items):
-                            self.left_idx = _clicked
-                            self.focus = "left"
-                            self.draw()
-                            self.context_actions_popup()
+                        if queue_panel and mx >= left_w:                      # miniqueue
+                            _q_top = top_h + self._album_cover_rows_offset + 1
+                            _clicked = self._q_overlay_scroll + (my - _q_top)
+                            if my >= _q_top and 0 <= _clicked < len(self.queue_items):
+                                self.queue_cursor = clamp(_clicked, 0, len(self.queue_items) - 1)
+                                self.focus = "queue"
+                                self.draw()
+                                self.context_actions_popup()
                         else:
-                            self.show_help_dialog()
+                            _, _items = self._left_items()
+                            _clicked = self.left_scroll + (my - top_h)
+                            if 0 <= _clicked < len(_items):
+                                self.left_idx = _clicked
+                                self.focus = "left"
+                                self.draw()
+                                self.context_actions_popup()
+                            else:
+                                self.show_help_dialog()
                     elif bstate & curses.BUTTON1_RELEASED:
                         self._mouse_long_press_pending = False
                 continue

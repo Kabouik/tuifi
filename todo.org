@@ -1,7 +1,8 @@
 * TODO
 ** DONE [#A] RMB should select before showing the context menu
    :DONE: set left_idx + focus before calling context_actions_popup() (app.py ~5982)
-** [#A] RMB in tab 0 is partly broken
+** DONE [#A] RMB in tab 0 is partly broken
+   :DONE: RMB now checks queue_panel+mx>=left_w (miniqueue) and selects queue_cursor before popup, mirroring LMB logic (app.py ~5984)
 ** [#C] fix o/O without hardcoding monochrome.tf
 ** [#A] Error: urlopen error (errno -3) Temporary failure on name resolution: happened when scrolling songs; Samidy confirmed there is no rate limits on their APIs so the issue is probably just tuifi freaking out all by itself when too many actions are executed in a short time
 ** [#C] artist page: consider an artist pic when hovering artist name

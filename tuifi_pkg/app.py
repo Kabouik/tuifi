@@ -209,6 +209,8 @@ class App:
         self._queue_resume_idx: Optional[int] = None  # queue_play_idx to return to after priorities
         self.repeat_mode = 0; self.shuffle_on = False
         self.current_track: Optional[Track] = None; self.last_error: Optional[str] = None
+        self._last_played_track: Optional[Track] = None   # survives end-of-track; used for post-end seek
+        self._last_played_duration: Optional[float] = None  # last known duration while mpv was alive
         self.toast_msg = ""; self.toast_until = 0.0
         self.show_help = False; self.help_scroll = 0
 
@@ -621,6 +623,8 @@ class App:
     def _on_mpv_tick(self) -> None:
         snap = self.mp.snapshot()
         vo, mu, pa = snap[3], snap[4], snap[2]
+        if snap[1] is not None:  # duration
+            self._last_played_duration = snap[1]
         if vo is not None:
             self.desired_volume = clamp(int(vo), 0, 130)
         if mu is not None:
@@ -1548,6 +1552,8 @@ class App:
                     self.toast(f"Quality fallback: {quality}", sec=3.0)
                 self._last_mpd_path = mpd_path
                 self.current_track = t
+                self._last_played_track = t
+                self._last_played_duration = None  # will be updated by _on_mpv_tick
                 self.last_error = None
                 self._full_redraw()
                 self._record_history(t)
@@ -1589,6 +1595,11 @@ class App:
         self.mp.cmd("add", "volume", float(delta))
 
     def seek_rel(self, sec: float) -> None:
+        if not self.mp.alive() and sec < 0 and self._last_played_track:
+            start_pos = max(0.0, (self._last_played_duration or 0.0) + sec)
+            t = self._last_played_track
+            self._bg(lambda: self.play_track(t, start_pos=start_pos), on_error="")
+            return
         self.mp.cmd("seek", float(sec), "relative")
 
     def play_track_with_resume(self) -> None:

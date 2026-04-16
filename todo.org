@@ -11,7 +11,8 @@
 ** switching minicovers flickers in kitty; ueberzug to be tested with litekin user; I also observed some flicker on foot+chafa on one machine, not the other, despite similar configs.
 ** DONE [#A] clear filter and search prompts by default, add a setting to keep last input
    :DONE: prompt_text() now called with "" in filter_prompt() and lyrics_filter_prompt() (app.py ~4477, ~4506); "keep last input" setting not yet added
-** [#B] when no song is in queue but one is played with Return, currently seeking backwards after the song ends does not play it again until p is pressed. Expected behaviour: song ends, seek backwards, play automatically from there
+** DONE [#B] when no song is in queue but one is played with Return, currently seeking backwards after the song ends does not play it again until p is pressed. Expected behaviour: song ends, seek backwards, play automatically from there
+   :DONE: seek_rel with negative delta + dead mpv restarts _last_played_track from max(0, last_duration + delta); duration tracked live in _on_mpv_tick (app.py ~1593)
 ** DONE [#B] double check that the queue resumes position where it left off after it was interrupted by some priority (B) tracks, and not just at the position next to the priority track (i.e., it should remember what was the next non-priority track)
    :DONE: _queue_resume_idx saved when first priority added, restored in next_track() when priority_queue empties; remapped on track delete/insert; cleared on manual priority clear (app.py ~1625)
 ** DONE [#A] critical: when spamming Return on a track in a tab (tested Mix, others to be tested), mpv will play it a million times simultaneously and the history json file will also start throwing errors; we need to prevent snding actions faster than mpv can respond and handle them

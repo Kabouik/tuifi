@@ -819,12 +819,24 @@ class App:
         return tid in self.liked_ids
 
     def web_base(self) -> str:
-        u = urllib.parse.urlparse(self.api_base)
-        host = u.netloc
-        scheme = u.scheme or "https"
-        if host.startswith("api."):
-            host = host[4:]
-        return f"{scheme}://{host}"
+        # TODO: derive this properly. The two approaches tried so far are both
+        # unsatisfactory:
+        #   1. Strip the "api." subdomain from the API URL — fragile; not all
+        #      instances expose a web UI at that domain, and the mapping is not
+        #      guaranteed.
+        #   2. Hardcode a specific public instance — works for most users today
+        #      but is wrong in principle.
+        # For now we hardcode monochrome.tf: it is a known public TIDAL web
+        # client, and any user who can open tuifi already has a working API
+        # instance, so the domain is reachable.
+        #
+        # u = urllib.parse.urlparse(self.api_base)
+        # host = u.netloc
+        # scheme = u.scheme or "https"
+        # if host.startswith("api."):
+        #     host = host[4:]
+        # return f"{scheme}://{host}"
+        return "https://monochrome.tf"
 
     def open_url(self, url: str) -> None:
         try:

@@ -840,7 +840,10 @@ class App:
 
     def open_url(self, url: str) -> None:
         try:
-            webbrowser.open(url)
+            if os.path.exists("/data/data/com.termux"):
+                subprocess.Popen(["termux-open-url", url])
+            else:
+                webbrowser.open(url)
             self.toast("Opened")
         except Exception:
             self.toast("Open failed")

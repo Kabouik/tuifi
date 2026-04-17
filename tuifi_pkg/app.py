@@ -6591,9 +6591,10 @@ class App:
                     self._toast_redraw("Queue cleared")
                 continue
 
-            if ch in (ord("J"), ord("K")):
+            if ch in (ord("J"), ord("K"),
+                      getattr(curses, "KEY_SR", -998), getattr(curses, "KEY_SF", -997)):
                 if not self.queue_items: continue
-                delta = +1 if ch == ord("J") else -1
+                delta = +1 if ch in (ord("J"), getattr(curses, "KEY_SF", -997)) else -1
                 idxs = sorted([i for i in self.marked_queue_idx if 0 <= i < len(self.queue_items)])
                 if not idxs:
                     i = clamp(self.queue_cursor, 0, len(self.queue_items) - 1)

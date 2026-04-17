@@ -5799,6 +5799,7 @@ class App:
             self.play_queue_index(_resume_idx, start_pos=_resume_pos)
             if _resume_pos > 1.0:
                 self.toast(f"Resumed from {fmt_time(_resume_pos)}")
+            self.jump_to_playing_in_queue()
 
         def _mk_ctrl(names, fallback=()):
             def _check(c):

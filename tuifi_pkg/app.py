@@ -723,6 +723,7 @@ class App:
             "autoplay": AUTOPLAY_NAMES[self.autoplay], "initial_tab": self.tab,
             "tab_align": self.tab_align,
             "include_singles_and_eps_in_artist_tab": self._show_singles_eps,
+            "remember_last_input": bool(self.settings.get("remember_last_input", False)),
         })
         try:
             save_settings(self.settings)

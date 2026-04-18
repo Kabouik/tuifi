@@ -58,7 +58,7 @@ While [HiFi API instances with unrestricted access](https://github.com/monochrom
     Usage: ./tuifi [options]
 
     Options:
-      --api URL, -a URL   TIDAL HiFi API base URL (can also be set in settings.json)
+      --api URL, -a URL   TIDAL HiFi API base URL (can also be set in settings.jsonc)
       --verbose, -v       Write debug log to debug.log in the config directory
       --version, -V       Show version
 
@@ -97,9 +97,9 @@ Then make a shortcut that uses Python 3.13 specifically, or the following comman
 
 # Configuration
 
-While `tuifi` should be compatible with any HiFi API instance, some popular ones are made public and may therefore violate TIDAL's TOS. Consequently, the program is delivered with no default instance set, and users should set their preferred instance either using the `--api` runtime flag or by editing `settings.json`. Users choosing to use a public HiFi instance with no legitimate TIDAL subscription do so at their own risk.
+While `tuifi` should be compatible with any HiFi API instance, some popular ones are made public and may therefore violate TIDAL's TOS. Consequently, the program is delivered with no default instance set, and users should set their preferred instance either using the `--api` runtime flag or by editing `settings.jsonc`. Users choosing to use a public HiFi instance with no legitimate TIDAL subscription do so at their own risk.
 
-Settings are stored in `settings.json` and automatically updated upon using toggles within the TUI. On first run, `tuifi` will prompt before creating the config directory.
+Settings are stored in `settings.jsonc` and automatically updated upon using toggles within the TUI. On first run, `tuifi` will prompt before creating the config directory.
 
 Configuration file directory per platform:
 
@@ -134,7 +134,7 @@ Configuration file directory per platform:
 </tbody>
 </table>
 
-`settings.json` can be edited to change UI options, colours, metadata field widths, autoplay buffer size, download destinations and naming conventions, TIDAL HiFi API URL, _etc._
+`settings.jsonc` can be edited to change UI options, colours, metadata field widths, autoplay buffer size, download destinations and naming conventions, TIDAL HiFi API URL, _etc._ The file uses [JSONC](https://github.com/microsoft/node-jsonc-parser) (JSON with `//` comments) so editors such as VS Code render the section headers as comments rather than string values. Existing `settings.json` files are migrated automatically on first run.
 
 Other state files stored in the same directory:
 

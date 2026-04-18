@@ -55,7 +55,7 @@ QUEUE_FILE     = os.path.join(STATE_DIR, "queue.json")
 LIKED_FILE     = os.path.join(STATE_DIR, "liked.json")
 PLAYLISTS_FILE = os.path.join(STATE_DIR, "playlists.json")
 HISTORY_FILE   = os.path.join(STATE_DIR, "history.json")
-SETTINGS_FILE  = os.path.join(STATE_DIR, "settings.json")
+SETTINGS_FILE  = os.path.join(STATE_DIR, "settings.jsonc")
 DOWNLOADS_DIR  = _default_downloads_dir()
 
 

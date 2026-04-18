@@ -172,12 +172,33 @@ def save_history(tracks: List[Any]) -> None:
 # Settings
 # ---------------------------------------------------------------------------
 
+def _load_jsonc(path: str, default: Any) -> Any:
+    """Load a JSONC file (JSON with // line comments).
+
+    Falls back to the equivalent .json path for migration so existing
+    settings.json files are picked up automatically on first run.
+    """
+    import re as _re
+    target = path
+    if not os.path.exists(target) and path.endswith(".jsonc"):
+        fallback = path[:-1]  # drop the trailing 'c'
+        if os.path.exists(fallback):
+            target = fallback
+    try:
+        with open(target, "r", encoding="utf-8") as f:
+            raw = f.read()
+        # Strip full-line // comments (safe because we never embed // at the
+        # start of a line inside a string value in our own serialiser output)
+        stripped = _re.sub(r"^\s*//[^\n]*\n?", "", raw, flags=_re.MULTILINE)
+        return json.loads(stripped)
+    except Exception:
+        return default
+
+
 def load_settings() -> Dict[str, Any]:
-    raw = load_json(SETTINGS_FILE, {})
-    if not isinstance(raw, dict):
-        raw = {}
-    # Strip section-marker keys (written by save_settings for human readability)
-    s = {k: v for k, v in raw.items() if not k.startswith("//")}
+    s = _load_jsonc(SETTINGS_FILE, {})
+    if not isinstance(s, dict):
+        s = {}
 
     # -------------------------------------------------------------------------
     # Runtime state — written automatically by the app on exit / during use.
@@ -267,41 +288,38 @@ def load_settings() -> Dict[str, Any]:
 
 
 def save_settings(s: Dict[str, Any]) -> None:
-    """Write settings.json with section markers for human readability.
+    """Write settings.jsonc with real // comment section headers.
 
-    Keys starting with "//" are section headers — they are stripped by
-    load_settings() and must never clash with real setting names.
+    The output is valid JSONC (understood by VS Code, Neovim + json5 plugin,
+    etc.) so editors render the section lines as comments, not string values.
+    _load_jsonc() strips those lines before parsing on the way back in.
     """
-    from collections import OrderedDict
+    # Each entry is either ("comment", text) or ("kv", key, value).
+    flat: List[Any] = []
 
-    def _sec(label: str) -> str:
-        """Return a unique section-marker key."""
-        return f"// {label}"
+    def _section(label: str) -> None:
+        flat.append(("comment", label))
 
-    out: "OrderedDict[str, Any]" = OrderedDict()
+    def _keys(*keys: str) -> None:
+        for k in keys:
+            if k in s:
+                flat.append(("kv", k, s[k]))
 
-    # ── Runtime state (managed automatically — do not edit) ──────────────────
-    out[_sec("── RUNTIME STATE  (managed automatically, do not edit) " + "─" * 14)] = ""
-    for k in ("_resume_position", "_resume_queue_idx", "initial_tab", "initial_filter"):
-        if k in s:
-            out[k] = s[k]
+    _section("── RUNTIME STATE  (managed automatically, do not edit) " + "─" * 14)
+    _keys("_resume_position", "_resume_queue_idx", "initial_tab", "initial_filter")
 
-    # ── In-app toggles (changed via UI keys; edit here to set defaults) ──────
-    out[_sec("── IN-APP TOGGLES  (changed via UI keys, edit to set defaults) " + "─" * 6)] = ""
-    for k in (
+    _section("── IN-APP TOGGLES  (changed via UI keys, edit to set defaults) " + "─" * 6)
+    _keys(
         "volume", "mute", "quality",
         "autoplay", "autoplay_n",
         "color_mode", "queue_overlay",
         "show_toggles", "show_track_album", "show_track_year",
         "show_track_duration", "show_numbers", "tab_align",
         "include_singles_and_eps_in_artist_tab",
-    ):
-        if k in s:
-            out[k] = s[k]
+    )
 
-    # ── User settings (edit freely in this file) ─────────────────────────────
-    out[_sec("── USER SETTINGS  (edit freely in this file) " + "─" * 24)] = ""
-    for k in (
+    _section("── USER SETTINGS  (edit freely in this file) " + "─" * 24)
+    _keys(
         "api",
         "auto_resume_playback",
         "remember_last_input",
@@ -312,41 +330,49 @@ def save_settings(s: Dict[str, Any]) -> None:
         "mix_tab_no_confirm_refetch",
         "artist_tab_no_confirm_refetch",
         "album_tab_no_confirm_refetch",
-    ):
-        if k in s:
-            out[k] = s[k]
+    )
 
-    # ── Colors ────────────────────────────────────────────────────────────────
-    out[_sec("── COLORS  (color name or 0-255 terminal index) " + "─" * 20)] = ""
-    for k in (
+    _section("── COLORS  (color name or 0-255 terminal index) " + "─" * 20)
+    _keys(
         "color_playing", "color_paused", "color_error", "color_chrome",
         "color_accent", "color_artist", "color_album", "color_year",
         "color_duration", "color_numbers", "color_title",
         "color_separator", "color_liked", "color_mark",
-    ):
-        if k in s:
-            out[k] = s[k]
+    )
 
-    # ── Downloads ─────────────────────────────────────────────────────────────
-    out[_sec("── DOWNLOADS " + "─" * 56)] = ""
-    for k in ("download_dir", "download_structure", "download_filename"):
-        if k in s:
-            out[k] = s[k]
+    _section("── DOWNLOADS " + "─" * 56)
+    _keys("download_dir", "download_structure", "download_filename")
 
-    # ── Track-list column widths ──────────────────────────────────────────────
-    out[_sec("── TRACK-LIST COLUMN WIDTHS  (0 = unlimited) " + "─" * 23)] = ""
-    for k in (
+    _section("── TRACK-LIST COLUMN WIDTHS  (0 = unlimited) " + "─" * 23)
+    _keys(
         "tsv_max_col_width", "tsv_max_artist_width", "tsv_max_title_width",
         "tsv_max_album_width", "tsv_max_year_width", "tsv_max_duration_width",
-    ):
-        if k in s:
-            out[k] = s[k]
+    )
 
-    # Any keys not covered by the sections above (forward-compat / unknown)
-    known = set(out.keys())
-    extras = {k: v for k, v in s.items() if k not in known and not k.startswith("//")}
+    # Forward-compat: any unknown keys from future versions or manual additions
+    # (also drops legacy // string keys written by the previous format)
+    known = {item[1] for item in flat if item[0] == "kv"}
+    extras = [(k, v) for k, v in s.items() if k not in known and not k.startswith("//")]
     if extras:
-        out[_sec("── OTHER " + "─" * 60)] = ""
-        out.update(extras)
+        _section("── OTHER " + "─" * 60)
+        for k, v in extras:
+            flat.append(("kv", k, v))
 
-    save_json(SETTINGS_FILE, out)
+    # Serialise to JSONC
+    kv_items = [x for x in flat if x[0] == "kv"]
+    last_key = kv_items[-1][1] if kv_items else None
+
+    buf = ["{\n"]
+    for item in flat:
+        if item[0] == "comment":
+            buf.append(f"\n  // {item[1]}\n")
+        else:
+            _, k, v = item
+            comma = "" if k == last_key else ","
+            buf.append(f"  {json.dumps(k)}: {json.dumps(v, ensure_ascii=False)}{comma}\n")
+    buf.append("}\n")
+
+    tmp = SETTINGS_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write("".join(buf))
+    os.replace(tmp, SETTINGS_FILE)

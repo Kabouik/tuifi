@@ -20,3 +20,7 @@
    :DONE: _play_serial counter + _play_lock in play_track: stale threads bail after URL resolve and before/after mp.start(); only the last-requested play proceeds to record state (app.py ~1505)
 ** DONE [#A] Add Shift+up/down as alternatives to K/J (may not be terminal agnostic so tests needed)
    :DONE: KEY_SF (Shift+Down) and KEY_SR (Shift+Up) added via getattr() guards (app.py ~6620); needs cross-terminal testing
+** DONE [#A] pressing .> or ,< skips to N+1/N-1 then immediately auto-advances again (plays N+2 or N)
+   :DONE: auto-advance now guarded by _play_serial == _current_track_serial; any play_track call bumps _play_serial, suppressing the auto-advance for the entire bg-thread lifetime until the new track is confirmed (app.py ~5929)
+** DONE [#A] RMB in queue tab does not visually select the track before showing the context menu
+   :DONE: RMB handler now checks tab == TAB_QUEUE and updates queue_cursor/focus="queue" instead of left_idx (app.py ~6063)

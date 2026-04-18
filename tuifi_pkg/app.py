@@ -142,6 +142,8 @@ class App:
 
         # autoplay: 0=off 1=mix 2=recommended  (migrate old bool True→recommended)
         raw_ap = self.settings.get("autoplay", AUTOPLAY_OFF)
+        if isinstance(raw_ap, str):
+            raw_ap = AUTOPLAY_NAMES.index(raw_ap) if raw_ap in AUTOPLAY_NAMES else AUTOPLAY_OFF
         self.autoplay: int = clamp(int(AUTOPLAY_RECOMMENDED if raw_ap is True else raw_ap), 0, 2)
         self.autoplay_n: int = max(1, int(self.settings.get("autoplay_n", 3) or 3))
 
@@ -717,7 +719,7 @@ class App:
             "show_track_album": self.show_track_album, "show_track_year": self.show_track_year,
             "show_track_duration": self.show_track_duration,
             "quality": QUALITY_ORDER[self.quality_idx],
-            "autoplay": self.autoplay, "initial_tab": self.tab,
+            "autoplay": AUTOPLAY_NAMES[self.autoplay], "initial_tab": self.tab,
             "tab_align": self.tab_align,
             "include_singles_and_eps_in_artist_tab": self._show_singles_eps,
         })

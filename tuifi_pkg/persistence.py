@@ -173,15 +173,37 @@ def save_history(tracks: List[Any]) -> None:
 # ---------------------------------------------------------------------------
 
 def _load_jsonc(path: str, default: Any) -> Any:
-    """Load a JSONC file (JSON with // line comments)."""
-    import re as _re
+    """Load a JSONC file (JSON with // line comments, including inline ones)."""
     try:
         with open(path, "r", encoding="utf-8") as f:
             raw = f.read()
-        # Strip full-line // comments (safe because we never embed // at the
-        # start of a line inside a string value in our own serialiser output)
-        stripped = _re.sub(r"^\s*//[^\n]*\n?", "", raw, flags=_re.MULTILINE)
-        return json.loads(stripped)
+        # Walk character by character, respecting string literals, and strip
+        # // comments (both full-line and inline).
+        buf: List[str] = []
+        i = 0
+        n = len(raw)
+        while i < n:
+            c = raw[i]
+            if c == '"':                        # enter string literal
+                buf.append(c)
+                i += 1
+                while i < n:
+                    sc = raw[i]
+                    buf.append(sc)
+                    if sc == '\\' and i + 1 < n:
+                        i += 1
+                        buf.append(raw[i])
+                    elif sc == '"':
+                        break
+                    i += 1
+                i += 1
+            elif c == '/' and i + 1 < n and raw[i + 1] == '/':
+                while i < n and raw[i] != '\n':  # skip to end of line
+                    i += 1
+            else:
+                buf.append(c)
+                i += 1
+        return json.loads("".join(buf))
     except Exception:
         return default
 
@@ -298,22 +320,43 @@ def load_settings() -> Dict[str, Any]:
 
 
 def save_settings(s: Dict[str, Any]) -> None:
-    """Write settings.jsonc with real // comment section headers.
+    """Write settings.jsonc with real // section headers and inline comments.
 
     The output is valid JSONC (understood by VS Code, Neovim + json5 plugin,
-    etc.) so editors render the section lines as comments, not string values.
-    _load_jsonc() strips those lines before parsing on the way back in.
+    etc.) so editors render comment lines differently from string values.
+    _load_jsonc() strips all // comments before parsing on the way back in.
     """
-    # Each entry is either ("comment", text) or ("kv", key, value).
+    # Inline hint shown after the value for settings with discrete options.
+    _hints: Dict[str, str] = {
+        "quality":             "HI_RES_LOSSLESS | LOSSLESS | HIGH | LOW",
+        "autoplay":            "0=off  1=mix  2=recommended",
+        "playback_tab_layout": "lyrics | miniqueue | miniqueue_cover",
+        "download_structure":  "placeholders: {artist} {album} {year}",
+        "download_filename":   "placeholders: {track:02d} {artist} {title} {album} {year}",
+        "tsv_max_col_width":   "fallback max width when a column has no specific limit; 0=unlimited",
+        "tsv_max_artist_width":"0=unlimited",
+        "tsv_max_title_width": "0=unlimited",
+        "tsv_max_album_width": "0=unlimited",
+        "tsv_max_year_width":  "0=unlimited",
+        "tsv_max_duration_width": "0=unlimited",
+        "history_max":         "0=unlimited",
+        "cover_lyrics_color_pair": "0=default; any curses color-pair index",
+        "initial_tab":         "last active tab, restored on startup",
+    }
+
+    # Each entry: ("comment", text) | ("kv", key, value, hint_or_None)
     flat: List[Any] = []
 
     def _section(label: str) -> None:
         flat.append(("comment", label))
 
+    def _key(k: str, hint: str = "") -> None:
+        if k in s:
+            flat.append(("kv", k, s[k], hint or _hints.get(k, "")))
+
     def _keys(*keys: str) -> None:
         for k in keys:
-            if k in s:
-                flat.append(("kv", k, s[k]))
+            _key(k)
 
     _section("── RUNTIME STATE  (managed automatically, do not edit) " + "─" * 14)
     _keys("_resume_position", "_resume_queue_idx", "initial_tab", "initial_filter")
@@ -366,20 +409,26 @@ def save_settings(s: Dict[str, Any]) -> None:
     if extras:
         _section("── OTHER " + "─" * 60)
         for k, v in extras:
-            flat.append(("kv", k, v))
+            flat.append(("kv", k, v, ""))
 
     # Serialise to JSONC
     kv_items = [x for x in flat if x[0] == "kv"]
     last_key = kv_items[-1][1] if kv_items else None
 
+    # Align inline comments: find the longest "key": value line in each section
+    # then pad to that width + 2 spaces before the //.
     buf = ["{\n"]
     for item in flat:
         if item[0] == "comment":
             buf.append(f"\n  // {item[1]}\n")
         else:
-            _, k, v = item
+            _, k, v, hint = item
             comma = "" if k == last_key else ","
-            buf.append(f"  {json.dumps(k)}: {json.dumps(v, ensure_ascii=False)}{comma}\n")
+            val_str = f"  {json.dumps(k)}: {json.dumps(v, ensure_ascii=False)}{comma}"
+            if hint:
+                buf.append(f"{val_str}  // {hint}\n")
+            else:
+                buf.append(f"{val_str}\n")
     buf.append("}\n")
 
     tmp = SETTINGS_FILE + ".tmp"

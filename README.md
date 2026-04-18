@@ -134,11 +134,11 @@ Configuration file directory per platform:
 </tbody>
 </table>
 
-`settings.jsonc` can be edited to change UI options, colours, metadata field widths, autoplay buffer size, download destinations and naming conventions, TIDAL HiFi API URL, _etc._ The file uses [JSONC](https://github.com/microsoft/node-jsonc-parser) (JSON with `//` comments) so editors such as VS Code render the section headers as comments rather than string values. Existing `settings.json` files are migrated automatically on first run.
+`settings.jsonc` can be edited to change UI options, colours, metadata field widths, autoplay buffer size, download destinations and naming conventions, TIDAL HiFi API URL, _etc._ Check the file for options not documented in this README.
 
 Other state files stored in the same directory:
 
-- `queue.json` keeps your current play queue among program executions,
+- `queue.json` keeps your current play queue and persists among `tuifi` executions,
 - `liked.json` stores liked tracks,
 - `playlists.json` stores playlists,
 - `history.json` keeps the playback history.

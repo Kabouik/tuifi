@@ -4533,7 +4533,11 @@ class App:
         self.filter_hits = []
         self.filter_pos = -1
         if not q: return
-        typ, items = self._left_items()
+        # When the miniqueue overlay is visible on a non-queue tab, filter the queue.
+        if self.queue_overlay and self.tab != TAB_QUEUE:
+            items: List[Any] = self.queue_items
+        else:
+            _typ, items = self._left_items()
         for i, it in enumerate(items):
             if isinstance(it, Track):
                 dv = self._track_duration(it)
@@ -4555,14 +4559,17 @@ class App:
             self.filter_pos = 0
 
     def _set_filter_cursor(self, idx: int) -> None:
-        if self.tab == TAB_QUEUE:
-            self.queue_cursor = idx
+        if self.tab == TAB_QUEUE or (self.queue_overlay and self.tab != TAB_QUEUE):
+            self.queue_cursor = clamp(idx, 0, max(0, len(self.queue_items) - 1))
         else:
             self.left_idx = idx
 
     def filter_prompt(self) -> None:
         _remember = self.settings.get("remember_last_input", False)
-        q = self.prompt_text("Filter:", self.filter_q if _remember else "")
+        # Always prefill with the active filter so the user can refine it;
+        # remember_last_input only controls prefilling when no filter is active.
+        prefill = self.filter_q if (self.filter_q or _remember) else ""
+        q = self.prompt_text("Filter:", prefill)
         if q is None: return
         self.filter_q = q
         self._compute_filter_hits()
@@ -5216,8 +5223,6 @@ class App:
                 parts.append("tsv")
             if self.priority_queue:
                 parts.append(f"pq: {len(self.priority_queue)}")
-            if self.filter_q:
-                parts.append(f"filter: {self.filter_q}")
             if self._show_singles_eps:
                 parts.append("singles/EPs: on")
             # Show buffer size when autoplay is active

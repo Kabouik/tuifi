@@ -59,12 +59,12 @@ While [HiFi API instances with unrestricted access](https://github.com/monochrom
 
     Options:
       --api URL, -a URL        TIDAL HiFi API base URL (can also be set in settings.jsonc)
-      --verbose, -v            Write debug log to debug.log in the config directory
-      --version, -V            Show version
       --clear-covers           Delete cached cover art images and exit
       --keep SOURCES           With --clear-covers: keep covers for tracks in SOURCES
       --fetch-covers SOURCES   Pre-download covers for tracks in SOURCES and exit
                                SOURCES: comma-separated list of liked, history, queue, playlists
+      --verbose, -v            Write debug log to debug.log in the config directory
+      --version, -V            Show version
 
     Press ? in tuifi for keybindings
 

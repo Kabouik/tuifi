@@ -188,7 +188,6 @@ class App:
         self.artist_ctx: Optional[Tuple[int, str]] = None
         self.artist_albums: List[Album] = []
         self.artist_tracks: List[Track] = []
-        self.artist_popular_tracks: List[Track] = []
         self.album_header: Optional[Album] = None
         self.album_tracks: List[Track] = []
         self.playlist_names: List[str] = sorted(self.playlists.keys())
@@ -1199,11 +1198,8 @@ class App:
                 alb_label = f"Albums ({len(self.artist_albums)}" + ("…" if self._loading else "") + _sep_hint
                 items.append(("sep", alb_label))
                 items.extend(self.artist_albums)
-            if self.artist_popular_tracks:
-                items.append(("sep", f"Popular tracks ({len(self.artist_popular_tracks)})"))
-                items.extend(self.artist_popular_tracks)
             if self.artist_tracks:
-                trk_label = f"All tracks ({len(self.artist_tracks)}" + ("…)" if self._loading else ")")
+                trk_label = f"Tracks ({len(self.artist_tracks)}" + ("…)" if self._loading else ")")
                 items.append(("sep", trk_label))
                 items.extend(self.artist_tracks)
             return ("artist_mixed", items)
@@ -3788,7 +3784,7 @@ class App:
             self._last_artist_fetch_track = ctx
             return
         self._last_artist_fetch_track = ctx
-        self.artist_albums, self.artist_tracks, self.artist_popular_tracks = [], [], []
+        self.artist_albums, self.artist_tracks = [], []
         self.artist_ctx = None
         if self._album_cover_visible:
             self._erase_album_cover_terminal()
@@ -3810,10 +3806,9 @@ class App:
 
             # Cache hit after resolving aid
             if aid and int(aid) in self._artist_cache:
-                cached_albums, cached_tracks, cached_popular, cached_ctx = self._artist_cache[int(aid)]
+                cached_albums, cached_tracks, cached_ctx = self._artist_cache[int(aid)]
                 self.artist_albums = cached_albums
                 self.artist_tracks = cached_tracks
-                self.artist_popular_tracks = cached_popular
                 self.artist_ctx = cached_ctx
                 self._loading_key = ""
                 self._loading = False
@@ -3837,39 +3832,31 @@ class App:
                 albums = self._dedupe_albums(albums)
                 self.artist_ctx = (int(aid), ctx.artist)
 
+                # Parse all tracks from the flat tracks list in the artist payload.
+                # The API provides the complete catalogue there — no per-album calls needed.
+                tracks_list = payload.get('tracks', [])
+                if isinstance(tracks_list, dict):
+                    tracks_list = tracks_list.get('items', [])
+                if isinstance(tracks_list, list):
+                    for d in tracks_list:
+                        if isinstance(d, dict):
+                            t = self._parse_track_obj(d)
+                            if t:
+                                raw_tracks.append(t)
+
                 if not albums:
                     self._full_redraw()
                 else:
-                    # Phase 1: publish all albums in small batches and kick off cover
-                    # downloads. Populate artist_popular_tracks from the flat track list
-                    # already in the payload (free) and show them with the first batch.
+                    # Publish albums in small batches and kick off cover downloads.
+                    # Tracks are already populated so the first redraw shows everything.
+                    _commit_tracks()
                     BATCH = 8
-                    initial = self._dedupe_tracks(self._scan_parse_tracks(payload))
-                    initial.sort(key=_track_sort_key)
-                    self.artist_popular_tracks = initial
                     for batch_start in range(0, len(albums), BATCH):
                         if self._loading_key != key: return
                         batch = albums[batch_start:batch_start + BATCH]
                         self.artist_albums = albums[:batch_start + len(batch)]
                         self._full_redraw()
                         self._prefetch_album_covers_async(batch, int(aid))
-
-                    # Phase 3: fetch complete tracks per album now that all albums are shown.
-                    for alb in albums:
-                        if self._loading_key != key: return
-                        if alb.id:
-                            try:
-                                new_tracks = self._fetch_album_tracks_by_album_id(alb.id)
-                                raw_tracks.extend(new_tracks)
-                                _commit_tracks()
-                            except Exception:
-                                pass
-
-                # Fallback: scan artist payload only when the filter left no albums to fetch
-                # from. If albums existed but fetches failed, stay silent rather than
-                # pulling in tracks from releases the filter deliberately excluded.
-                if not raw_tracks and not albums:
-                    raw_tracks.extend(self._scan_parse_tracks(payload))
 
             if not raw_tracks and not albums:
                 payload2 = self.client.search_tracks(ctx.artist, limit=300)
@@ -3887,7 +3874,7 @@ class App:
                 self.artist_ctx = (int(aid), ctx.artist)
             _commit_tracks()
             if aid:
-                self._artist_cache[int(aid)] = (self.artist_albums, self.artist_tracks, self.artist_popular_tracks, self.artist_ctx)
+                self._artist_cache[int(aid)] = (self.artist_albums, self.artist_tracks, self.artist_ctx)
             self._artist_tab_has_content = True
             self.toast("Artist")
 

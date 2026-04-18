@@ -3446,6 +3446,12 @@ class App:
             return
         if self._album_cover_item_key == item_key and self._album_cover_path:
             return
+        dest = os.path.join(COVER_CACHE_DIR, f"ar{artist.id}.jpg")
+        # If we have neither a UUID nor a cached file, the picture isn't available
+        # yet (artist worker may still be fetching). Don't lock the item_key so the
+        # next redraw retries automatically once artist_picture is populated.
+        if not artist.picture and not os.path.exists(dest):
+            return
         self._album_cover_item_key = item_key
         self._album_cover_loading = True
 

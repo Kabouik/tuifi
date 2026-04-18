@@ -724,6 +724,16 @@ class App:
             "tab_align": self.tab_align,
             "include_singles_and_eps_in_artist_tab": self._show_singles_eps,
             "remember_last_input": bool(self.settings.get("remember_last_input", False)),
+            "tsv_max_col_width": int(self.settings.get("tsv_max_col_width", 32) or 32),
+            "autoplay_n": self.autoplay_n,
+            "history_max": int(self.settings.get("history_max", 0) or 0),
+            "auto_resume_playback": bool(self.settings.get("auto_resume_playback", False)),
+            "playback_tab_layout": str(self.settings.get("playback_tab_layout", "lyrics")),
+            "cover_lyrics_color_pair": int(self.settings.get("cover_lyrics_color_pair", 0) or 0),
+            "recommended_tab_no_confirm_refetch": bool(self.settings.get("recommended_tab_no_confirm_refetch", False)),
+            "mix_tab_no_confirm_refetch": bool(self.settings.get("mix_tab_no_confirm_refetch", False)),
+            "artist_tab_no_confirm_refetch": bool(self.settings.get("artist_tab_no_confirm_refetch", False)),
+            "album_tab_no_confirm_refetch": bool(self.settings.get("album_tab_no_confirm_refetch", False)),
         })
         try:
             save_settings(self.settings)

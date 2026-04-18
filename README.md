@@ -58,9 +58,13 @@ While [HiFi API instances with unrestricted access](https://github.com/monochrom
     Usage: ./tuifi [options]
 
     Options:
-      --api URL, -a URL   TIDAL HiFi API base URL (can also be set in settings.jsonc)
-      --verbose, -v       Write debug log to debug.log in the config directory
-      --version, -V       Show version
+      --api URL, -a URL        TIDAL HiFi API base URL (can also be set in settings.jsonc)
+      --verbose, -v            Write debug log to debug.log in the config directory
+      --version, -V            Show version
+      --clear-covers           Delete cached cover art images and exit
+      --keep SOURCES           With --clear-covers: keep covers for tracks in SOURCES
+      --fetch-covers SOURCES   Pre-download covers for tracks in SOURCES and exit
+                               SOURCES: comma-separated list of liked, history, queue, playlists
 
     Press ? in tuifi for keybindings
 
@@ -142,6 +146,8 @@ Other state files stored in the same directory:
 - `liked.json` stores liked tracks,
 - `playlists.json` stores playlists,
 - `history.json` keeps the playback history.
+
+Cover art images are cached separately in the platform cache directory (`~/.cache/tuifi/cover_cache` on Linux, `~/Library/Caches/tuifi/cover_cache` on macOS, `%LOCALAPPDATA%\tuifi\cover_cache` on Windows). Use `--clear-covers` to delete the cache, optionally preserving covers for specific sources with `--keep`. Use `--fetch-covers` to pre-download covers for tracks in your library.
 
 `liked.json` and `playlists.json` are fully compatible with Monochrome (e.g., <https://monochrome.tf>) and can be imported there.
 

@@ -6804,6 +6804,193 @@ class App:
 
 
 
+# ---------------------------------------------------------------------------
+# Cover cache maintenance (--clear-covers / --fetch-covers)
+# ---------------------------------------------------------------------------
+
+_CC_VALID_SOURCES = ("liked", "history", "queue", "playlists")
+
+
+def _cc_parse_sources(raw: str) -> List[str]:
+    sources = [s.strip().lower() for s in raw.split(",") if s.strip()]
+    bad = [s for s in sources if s not in _CC_VALID_SOURCES]
+    if bad:
+        print(f"ERROR: Unknown source(s): {', '.join(bad)}. Valid: {', '.join(_CC_VALID_SOURCES)}")
+        sys.exit(1)
+    return sources
+
+
+def _cc_load_json(path: str) -> Any:
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _cc_collect(sources: List[str]) -> Dict[int, Optional[str]]:
+    """Return {album_id: cover_uuid_or_None} for all albums referenced in the given sources."""
+    result: Dict[int, Optional[str]] = {}
+
+    def _add(aid: Any, cover: Any) -> None:
+        try:
+            aid = int(aid)
+        except Exception:
+            return
+        if aid > 0 and aid not in result:
+            result[aid] = (str(cover).strip() or None) if isinstance(cover, str) else None
+
+    for src in sources:
+        if src == "liked":
+            data = _cc_load_json(LIKED_FILE)
+            for d in data.get("favorites_tracks", []):
+                alb = d.get("album") or {}
+                if isinstance(alb, dict):
+                    _add(alb.get("id"), alb.get("cover"))
+            for d in data.get("favorites_albums", []):
+                _add(d.get("id"), d.get("cover"))
+        elif src == "history":
+            data = _cc_load_json(HISTORY_FILE)
+            for d in data.get("history_tracks", []):
+                alb = d.get("album") or {}
+                if isinstance(alb, dict):
+                    _add(alb.get("id"), alb.get("cover"))
+        elif src == "queue":
+            data = _cc_load_json(QUEUE_FILE)
+            for d in data.get("items", []):
+                _add(d.get("album_id"), d.get("cover"))
+        elif src == "playlists":
+            data = _cc_load_json(PLAYLISTS_FILE)
+            for pl in data.get("user_playlists", []):
+                for d in pl.get("tracks", []):
+                    alb = d.get("album") or {}
+                    if isinstance(alb, dict):
+                        _add(alb.get("id"), alb.get("cover"))
+
+    return result
+
+
+def cmd_clear_covers(keep_sources: List[str]) -> int:
+    if not os.path.isdir(COVER_CACHE_DIR):
+        print("Cover cache is empty.")
+        return 0
+
+    keep_ids: set = set()
+    if keep_sources:
+        keep_ids = set(_cc_collect(keep_sources).keys())
+        print(f"Keeping covers for {len(keep_ids)} album(s) from: {', '.join(keep_sources)}")
+
+    deleted = kept = 0
+    for fname in os.listdir(COVER_CACHE_DIR):
+        fpath = os.path.join(COVER_CACHE_DIR, fname)
+        if not os.path.isfile(fpath):
+            continue
+        if keep_ids and fname.startswith("a") and fname.endswith(".jpg"):
+            try:
+                if int(fname[1:-4]) in keep_ids:
+                    kept += 1
+                    continue
+            except ValueError:
+                pass
+        try:
+            os.remove(fpath)
+            deleted += 1
+        except Exception as e:
+            print(f"  Could not delete {fname}: {e}")
+
+    print(f"Deleted {deleted} cover file(s)" + (f", kept {kept}." if kept else "."))
+    return 0
+
+
+def cmd_fetch_covers(sources: List[str], api_url: str = "") -> int:
+    album_map = _cc_collect(sources)
+    if not album_map:
+        print("No tracks found in the specified sources.")
+        return 0
+
+    os.makedirs(COVER_CACHE_DIR, exist_ok=True)
+
+    def _uuid_to_url(uuid_str: str, size: int = 640) -> Optional[str]:
+        uuid_str = uuid_str.strip()
+        if uuid_str.startswith("http"):
+            return uuid_str
+        parts = uuid_str.split("-")
+        if len(parts) >= 4:
+            return f"https://resources.tidal.com/images/{'/'.join(parts)}/{size}x{size}.jpg"
+        return None
+
+    with_uuid = {aid: u for aid, u in album_map.items() if u}
+    need_api  = [aid for aid, u in album_map.items() if not u]
+
+    miss_uuid = {aid: u for aid, u in with_uuid.items()
+                 if not os.path.exists(os.path.join(COVER_CACHE_DIR, f"a{aid}.jpg"))}
+    miss_api  = [aid for aid in need_api
+                 if not os.path.exists(os.path.join(COVER_CACHE_DIR, f"a{aid}.jpg"))]
+    already   = len(album_map) - len(miss_uuid) - len(miss_api)
+
+    fetched = errors = 0
+    total = len(miss_uuid)
+    for i, (aid, u) in enumerate(miss_uuid.items(), 1):
+        url = _uuid_to_url(u)
+        if not url:
+            errors += 1
+            continue
+        try:
+            print(f"  [{i}/{total}] album {aid}...", end="\r", flush=True)
+            data = http_get_bytes(url, timeout=15.0)
+            with open(os.path.join(COVER_CACHE_DIR, f"a{aid}.jpg"), "wb") as f:
+                f.write(data)
+            fetched += 1
+        except Exception as e:
+            print(f"  album {aid}: {e}                ")
+            errors += 1
+
+    if total:
+        parts = [f"Fetched {fetched} cover(s)"]
+        if errors:
+            parts.append(f"{errors} error(s)")
+        if already:
+            parts.append(f"{already} already cached")
+        print(", ".join(parts) + ".    ")
+    elif already:
+        print(f"All {already} cover(s) already cached.")
+
+    if miss_api:
+        if not api_url:
+            print(f"{len(miss_api)} album(s) from queue have no cover UUID (old entries) — skipping.")
+            print("Set an API URL in settings.jsonc or use --api to fetch them.")
+        else:
+            client = HiFiClient(api_url)
+            api_fetched = api_errors = 0
+            for i, aid in enumerate(miss_api, 1):
+                dest = os.path.join(COVER_CACHE_DIR, f"a{aid}.jpg")
+                try:
+                    print(f"  [API {i}/{len(miss_api)}] album {aid}...", end="\r", flush=True)
+                    alb_data = client.album(aid)
+                    uuid_str = None
+                    for k in ("cover", "coverArt", "squareImage", "image"):
+                        v = alb_data.get(k)
+                        if isinstance(v, str) and v.strip():
+                            uuid_str = v.strip()
+                            break
+                    if uuid_str:
+                        url = _uuid_to_url(uuid_str)
+                        if url:
+                            data = http_get_bytes(url, timeout=15.0)
+                            with open(dest, "wb") as f:
+                                f.write(data)
+                            api_fetched += 1
+                            continue
+                    api_errors += 1
+                except Exception as e:
+                    print(f"  album {aid}: {e}                ")
+                    api_errors += 1
+            print(f"Fetched {api_fetched} cover(s) via API" +
+                  (f", {api_errors} error(s)" if api_errors else "") + ".    ")
+
+    return 0
+
+
 def parse_args(argv: List[str]) -> Dict[str, Any]:
     out: Dict[str, Any] = {"api": DEFAULT_API, "_api_explicit": False}
     i = 1
@@ -6820,16 +7007,29 @@ def parse_args(argv: List[str]) -> Dict[str, Any]:
             print_version(argv[0])
             sys.exit(0)
 
+        if a == "--clear-covers":
+            out["clear_covers"] = True; i += 1; continue
+
+        if a == "--keep" and i + 1 < len(argv):
+            out["keep"] = argv[i + 1]; i += 2; continue
+
+        if a == "--fetch-covers" and i + 1 < len(argv):
+            out["fetch_covers"] = argv[i + 1]; i += 2; continue
+
         if a in ("-h", "--help"):
             print(
                 f"Usage: {argv[0]} [options]\n"
                 "\n"
                 "Options:\n"
-                "  --api URL, -a URL   TIDAL HiFi API base URL (can also be set in settings.jsonc)\n"
-                "  --verbose, -v       Write debug log to debug.log in the config directory\n"
-                "  --version, -V       Show version\n"
+                "  --api URL, -a URL        TIDAL HiFi API base URL (can also be set in settings.jsonc)\n"
+                "  --verbose, -v            Write debug log to debug.log in the config directory\n"
+                "  --version, -V            Show version\n"
+                "  --clear-covers           Delete cached cover art images and exit\n"
+                "  --keep SOURCES           With --clear-covers: keep covers for tracks in SOURCES\n"
+                "  --fetch-covers SOURCES   Pre-download covers for tracks in SOURCES and exit\n"
+                "                           SOURCES: comma-separated list of liked, history, queue, playlists\n"
                 "\n"
-                f"Press ? in tuifi for keybinds more options\n"
+                f"Press ? in tuifi for keybindings\n"
             )
             sys.exit(0)
         i += 1
@@ -6896,6 +7096,21 @@ def main(argv: List[str]) -> int:
         stored = load_settings()
         if isinstance(stored, dict) and stored.get("api"):
             args["api"] = stored["api"]
+
+    if args.get("clear_covers") or args.get("fetch_covers"):
+        if args.get("keep") and not args.get("clear_covers"):
+            print("WARNING: --keep has no effect without --clear-covers.")
+        if args.get("clear_covers"):
+            keep_sources = _cc_parse_sources(args["keep"]) if args.get("keep") else []
+            ret = cmd_clear_covers(keep_sources)
+            if ret:
+                return ret
+        if args.get("fetch_covers"):
+            sources = _cc_parse_sources(args["fetch_covers"])
+            ret = cmd_fetch_covers(sources, args.get("api", "") or "")
+            if ret:
+                return ret
+        return 0
 
     if not os.path.isdir(STATE_DIR):
         print(f"tuifi config directory does not exist and will be created at:\n  {STATE_DIR}")

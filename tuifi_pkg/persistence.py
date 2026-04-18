@@ -173,9 +173,11 @@ def save_history(tracks: List[Any]) -> None:
 # ---------------------------------------------------------------------------
 
 def load_settings() -> Dict[str, Any]:
-    s = load_json(SETTINGS_FILE, {})
-    if not isinstance(s, dict):
-        s = {}
+    raw = load_json(SETTINGS_FILE, {})
+    if not isinstance(raw, dict):
+        raw = {}
+    # Strip section-marker keys (written by save_settings for human readability)
+    s = {k: v for k, v in raw.items() if not k.startswith("//")}
 
     # -------------------------------------------------------------------------
     # Runtime state — written automatically by the app on exit / during use.
@@ -220,6 +222,11 @@ def load_settings() -> Dict[str, Any]:
     # -- Artist tab --
     s.setdefault("include_singles_and_eps_in_artist_tab", False)  # toggle with #
 
+    # -- Miscellaneous user preferences --
+    s.setdefault("remember_last_input", False)     # prefill search/filter with last query within a session
+    s.setdefault("playback_tab_layout", "lyrics")  # right-pane layout: "lyrics", "cover", etc.
+    s.setdefault("cover_lyrics_color_pair", 0)     # 0 = auto
+
     # -- Confirmation prompts when switching to a tab that already has content --
     # Set to true to skip the "press again to confirm" step and fetch immediately.
     s.setdefault("recommended_tab_no_confirm_refetch", False)
@@ -260,4 +267,86 @@ def load_settings() -> Dict[str, Any]:
 
 
 def save_settings(s: Dict[str, Any]) -> None:
-    save_json(SETTINGS_FILE, s)
+    """Write settings.json with section markers for human readability.
+
+    Keys starting with "//" are section headers — they are stripped by
+    load_settings() and must never clash with real setting names.
+    """
+    from collections import OrderedDict
+
+    def _sec(label: str) -> str:
+        """Return a unique section-marker key."""
+        return f"// {label}"
+
+    out: "OrderedDict[str, Any]" = OrderedDict()
+
+    # ── Runtime state (managed automatically — do not edit) ──────────────────
+    out[_sec("── RUNTIME STATE  (managed automatically, do not edit) " + "─" * 14)] = ""
+    for k in ("_resume_position", "_resume_queue_idx", "initial_tab", "initial_filter"):
+        if k in s:
+            out[k] = s[k]
+
+    # ── In-app toggles (changed via UI keys; edit here to set defaults) ──────
+    out[_sec("── IN-APP TOGGLES  (changed via UI keys, edit to set defaults) " + "─" * 6)] = ""
+    for k in (
+        "volume", "mute", "quality",
+        "autoplay", "autoplay_n",
+        "color_mode", "queue_overlay",
+        "show_toggles", "show_track_album", "show_track_year",
+        "show_track_duration", "show_numbers", "tab_align",
+        "include_singles_and_eps_in_artist_tab",
+    ):
+        if k in s:
+            out[k] = s[k]
+
+    # ── User settings (edit freely in this file) ─────────────────────────────
+    out[_sec("── USER SETTINGS  (edit freely in this file) " + "─" * 24)] = ""
+    for k in (
+        "api",
+        "auto_resume_playback",
+        "remember_last_input",
+        "history_max",
+        "playback_tab_layout",
+        "cover_lyrics_color_pair",
+        "recommended_tab_no_confirm_refetch",
+        "mix_tab_no_confirm_refetch",
+        "artist_tab_no_confirm_refetch",
+        "album_tab_no_confirm_refetch",
+    ):
+        if k in s:
+            out[k] = s[k]
+
+    # ── Colors ────────────────────────────────────────────────────────────────
+    out[_sec("── COLORS  (color name or 0-255 terminal index) " + "─" * 20)] = ""
+    for k in (
+        "color_playing", "color_paused", "color_error", "color_chrome",
+        "color_accent", "color_artist", "color_album", "color_year",
+        "color_duration", "color_numbers", "color_title",
+        "color_separator", "color_liked", "color_mark",
+    ):
+        if k in s:
+            out[k] = s[k]
+
+    # ── Downloads ─────────────────────────────────────────────────────────────
+    out[_sec("── DOWNLOADS " + "─" * 56)] = ""
+    for k in ("download_dir", "download_structure", "download_filename"):
+        if k in s:
+            out[k] = s[k]
+
+    # ── Track-list column widths ──────────────────────────────────────────────
+    out[_sec("── TRACK-LIST COLUMN WIDTHS  (0 = unlimited) " + "─" * 23)] = ""
+    for k in (
+        "tsv_max_col_width", "tsv_max_artist_width", "tsv_max_title_width",
+        "tsv_max_album_width", "tsv_max_year_width", "tsv_max_duration_width",
+    ):
+        if k in s:
+            out[k] = s[k]
+
+    # Any keys not covered by the sections above (forward-compat / unknown)
+    known = set(out.keys())
+    extras = {k: v for k, v in s.items() if k not in known and not k.startswith("//")}
+    if extras:
+        out[_sec("── OTHER " + "─" * 60)] = ""
+        out.update(extras)
+
+    save_json(SETTINGS_FILE, out)

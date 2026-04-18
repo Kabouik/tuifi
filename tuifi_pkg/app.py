@@ -1253,7 +1253,7 @@ class App:
         return it if isinstance(it, Track) else None
 
     def _selected_left_album(self) -> Optional[Album]:
-        if self.tab not in (TAB_ARTIST,):
+        if self.tab not in (TAB_ARTIST, TAB_LIKED):
             return None
         it = self._selected_left_item()
         return it if isinstance(it, Album) else None
@@ -3408,7 +3408,9 @@ class App:
                     debug_log(f"_fetch_album_cover_async: cache hit album_id={album.id}")
                 else:
                     debug_log(f"_fetch_album_cover_async: cache miss album_id={album.id} — fetching URL")
-                    url = self._fetch_cover_url_for_album(album)
+                    url = self._tidal_cover_uuid_to_url(album.cover) if album.cover else None
+                    if not url:
+                        url = self._fetch_cover_url_for_album(album)
                     if not url:
                         debug_log(f"_fetch_album_cover_async: no cover URL found for album_id={album.id}")
                         time.sleep(2.0)

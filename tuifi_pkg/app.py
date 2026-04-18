@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import base64
 import curses
-import hashlib
 import json
 import locale
 import os
@@ -899,11 +898,17 @@ class App:
                     break
 
             album_id: Optional[int] = None
-            if isinstance(album_obj, dict) and str(album_obj.get("id", "")).isdigit():
-                album_id = int(album_obj["id"])
+            cover: Optional[str] = None
+            if isinstance(album_obj, dict):
+                if str(album_obj.get("id", "")).isdigit():
+                    album_id = int(album_obj["id"])
+                cv = album_obj.get("cover") or album_obj.get("coverArt")
+                if isinstance(cv, str) and cv:
+                    cover = cv.strip() or None
 
             return Track(id=tid, title=title, artist=artist, album=album, year=year,
-                         track_no=track_no, duration=duration, artist_id=artist_id, album_id=album_id)
+                         track_no=track_no, duration=duration, artist_id=artist_id,
+                         album_id=album_id, cover=cover)
         except Exception:
             return None
 
@@ -2800,17 +2805,10 @@ class App:
                 self._cover_backend_cache = "none"
         return self._cover_backend_cache
 
-    def _cover_cache_path(self, album_id: Optional[int], url: str = "") -> str:
-        """Return persistent cache path for a cover image.
-
-        Keyed by album_id when available (allows cache hits before any API
-        call).  Falls back to MD5(url) for tracks with no album_id.
-        """
+    def _cover_cache_path(self, album_id: int) -> str:
+        """Return persistent cache path for a cover image, keyed by album_id."""
         os.makedirs(COVER_CACHE_DIR, exist_ok=True)
-        if album_id:
-            return os.path.join(COVER_CACHE_DIR, f"a{album_id}.jpg")
-        h = hashlib.md5(url.encode()).hexdigest()
-        return os.path.join(COVER_CACHE_DIR, f"{h}.jpg")
+        return os.path.join(COVER_CACHE_DIR, f"a{album_id}.jpg")
 
     def fetch_cover_async(self, t: Optional[Track]) -> None:
         """Download cover art for track t. Called on playback start and when entering Playback tab."""
@@ -2831,7 +2829,9 @@ class App:
                     debug_log(f"fetch_cover_async: cache hit album_id={t.album_id} track={t.id}")
                 else:
                     debug_log(f"fetch_cover_async: cache miss album_id={t.album_id} track={t.id} — fetching URL")
-                    url = self._fetch_cover_url_for_track(t)
+                    url = self._tidal_cover_uuid_to_url(t.cover) if t.cover else None
+                    if not url:
+                        url = self._fetch_cover_url_for_track(t)
                     if not url:
                         debug_log(f"fetch_cover_async: no cover URL found for track={t.id}")
                         if self.cover_track and self.cover_track.id == t.id:
@@ -2839,7 +2839,6 @@ class App:
                             self._cover_render_key = ""
                             self._cover_render_buf = None
                         return
-                    dest = self._cover_cache_path(t.album_id, url)
                     data = http_get_bytes(url, timeout=15.0)
                     with open(dest, "wb") as f:
                         f.write(data)
@@ -3474,7 +3473,9 @@ class App:
         def worker() -> None:
             try:
                 debug_log(f"_fetch_track_cover_async: cache miss album_id={track.album_id} track={track.id} — fetching URL")
-                url = self._fetch_cover_url_for_track(track)
+                url = self._tidal_cover_uuid_to_url(track.cover) if track.cover else None
+                if not url:
+                    url = self._fetch_cover_url_for_track(track)
                 if not url:
                     debug_log(f"_fetch_track_cover_async: no cover URL found for track={track.id}")
                     time.sleep(2.0)
@@ -3484,7 +3485,7 @@ class App:
                         self._album_cover_render_key = ""
                         self._need_redraw = True
                     return
-                dest = self._cover_cache_path(track.album_id, url)
+                dest = self._cover_cache_path(track.album_id)
                 if not os.path.exists(dest):
                     data = http_get_bytes(url, timeout=15.0)
                     with open(dest, "wb") as f:

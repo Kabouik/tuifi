@@ -146,12 +146,14 @@ class Track:
     duration: Optional[int] = None
     artist_id: Optional[int] = None
     album_id: Optional[int] = None
+    cover: Optional[str] = None  # TIDAL cover UUID (e.g. "abc-def-…")
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "id": self.id, "title": self.title, "artist": self.artist,
             "album": self.album, "year": self.year, "track_no": self.track_no,
             "duration": self.duration, "artist_id": self.artist_id, "album_id": self.album_id,
+            "cover": self.cover,
         }
 
     @staticmethod
@@ -161,6 +163,7 @@ class Track:
                 return int(x) if x is not None else None
             except Exception:
                 return None
+        cover = d.get("cover")
         return Track(
             id=int(d.get("id", 0)),
             title=str(d.get("title", "") or ""),
@@ -171,6 +174,7 @@ class Track:
             duration=opt_int(d.get("duration")),
             artist_id=opt_int(d.get("artist_id")),
             album_id=opt_int(d.get("album_id")),
+            cover=str(cover) if isinstance(cover, str) and cover else None,
         )
 
 
@@ -206,7 +210,7 @@ def track_to_mono(t: "Track", added_at: Optional[int] = None) -> Dict[str, Any]:
         "explicit": False,
         "artist": {"id": t.artist_id, "name": t.artist, "handle": None, "type": "MAIN", "picture": None},
         "artists": [{"id": t.artist_id, "name": t.artist}],
-        "album": {"id": t.album_id, "title": t.album, "cover": None, "releaseDate": release_date,
+        "album": {"id": t.album_id, "title": t.album, "cover": t.cover, "releaseDate": release_date,
                   "vibrantColor": "#FFFFFF", "artist": None, "numberOfTracks": None, "mediaMetadata": None},
         "copyright": None, "isrc": None, "trackNumber": t.track_no,
         "streamStartDate": release_date, "version": None, "mixes": {},
@@ -228,6 +232,7 @@ def mono_to_track(d: Dict[str, Any]) -> Optional["Track"]:
         artist_id   = artist_d.get("id") if isinstance(artist_d, dict) else None
         album_title = str(album_d.get("title", "") or "") if isinstance(album_d, dict) else str(album_d)
         album_id    = album_d.get("id") if isinstance(album_d, dict) else None
+        cover_raw   = album_d.get("cover") if isinstance(album_d, dict) else None
         rd = (album_d.get("releaseDate") or "") if isinstance(album_d, dict) else ""
         year = rd[:4] if rd and len(rd) >= 4 else "????"
         def _int(x: Any) -> Optional[int]:
@@ -239,6 +244,7 @@ def mono_to_track(d: Dict[str, Any]) -> Optional["Track"]:
             track_no=int(d.get("trackNumber", 0) or 0),
             duration=_int(d.get("duration")),
             artist_id=_int(artist_id), album_id=_int(album_id),
+            cover=str(cover_raw) if isinstance(cover_raw, str) and cover_raw else None,
         )
     except Exception:
         return None

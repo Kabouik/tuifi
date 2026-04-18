@@ -3835,9 +3835,9 @@ class App:
                 if not albums:
                     self._full_redraw()
                 else:
-                    # Publish albums and fetch their tracks in batches of BATCH so the list
-                    # builds up progressively. Cover downloads start for each batch in
-                    # parallel (no per-album API call — UUID already in Album.cover).
+                    # Phase 1: publish all albums in small batches and kick off cover
+                    # downloads — no track fetching here so album display isn't gated
+                    # behind per-album API calls.
                     BATCH = 8
                     for batch_start in range(0, len(albums), BATCH):
                         if self._loading_key != key: return
@@ -3845,15 +3845,24 @@ class App:
                         self.artist_albums = albums[:batch_start + len(batch)]
                         self._full_redraw()
                         self._prefetch_album_covers_async(batch, int(aid))
-                        for alb in batch:
-                            if self._loading_key != key: return
-                            if alb.id:
-                                try:
-                                    new_tracks = self._fetch_album_tracks_by_album_id(alb.id)
-                                    raw_tracks.extend(new_tracks)
-                                    _commit_tracks()
-                                except Exception:
-                                    pass
+
+                    # Phase 2: show tracks already embedded in the artist payload (free,
+                    # no extra API call) so the track list isn't empty while we fetch.
+                    initial = self._scan_parse_tracks(payload)
+                    if initial:
+                        raw_tracks.extend(initial)
+                        _commit_tracks()
+
+                    # Phase 3: fetch complete tracks per album now that all albums are shown.
+                    for alb in albums:
+                        if self._loading_key != key: return
+                        if alb.id:
+                            try:
+                                new_tracks = self._fetch_album_tracks_by_album_id(alb.id)
+                                raw_tracks.extend(new_tracks)
+                                _commit_tracks()
+                            except Exception:
+                                pass
 
                 # Fallback: scan artist payload only when the filter left no albums to fetch
                 # from. If albums existed but fetches failed, stay silent rather than

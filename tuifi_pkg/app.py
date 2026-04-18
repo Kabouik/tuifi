@@ -3075,22 +3075,23 @@ class App:
 
         is_kitty = backend == "chafa-kitty"
 
-        # Kitty: always delete any existing image before rendering.  This covers
-        # both size changes (V key, lyrics panel, queue overlay) and re-renders
-        # after popups.  The delete is a single short escape and is harmless when
-        # no image is present.
-        if is_kitty:
-            sys.stdout.buffer.write(b"\033_Ga=d,d=A\033\\")
-            sys.stdout.buffer.flush()
-
         # chafa/chafa-kitty path: cache rendered bytes, re-run only on content/size change.
         # Sixel: always re-send because ncurses wipes the area on every refresh.
         is_symbols = backend == "chafa-symbols"
         if render_key == self._cover_render_key and self._cover_render_buf:
+            # Cache hit: same cover and same size — just overwrite in place.
+            # For Kitty, skip the delete so the old image stays visible until
+            # the new one lands, avoiding a one-frame flash of empty space.
             self._write_image_to_terminal(top_h, self._cover_render_buf, img_cols,
                                           img_rows, kitty=is_kitty, x_offset=img_x,
                                           symbols=is_symbols)
             return
+
+        # Layout or content changed: delete the old Kitty image before placing
+        # the new one so stale pixels don't bleed through.
+        if is_kitty:
+            sys.stdout.buffer.write(b"\033_Ga=d,d=A\033\\")
+            sys.stdout.buffer.flush()
 
         try:
             result = subprocess.run(

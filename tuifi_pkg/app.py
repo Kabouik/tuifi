@@ -5563,8 +5563,12 @@ class App:
             # On any other tab (or if cover_path is unset), erase any stale sixel first.
             if hide_cover or not (self.tab == TAB_PLAYBACK and self.cover_path):
                 self._cover_erase_terminal()
-            # Artist cover pane: always erase before full redraw; re-rendered after refresh.
-            if self._album_cover_visible:
+            # Artist cover pane: erase before redraw so the cells below are clean.
+            # Skip for Kitty — images live in a separate graphics layer that
+            # stdscr.erase()/refresh() don't touch, so the old image stays visible
+            # until the new one overwrites it. Erasing explicitly causes a one-frame
+            # flash of empty space before the replacement arrives.
+            if self._album_cover_visible and self._cover_backend() != "chafa-kitty":
                 self._erase_album_cover_terminal()
             # Full redraw: stdscr.erase()+refresh() will overwrite the sixel area with
             # spaces, so mark it as no longer visible.  This ensures _render_cover_image

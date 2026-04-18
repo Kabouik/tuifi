@@ -358,19 +358,6 @@ def save_settings(s: Dict[str, Any]) -> None:
         for k in keys:
             _key(k)
 
-    _section("── RUNTIME STATE  (managed automatically, do not edit) " + "─" * 14)
-    _keys("_resume_position", "_resume_queue_idx", "initial_tab", "initial_filter")
-
-    _section("── IN-APP TOGGLES  (changed via UI keys, edit to set defaults) " + "─" * 6)
-    _keys(
-        "volume", "mute", "quality",
-        "autoplay", "autoplay_n",
-        "color_mode", "queue_overlay",
-        "show_toggles", "show_track_album", "show_track_year",
-        "show_track_duration", "show_numbers", "tab_align",
-        "include_singles_and_eps_in_artist_tab",
-    )
-
     _section("── USER SETTINGS  (edit freely in this file) " + "─" * 24)
     _keys(
         "api",
@@ -401,6 +388,19 @@ def save_settings(s: Dict[str, Any]) -> None:
         "tsv_max_col_width", "tsv_max_artist_width", "tsv_max_title_width",
         "tsv_max_album_width", "tsv_max_year_width", "tsv_max_duration_width",
     )
+
+    _section("── IN-APP TOGGLES  (changed via UI keys, edit to set defaults) " + "─" * 6)
+    _keys(
+        "volume", "mute", "quality",
+        "autoplay", "autoplay_n",
+        "color_mode", "queue_overlay",
+        "show_toggles", "show_track_album", "show_track_year",
+        "show_track_duration", "show_numbers", "tab_align",
+        "include_singles_and_eps_in_artist_tab",
+    )
+
+    _section("── RUNTIME STATE  (managed automatically, do not edit) " + "─" * 14)
+    _keys("_resume_position", "_resume_queue_idx", "initial_tab", "initial_filter")
 
     # Forward-compat: any unknown keys from future versions or manual additions
     # (also drops legacy // string keys written by the previous format)

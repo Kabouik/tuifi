@@ -1035,7 +1035,7 @@ class App:
             if not cur.track_id and a.track_id:
                 cur.track_id = a.track_id
         out = list(best.values())
-        out.sort(key=lambda a: (int(a.year) if year_norm(a.year) != "????" else 9999, a.title.lower()))
+        out.sort(key=lambda a: (-(int(a.year) if year_norm(a.year) != "????" else 0), a.title.lower()))
         return out
 
     def _extract_artist_albums_from_payload(self, payload: Dict[str, Any]) -> List[Album]:
@@ -3317,9 +3317,6 @@ class App:
         """Width of the side cover preview pane (matches miniqueue column width)."""
         return min(44, max(20, w - 20))
 
-    def _album_cover_path(self, album_id: int) -> str:
-        """Return persistent cache path for an album cover."""
-        return self._cover_cache_path(album_id)
 
     def _fetch_cover_url_for_album(self, album: Album) -> Optional[str]:
         """Fetch cover URL for album via client.album()."""
@@ -3357,7 +3354,7 @@ class App:
                 if not self.artist_ctx or self.artist_ctx[0] != artist_id:
                     return  # artist changed
                 try:
-                    dest = self._album_cover_path(alb.id)
+                    dest = self._cover_cache_path(alb.id)
                     if os.path.exists(dest):
                         hits += 1
                         continue
@@ -3394,7 +3391,7 @@ class App:
 
         def worker() -> None:
             try:
-                dest = self._album_cover_path(album.id)
+                dest = self._cover_cache_path(album.id)
                 if os.path.exists(dest):
                     debug_log(f"_fetch_album_cover_async: cache hit album_id={album.id}")
                 else:
@@ -6634,6 +6631,7 @@ class App:
 
             if ch in (ord("J"), ord("K"),
                       getattr(curses, "KEY_SR", -998), getattr(curses, "KEY_SF", -997)):
+                if not self._queue_context(): continue
                 if not self.queue_items: continue
                 delta = +1 if ch in (ord("J"), getattr(curses, "KEY_SF", -997)) else -1
                 idxs = sorted([i for i in self.marked_queue_idx if 0 <= i < len(self.queue_items)])

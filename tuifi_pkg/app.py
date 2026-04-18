@@ -917,7 +917,10 @@ class App:
             a = obj.get("artist")
             if isinstance(a, dict):
                 artist = str(a.get("name") or artist).strip() or artist
-            return Album(id=aid, title=title, artist=artist, year=album_year_from_obj(obj))
+            cover = obj.get("cover") or obj.get("coverArt") or None
+            if isinstance(cover, str):
+                cover = cover.strip() or None
+            return Album(id=aid, title=title, artist=artist, year=album_year_from_obj(obj), cover=cover)
         except Exception:
             return None
 
@@ -3344,32 +3347,41 @@ class App:
         return None
 
     def _prefetch_album_covers_async(self, albums: List[Album], artist_id: int) -> None:
-        """Pre-download covers for all albums in a single background thread.
-        Aborts early if the artist changes. Does not update render state."""
-        def worker() -> None:
-            hits = misses = 0
-            for alb in albums:
-                if not alb.id or alb.id <= 0:
-                    continue
-                if not self.artist_ctx or self.artist_ctx[0] != artist_id:
-                    return  # artist changed
-                try:
-                    dest = self._cover_cache_path(alb.id)
-                    if os.path.exists(dest):
-                        hits += 1
-                        continue
+        """Pre-download covers for albums using a small thread pool.
+        Uses the cover UUID already stored on each Album object — no extra API call
+        per album. Falls back to client.album() only for albums without a UUID.
+        Sets _need_redraw after each download so the cover pane updates live."""
+        def fetch_one(alb: Album) -> None:
+            if not alb.id or alb.id <= 0:
+                return
+            if not self.artist_ctx or self.artist_ctx[0] != artist_id:
+                return
+            try:
+                dest = self._cover_cache_path(alb.id)
+                if os.path.exists(dest):
+                    debug_log(f"prefetch: cache hit album={alb.id}")
+                    return
+                url = self._tidal_cover_uuid_to_url(alb.cover) if alb.cover else None
+                if not url:
                     url = self._fetch_cover_url_for_album(alb)
-                    if not url:
-                        continue
-                    data = http_get_bytes(url, timeout=15.0)
-                    if not self.artist_ctx or self.artist_ctx[0] != artist_id:
-                        return
-                    with open(dest, "wb") as f:
-                        f.write(data)
-                    misses += 1
-                except Exception as e:
-                    debug_log(f"_prefetch_album_covers_async error alb={alb.id}: {e}")
-            debug_log(f"_prefetch_album_covers_async done: {hits} cache hits, {misses} fetched")
+                if not url:
+                    return
+                data = http_get_bytes(url, timeout=15.0)
+                if not self.artist_ctx or self.artist_ctx[0] != artist_id:
+                    return
+                with open(dest, "wb") as f:
+                    f.write(data)
+                debug_log(f"prefetch: fetched album={alb.id}")
+                self._need_redraw = True
+            except Exception as e:
+                debug_log(f"prefetch error alb={alb.id}: {e}")
+
+        def worker() -> None:
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+                list(pool.map(fetch_one, albums))
+            debug_log(f"prefetch done ({len(albums)} albums)")
+
         threading.Thread(target=worker, daemon=True).start()
 
     def _fetch_album_cover_async(self, album: Album) -> None:
@@ -3818,24 +3830,30 @@ class App:
                 if self._loading_key != key: return
                 albums = self._extract_artist_albums_from_payload(payload)
                 albums = self._dedupe_albums(albums)
-
-                # Publish albums immediately so the UI fills in before track fetching starts
                 self.artist_ctx = (int(aid), ctx.artist)
-                self.artist_albums = albums[:500]
-                self._full_redraw()
-                # Pre-download all album covers in the background so C toggle is instant.
-                self._prefetch_album_covers_async(albums[:500], int(aid))
 
-                # Fetch tracks album by album and update UI after each one
-                for alb in albums:
-                    if self._loading_key != key: return
-                    if alb.id:
-                        try:
-                            new_tracks = self._fetch_album_tracks_by_album_id(alb.id)
-                            raw_tracks.extend(new_tracks)
-                            _commit_tracks()
-                        except Exception:
-                            pass
+                if not albums:
+                    self._full_redraw()
+                else:
+                    # Publish albums and fetch their tracks in batches of BATCH so the list
+                    # builds up progressively. Cover downloads start for each batch in
+                    # parallel (no per-album API call — UUID already in Album.cover).
+                    BATCH = 8
+                    for batch_start in range(0, len(albums), BATCH):
+                        if self._loading_key != key: return
+                        batch = albums[batch_start:batch_start + BATCH]
+                        self.artist_albums = albums[:batch_start + len(batch)]
+                        self._full_redraw()
+                        self._prefetch_album_covers_async(batch, int(aid))
+                        for alb in batch:
+                            if self._loading_key != key: return
+                            if alb.id:
+                                try:
+                                    new_tracks = self._fetch_album_tracks_by_album_id(alb.id)
+                                    raw_tracks.extend(new_tracks)
+                                    _commit_tracks()
+                                except Exception:
+                                    pass
 
                 # Fallback: scan artist payload only when the filter left no albums to fetch
                 # from. If albums existed but fetches failed, stay silent rather than

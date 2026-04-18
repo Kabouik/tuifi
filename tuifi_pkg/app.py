@@ -255,7 +255,7 @@ class App:
         self._last_artist_fetch_track: Optional["Track"] = None
         self._artist_cache: Dict[int, Tuple[List[Any], List[Any], Tuple[int, str]]] = {}
 
-        self._skip_delta: int = 0; self._skip_at: float = 0.0; self._skip_origin: int = 0
+        self._skip_delta: int = 0; self._skip_at: float = 0.0
         self.filter_q = ""; self.filter_hits: List[int] = []; self.filter_pos = -1  # not persisted
         self._lyrics_filter_q = ""; self._lyrics_filter_hits: List[int] = []; self._lyrics_filter_pos = -1
 
@@ -5860,8 +5860,6 @@ class App:
             self.toast(on if v else off)
 
         def _skip(d: int) -> None:
-            if self._skip_delta == 0:
-                self._skip_origin = self.queue_play_idx
             self._skip_delta += d
             self._skip_at = time.time()
 
@@ -5926,7 +5924,7 @@ class App:
             self._do_info_fetch_if_due()
 
 
-            if self.current_track and not self.mp.alive() and self._skip_delta == 0 and not self._play_lock.locked():
+            if self.current_track and not self.mp.alive():
                 tp, du, pa, vo, mu = self.mp.snapshot()
                 if tp is None and du is None:
                     self.current_track = None
@@ -5942,7 +5940,7 @@ class App:
             if self._skip_delta != 0 and now - self._skip_at >= 0.15:
                 n_q = len(self.queue_items)
                 if n_q > 0:
-                    target = self._skip_origin + self._skip_delta
+                    target = self.queue_play_idx + self._skip_delta
                     if self.repeat_mode == 1:
                         target = target % n_q
                     else:

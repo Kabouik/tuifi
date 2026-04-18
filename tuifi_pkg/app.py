@@ -3847,8 +3847,10 @@ class App:
                 a0 = ctx.artist.strip().lower()
                 raw_tracks = [t for t in self._extract_tracks_from_search(payload2) if t.artist.strip().lower() == a0]
 
-            if not albums:
-                albums = self._build_synthetic_albums(raw_tracks)
+            # Always supplement API albums with those inferred from track
+            # metadata — handles artists where the API returns an incomplete
+            # album list (e.g. only one entry despite many albums in tracks).
+            albums = self._dedupe_albums(albums + self._build_synthetic_albums(raw_tracks))
 
             # Final commit with fully deduped/sorted results
             albums = self._dedupe_albums(albums)

@@ -44,6 +44,19 @@ def _resolve_config_dir() -> str:
     )
 
 
+def _resolve_cache_dir() -> str:
+    system = platform.system()
+    if system == "Windows":
+        base = os.environ.get("LOCALAPPDATA") or os.path.join(os.path.expanduser("~"), "AppData", "Local")
+        return os.path.join(base, "tuifi")
+    if system == "Darwin":
+        return os.path.join(os.path.expanduser("~"), "Library", "Caches", "tuifi")
+    return os.path.join(
+        os.environ.get("XDG_CACHE_HOME", os.path.join(os.path.expanduser("~"), ".cache")),
+        "tuifi",
+    )
+
+
 def _default_downloads_dir() -> str:
     if platform.system() == "Windows" or os.path.exists("/data/data/com.termux"):
         return os.path.join(os.path.expanduser("~"), "Downloads", "tuifi")
@@ -51,6 +64,7 @@ def _default_downloads_dir() -> str:
 
 
 STATE_DIR      = _resolve_config_dir()
+COVER_CACHE_DIR = os.path.join(_resolve_cache_dir(), "cover_cache")
 QUEUE_FILE     = os.path.join(STATE_DIR, "queue.json")
 LIKED_FILE     = os.path.join(STATE_DIR, "liked.json")
 PLAYLISTS_FILE = os.path.join(STATE_DIR, "playlists.json")

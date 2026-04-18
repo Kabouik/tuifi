@@ -37,7 +37,7 @@ from tuifi_pkg.models import (
     Track, Album, Artist,
     debug_log, _DEBUG_LOG,
     _resolve_config_dir, _default_downloads_dir,
-    STATE_DIR, QUEUE_FILE, LIKED_FILE, PLAYLISTS_FILE, HISTORY_FILE, SETTINGS_FILE, DOWNLOADS_DIR,
+    STATE_DIR, QUEUE_FILE, LIKED_FILE, PLAYLISTS_FILE, HISTORY_FILE, SETTINGS_FILE, DOWNLOADS_DIR, COVER_CACHE_DIR,
     mkdirp, clamp, safe_filename, year_norm, album_year_from_obj,
     fmt_time, fmt_dur,
     track_to_mono, mono_to_track,
@@ -243,8 +243,6 @@ class App:
         self._album_cover_visible_x: int = 0
         self._album_cover_visible_rows: int = 0
         self._album_cover_visible_cols: int = 0
-        self._album_cover_tmpdir: Optional[str] = None
-        self._cover_url_cache: Dict[int, str] = {}   # track_id → cover URL (in-memory, avoids re-fetching)
         self._album_cover_rows_offset: int = 0       # rows reserved for minicover above miniqueue (used by mouse handler)
 
         self._q_overlay_scroll: int = 0
@@ -2799,11 +2797,17 @@ class App:
                 self._cover_backend_cache = "none"
         return self._cover_backend_cache
 
-    def _cover_cache_path(self, url: str) -> str:
+    def _cover_cache_path(self, album_id: Optional[int], url: str = "") -> str:
+        """Return persistent cache path for a cover image.
+
+        Keyed by album_id when available (allows cache hits before any API
+        call).  Falls back to MD5(url) for tracks with no album_id.
+        """
+        os.makedirs(COVER_CACHE_DIR, exist_ok=True)
+        if album_id:
+            return os.path.join(COVER_CACHE_DIR, f"a{album_id}.jpg")
         h = hashlib.md5(url.encode()).hexdigest()
-        cache_dir = os.path.join(STATE_DIR, "cover_cache")
-        os.makedirs(cache_dir, exist_ok=True)
-        return os.path.join(cache_dir, f"{h}.jpg")
+        return os.path.join(COVER_CACHE_DIR, f"{h}.jpg")
 
     def fetch_cover_async(self, t: Optional[Track]) -> None:
         """Download cover art for track t. Called on playback start and when entering Playback tab."""
@@ -2819,16 +2823,20 @@ class App:
 
         def worker() -> None:
             try:
-                url = self._fetch_cover_url_for_track(t)
-                if not url:
-                    # No cover found: clear only if this track is still the target.
-                    if self.cover_track and self.cover_track.id == t.id:
-                        self.cover_path = None
-                        self._cover_render_key = ""
-                        self._cover_render_buf = None
-                    return
-                dest = self._cover_cache_path(url)
-                if not os.path.exists(dest):
+                dest = self._cover_cache_path(t.album_id)
+                if os.path.exists(dest):
+                    debug_log(f"fetch_cover_async: cache hit album_id={t.album_id} track={t.id}")
+                else:
+                    debug_log(f"fetch_cover_async: cache miss album_id={t.album_id} track={t.id} — fetching URL")
+                    url = self._fetch_cover_url_for_track(t)
+                    if not url:
+                        debug_log(f"fetch_cover_async: no cover URL found for track={t.id}")
+                        if self.cover_track and self.cover_track.id == t.id:
+                            self.cover_path = None
+                            self._cover_render_key = ""
+                            self._cover_render_buf = None
+                        return
+                    dest = self._cover_cache_path(t.album_id, url)
                     data = http_get_bytes(url, timeout=15.0)
                     with open(dest, "wb") as f:
                         f.write(data)
@@ -3309,13 +3317,9 @@ class App:
         """Width of the side cover preview pane (matches miniqueue column width)."""
         return min(44, max(20, w - 20))
 
-    def _album_cover_tmp_path(self, album_id: int) -> str:
-        """Return cache path for artist cover; create tmpdir on first call."""
-        if not self._album_cover_tmpdir:
-            _covers_cache = os.path.join(os.environ.get("TMPDIR") or tempfile.gettempdir(), APP_NAME, "clutter", "covers_cache")
-            os.makedirs(_covers_cache, exist_ok=True)
-            self._album_cover_tmpdir = tempfile.mkdtemp(prefix="album_", dir=_covers_cache)
-        return os.path.join(self._album_cover_tmpdir, f"{album_id}.jpg")
+    def _album_cover_path(self, album_id: int) -> str:
+        """Return persistent cache path for an album cover."""
+        return self._cover_cache_path(album_id)
 
     def _fetch_cover_url_for_album(self, album: Album) -> Optional[str]:
         """Fetch cover URL for album via client.album()."""
@@ -3346,14 +3350,16 @@ class App:
         """Pre-download covers for all albums in a single background thread.
         Aborts early if the artist changes. Does not update render state."""
         def worker() -> None:
+            hits = misses = 0
             for alb in albums:
                 if not alb.id or alb.id <= 0:
                     continue
                 if not self.artist_ctx or self.artist_ctx[0] != artist_id:
                     return  # artist changed
                 try:
-                    dest = self._album_cover_tmp_path(alb.id)
+                    dest = self._album_cover_path(alb.id)
                     if os.path.exists(dest):
+                        hits += 1
                         continue
                     url = self._fetch_cover_url_for_album(alb)
                     if not url:
@@ -3363,8 +3369,10 @@ class App:
                         return
                     with open(dest, "wb") as f:
                         f.write(data)
+                    misses += 1
                 except Exception as e:
                     debug_log(f"_prefetch_album_covers_async error alb={alb.id}: {e}")
+            debug_log(f"_prefetch_album_covers_async done: {hits} cache hits, {misses} fetched")
         threading.Thread(target=worker, daemon=True).start()
 
     def _fetch_album_cover_async(self, album: Album) -> None:
@@ -3386,11 +3394,14 @@ class App:
 
         def worker() -> None:
             try:
-                dest = self._album_cover_tmp_path(album.id)
-                if not os.path.exists(dest):
+                dest = self._album_cover_path(album.id)
+                if os.path.exists(dest):
+                    debug_log(f"_fetch_album_cover_async: cache hit album_id={album.id}")
+                else:
+                    debug_log(f"_fetch_album_cover_async: cache miss album_id={album.id} — fetching URL")
                     url = self._fetch_cover_url_for_album(album)
                     if not url:
-                        # No cover found; blank the pane after a short delay.
+                        debug_log(f"_fetch_album_cover_async: no cover URL found for album_id={album.id}")
                         time.sleep(2.0)
                         if self._album_cover_item_key == item_key:
                             self._album_cover_path = None
@@ -3416,9 +3427,8 @@ class App:
 
     def _fetch_track_cover_async(self, track: Track) -> None:
         """Download and pre-render cover for a track in a background thread.
-        Uses the persistent cover cache (same as the playback tab).
-        Fast path: if the URL was already fetched (cached in _cover_url_cache) and the
-        file is on disk, skips the API call and goes straight to prerender.
+        Checks the persistent cover cache by album_id first; only makes an
+        API call when the file is not already on disk.
         The previous cover stays visible until the new one is ready (no flicker)."""
         if not track.id or track.id <= 0:
             return
@@ -3432,30 +3442,31 @@ class App:
         self._album_cover_item_key = item_key
         self._album_cover_loading = True
 
-        # Fast path: URL known + file on disk → only prerender needed, no API call.
-        cached_url = self._cover_url_cache.get(track.id)
-        if cached_url:
-            dest = self._cover_cache_path(cached_url)
-            if os.path.exists(dest):
-                def fast_worker(_dest=dest) -> None:
-                    try:
-                        if self._album_cover_item_key != item_key:
-                            return
-                        self._prerender_album_cover(_dest)
-                        self._album_cover_path = _dest
-                        self._need_redraw = True
-                    except Exception as e:
-                        debug_log(f"_fetch_track_cover_async fast error: {e}")
-                    finally:
-                        if self._album_cover_item_key == item_key:
-                            self._album_cover_loading = False
-                threading.Thread(target=fast_worker, daemon=True).start()
-                return
+        # Fast path: file already on disk (keyed by album_id) → skip API call entirely.
+        dest = self._cover_cache_path(track.album_id)
+        if os.path.exists(dest):
+            debug_log(f"_fetch_track_cover_async: cache hit album_id={track.album_id} track={track.id}")
+            def fast_worker(_dest=dest) -> None:
+                try:
+                    if self._album_cover_item_key != item_key:
+                        return
+                    self._prerender_album_cover(_dest)
+                    self._album_cover_path = _dest
+                    self._need_redraw = True
+                except Exception as e:
+                    debug_log(f"_fetch_track_cover_async fast error: {e}")
+                finally:
+                    if self._album_cover_item_key == item_key:
+                        self._album_cover_loading = False
+            threading.Thread(target=fast_worker, daemon=True).start()
+            return
 
         def worker() -> None:
             try:
-                url = self._cover_url_cache.get(track.id) or self._fetch_cover_url_for_track(track)
+                debug_log(f"_fetch_track_cover_async: cache miss album_id={track.album_id} track={track.id} — fetching URL")
+                url = self._fetch_cover_url_for_track(track)
                 if not url:
+                    debug_log(f"_fetch_track_cover_async: no cover URL found for track={track.id}")
                     time.sleep(2.0)
                     if self._album_cover_item_key == item_key:
                         self._album_cover_path = None
@@ -3463,8 +3474,7 @@ class App:
                         self._album_cover_render_key = ""
                         self._need_redraw = True
                     return
-                self._cover_url_cache[track.id] = url
-                dest = self._cover_cache_path(url)
+                dest = self._cover_cache_path(track.album_id, url)
                 if not os.path.exists(dest):
                     data = http_get_bytes(url, timeout=15.0)
                     with open(dest, "wb") as f:
@@ -3636,19 +3646,13 @@ class App:
         self._album_cover_visible = False
 
     def _album_cover_clear(self) -> None:
-        """Full artist cover cleanup: erase from terminal, reset state, clean tmpdir."""
+        """Full artist cover cleanup: erase from terminal and reset state."""
         self._erase_album_cover_terminal()
         self._album_cover_item_key = ""
         self._album_cover_path = None
         self._album_cover_loading = False
         self._album_cover_render_buf = None
         self._album_cover_render_key = ""
-        if self._album_cover_tmpdir and os.path.isdir(self._album_cover_tmpdir):
-            try:
-                shutil.rmtree(self._album_cover_tmpdir, ignore_errors=True)
-            except Exception:
-                pass
-        self._album_cover_tmpdir = None
         self.stdscr.clearok(True)
 
     def start_download_tracks(self, tracks: List[Track]) -> None:
@@ -5698,13 +5702,6 @@ class App:
                 self._mix_pending_ctx = None          # type: ignore[attr-defined]
             if self.tab == TAB_ARTIST:
                 self._artist_pending_ctx = None       # type: ignore[attr-defined]
-                # Clean up artist album cover tmpdir; track covers use persistent cache.
-                if self._album_cover_tmpdir and os.path.isdir(self._album_cover_tmpdir):
-                    try:
-                        shutil.rmtree(self._album_cover_tmpdir, ignore_errors=True)
-                    except Exception:
-                        pass
-                self._album_cover_tmpdir = None
             # Reset current displayed cover when switching tabs (new context needs fresh cover).
             if self._album_cover_visible:
                 self._erase_album_cover_terminal()

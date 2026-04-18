@@ -1807,7 +1807,7 @@ class App:
             self.toast("Album unliked")
         else:
             self.liked_album_ids.add(album.id)
-            self.liked_albums.insert(0, {"id": album.id, "title": album.title, "artist": album.artist, "year": album.year})
+            self.liked_albums.insert(0, {"id": album.id, "title": album.title, "artist": album.artist, "year": album.year, "cover": album.cover})
             self.toast("Album liked")
         self._commit_liked()
 

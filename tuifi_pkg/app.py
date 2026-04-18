@@ -6999,14 +6999,16 @@ def cmd_fetch_covers(sources: List[str], api_url: str = "") -> int:
             print("Set an API URL in settings.jsonc or use --api to fetch them via the HiFi API.")
         else:
             total_api = len(miss_api)
-            print(f"Fetching {total_api} cover(s) via API (sequential to avoid rate limits)...")
+            print(f"Fetching {total_api} cover(s) via API...")
             client = HiFiClient(api_url)
             api_fetched = api_errors = 0
-            for i, aid in enumerate(miss_api, 1):
+
+            def _fetch_via_api(aid: int) -> None:
+                nonlocal api_fetched, api_errors
                 dest = os.path.join(COVER_CACHE_DIR, f"a{aid}.jpg")
-                print(f"  [{i}/{total_api}] album {aid}...", end="\r", flush=True)
                 try:
                     alb_data = client.album(aid)
+                    alb_data = alb_data.get("data") if isinstance(alb_data.get("data"), dict) else alb_data
                     uuid_str = None
                     for k in ("cover", "coverArt", "squareImage", "image"):
                         v = alb_data.get(k)
@@ -7019,16 +7021,23 @@ def cmd_fetch_covers(sources: List[str], api_url: str = "") -> int:
                             data = http_get_bytes(url, timeout=15.0)
                             with open(dest, "wb") as f:
                                 f.write(data)
-                            api_fetched += 1
-                            print(f"  [{i}/{total_api}] album {aid} ok    ", end="\r", flush=True)
-                            time.sleep(0.3)
-                            continue
-                    api_errors += 1
-                    print(f"  [{i}/{total_api}] album {aid}: no cover found")
+                            with lock:
+                                api_fetched += 1
+                                done = api_fetched + api_errors
+                            print(f"  [{done}/{total_api}] album {aid} ok    ", end="\r", flush=True)
+                            return
+                    with lock:
+                        api_errors += 1
+                        done = api_fetched + api_errors
+                    print(f"  [{done}/{total_api}] album {aid}: no cover found")
                 except Exception as e:
-                    api_errors += 1
-                    print(f"  [{i}/{total_api}] album {aid}: {e}")
-                time.sleep(0.3)
+                    with lock:
+                        api_errors += 1
+                        done = api_fetched + api_errors
+                    print(f"  [{done}/{total_api}] album {aid}: {e}")
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+                list(pool.map(_fetch_via_api, miss_api))
             parts = [f"Fetched {api_fetched}/{total_api} cover(s) via API"]
             if api_errors:
                 parts.append(f"{api_errors} error(s)")

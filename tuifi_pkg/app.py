@@ -5356,7 +5356,7 @@ class App:
             " Refill candidates are picked haphazardly based on suggestions (mix or recommended)",
             " pooled from recent play history + upcoming queue tracks",
             "",
-            "\x01 SETTINGS (edit settings.json manually)",
+            "\x01 SETTINGS (edit settings.jsonc manually)",
             " TIDAL HiFi API instance:",
             f" api: API base URL (current: {self.settings.get('api', '') or 'not set'})",
             " if not set, the first invocation of tuifi with the --api runtime flag will set it",
@@ -6805,7 +6805,7 @@ def parse_args(argv: List[str]) -> Dict[str, Any]:
                 f"Usage: {argv[0]} [options]\n"
                 "\n"
                 "Options:\n"
-                "  --api URL, -a URL   TIDAL HiFi API base URL (can also be set in settings.json)\n"
+                "  --api URL, -a URL   TIDAL HiFi API base URL (can also be set in settings.jsonc)\n"
                 "  --verbose, -v       Write debug log to debug.log in the config directory\n"
                 "  --version, -V       Show version\n"
                 "\n"
@@ -6873,7 +6873,7 @@ def main(argv: List[str]) -> int:
     args = parse_args(argv)
 
     if not args.get("_api_explicit"):
-        stored = load_json(SETTINGS_FILE, {})
+        stored = load_settings()
         if isinstance(stored, dict) and stored.get("api"):
             args["api"] = stored["api"]
 
@@ -6893,15 +6893,15 @@ def main(argv: List[str]) -> int:
 
     _api_val = args.get("api", "") or ""
     if args.get("_api_explicit") and _api_val:
-        _s = load_json(SETTINGS_FILE, {})
-        if isinstance(_s, dict) and _s.get("api") != _api_val:
+        _s = load_settings()
+        if _s.get("api") != _api_val:
             _s["api"] = _api_val
-            save_json(SETTINGS_FILE, _s)
+            save_settings(_s)
             print(f"API saved to settings: {_api_val}")
     if not _api_val:
         print("ERROR: No TIDAL HiFi API URL configured. Check the README for guidelines.")
         print("  Set one at runtime (and it will be saved in settings) with: tuifi --api https://api.example-hifi-instance.com")
-        print("  or in settings.json directly: { \"api\": \"https://api.example-hifi-instance.com\" }")
+        print("  or in settings.jsonc directly: { \"api\": \"https://api.example-hifi-instance.com\" }")
         sys.exit(1)
 
     def wrapped(stdscr: "curses._CursesWindow") -> None:

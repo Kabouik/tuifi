@@ -4482,7 +4482,8 @@ class App:
     # ---------------------------------------------------------------------------
     def do_search_prompt_anywhere(self) -> None:
         self.playlist_view_name = None
-        q = self.prompt_text("Search:", self.search_q)
+        _remember = self.settings.get("remember_last_input", False)
+        q = self.prompt_text("Search:", self.search_q if _remember else "")
         if q is None: return
         self.search_q = q
         self.last_error = None
@@ -4537,7 +4538,8 @@ class App:
             self.left_idx = idx
 
     def filter_prompt(self) -> None:
-        q = self.prompt_text("Filter:", "")
+        _remember = self.settings.get("remember_last_input", False)
+        q = self.prompt_text("Filter:", self.filter_q if _remember else "")
         if q is None: return
         self.filter_q = q
         self._compute_filter_hits()
@@ -4566,7 +4568,8 @@ class App:
             self._lyrics_filter_pos = 0
 
     def lyrics_filter_prompt(self) -> None:
-        q = self.prompt_text("Lyrics filter:", "")
+        _remember = self.settings.get("remember_last_input", False)
+        q = self.prompt_text("Lyrics filter:", self._lyrics_filter_q if _remember else "")
         if q is None: return
         self._lyrics_filter_q = q
         self._compute_lyrics_filter_hits()

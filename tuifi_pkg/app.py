@@ -3835,23 +3835,19 @@ class App:
                 if not albums:
                     self._full_redraw()
                 else:
-                    # Phase 1: publish all albums in small batches and kick off cover
-                    # downloads — no track fetching here so album display isn't gated
-                    # behind per-album API calls.
+                    # Phase 1: publish all albums in small batches, kick off cover
+                    # downloads, and show the flat tracks from the artist payload
+                    # alongside the first batch — all free from the one API call.
                     BATCH = 8
+                    initial = self._scan_parse_tracks(payload)
                     for batch_start in range(0, len(albums), BATCH):
                         if self._loading_key != key: return
                         batch = albums[batch_start:batch_start + BATCH]
                         self.artist_albums = albums[:batch_start + len(batch)]
+                        if batch_start == 0 and initial:
+                            raw_tracks.extend(initial)
                         self._full_redraw()
                         self._prefetch_album_covers_async(batch, int(aid))
-
-                    # Phase 2: show tracks already embedded in the artist payload (free,
-                    # no extra API call) so the track list isn't empty while we fetch.
-                    initial = self._scan_parse_tracks(payload)
-                    if initial:
-                        raw_tracks.extend(initial)
-                        _commit_tracks()
 
                     # Phase 3: fetch complete tracks per album now that all albums are shown.
                     for alb in albums:

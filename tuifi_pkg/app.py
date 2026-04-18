@@ -4566,10 +4566,7 @@ class App:
 
     def filter_prompt(self) -> None:
         _remember = self.settings.get("remember_last_input", False)
-        # Always prefill with the active filter so the user can refine it;
-        # remember_last_input only controls prefilling when no filter is active.
-        prefill = self.filter_q if (self.filter_q or _remember) else ""
-        q = self.prompt_text("Filter:", prefill)
+        q = self.prompt_text("Filter:", self.filter_q if _remember else "")
         if q is None: return
         self.filter_q = q
         self._compute_filter_hits()

@@ -6905,12 +6905,8 @@ def cmd_clear_covers(keep_sources: List[str]) -> int:
 
 
 def cmd_fetch_covers(sources: List[str], api_url: str = "") -> int:
-    album_map = _cc_collect(sources)
-    if not album_map:
-        print("No tracks found in the specified sources.")
-        return 0
-
-    os.makedirs(COVER_CACHE_DIR, exist_ok=True)
+    import concurrent.futures
+    import threading
 
     def _uuid_to_url(uuid_str: str, size: int = 640) -> Optional[str]:
         uuid_str = uuid_str.strip()
@@ -6921,71 +6917,94 @@ def cmd_fetch_covers(sources: List[str], api_url: str = "") -> int:
             return f"https://resources.tidal.com/images/{'/'.join(parts)}/{size}x{size}.jpg"
         return None
 
-    import concurrent.futures
-    import threading
+    def _cached(aid: int) -> bool:
+        return os.path.exists(os.path.join(COVER_CACHE_DIR, f"a{aid}.jpg"))
+
+    # Collect per-source so we can report counts clearly
+    per_source: Dict[str, Dict[int, Optional[str]]] = {}
+    for src in sources:
+        per_source[src] = _cc_collect([src])
+
+    # Merge, preserving UUID when any source has it
+    album_map: Dict[int, Optional[str]] = {}
+    for m in per_source.values():
+        for aid, uuid in m.items():
+            if aid not in album_map or (uuid and not album_map[aid]):
+                album_map[aid] = uuid
+
+    if not album_map:
+        print("No albums found in the specified sources.")
+        return 0
+
+    os.makedirs(COVER_CACHE_DIR, exist_ok=True)
+
+    # Per-source summary
+    for src in sources:
+        m = per_source[src]
+        cached = sum(1 for aid in m if _cached(aid))
+        print(f"  {src}: {len(m)} album(s), {cached} already cached")
 
     with_uuid = {aid: u for aid, u in album_map.items() if u}
     need_api  = [aid for aid, u in album_map.items() if not u]
 
-    miss_uuid = {aid: u for aid, u in with_uuid.items()
-                 if not os.path.exists(os.path.join(COVER_CACHE_DIR, f"a{aid}.jpg"))}
-    miss_api  = [aid for aid in need_api
-                 if not os.path.exists(os.path.join(COVER_CACHE_DIR, f"a{aid}.jpg"))]
+    miss_uuid = {aid: u for aid, u in with_uuid.items() if not _cached(aid)}
+    miss_api  = [aid for aid in need_api if not _cached(aid)]
     already   = len(album_map) - len(miss_uuid) - len(miss_api)
+
+    if not miss_uuid and not miss_api:
+        print(f"All {already} cover(s) already cached.")
+        return 0
 
     fetched = errors = 0
     lock = threading.Lock()
-    total = len(miss_uuid)
-
-    def _fetch_one(item: tuple) -> bool:
-        nonlocal fetched, errors
-        aid, u = item
-        url = _uuid_to_url(u)
-        if not url:
-            with lock:
-                errors += 1
-            return False
-        try:
-            data = http_get_bytes(url, timeout=15.0)
-            with open(os.path.join(COVER_CACHE_DIR, f"a{aid}.jpg"), "wb") as f:
-                f.write(data)
-            with lock:
-                fetched += 1
-                done = fetched + errors
-            print(f"  [{done}/{total}] album {aid} ok    ", end="\r", flush=True)
-            return True
-        except Exception as e:
-            with lock:
-                errors += 1
-                done = fetched + errors
-            print(f"  [{done}/{total}] album {aid}: {e}    ")
-            return False
+    total_cdn = len(miss_uuid)
 
     if miss_uuid:
+        print(f"Fetching {total_cdn} cover(s) from CDN...")
+
+        def _fetch_one(item: tuple) -> None:
+            nonlocal fetched, errors
+            aid, u = item
+            url = _uuid_to_url(u)
+            if not url:
+                with lock:
+                    errors += 1
+                    print(f"  bad UUID for album {aid}")
+                return
+            try:
+                data = http_get_bytes(url, timeout=15.0)
+                with open(os.path.join(COVER_CACHE_DIR, f"a{aid}.jpg"), "wb") as f:
+                    f.write(data)
+                with lock:
+                    fetched += 1
+                    done = fetched + errors
+                print(f"  [{done}/{total_cdn}] album {aid} ok    ", end="\r", flush=True)
+            except Exception as e:
+                with lock:
+                    errors += 1
+                    done = fetched + errors
+                print(f"  [{done}/{total_cdn}] album {aid}: {e}")
+
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
             list(pool.map(_fetch_one, miss_uuid.items()))
 
-    if total:
-        parts = [f"Fetched {fetched} cover(s)"]
+        parts = [f"Fetched {fetched}/{total_cdn} cover(s) from CDN"]
         if errors:
             parts.append(f"{errors} error(s)")
-        if already:
-            parts.append(f"{already} already cached")
-        print(", ".join(parts) + ".    ")
-    elif already:
-        print(f"All {already} cover(s) already cached.")
+        print(", ".join(parts) + ".")
 
     if miss_api:
         if not api_url:
-            print(f"{len(miss_api)} album(s) have no cover UUID (old entries) — skipping.")
-            print("Set an API URL in settings.jsonc or use --api to fetch them.")
+            print(f"{len(miss_api)} album(s) have no stored cover UUID (queue entries saved before v1.8.0) — skipping.")
+            print("Set an API URL in settings.jsonc or use --api to fetch them via the HiFi API.")
         else:
+            total_api = len(miss_api)
+            print(f"Fetching {total_api} cover(s) via API (sequential to avoid rate limits)...")
             client = HiFiClient(api_url)
             api_fetched = api_errors = 0
-
-            def _fetch_via_api(aid: int) -> bool:
-                nonlocal api_fetched, api_errors
+            for i, aid in enumerate(miss_api, 1):
                 dest = os.path.join(COVER_CACHE_DIR, f"a{aid}.jpg")
+                print(f"  [{i}/{total_api}] album {aid}...", end="\r", flush=True)
                 try:
                     alb_data = client.album(aid)
                     uuid_str = None
@@ -7000,23 +7019,20 @@ def cmd_fetch_covers(sources: List[str], api_url: str = "") -> int:
                             data = http_get_bytes(url, timeout=15.0)
                             with open(dest, "wb") as f:
                                 f.write(data)
-                            with lock:
-                                api_fetched += 1
-                                done = api_fetched + api_errors
-                            print(f"  [API {done}/{len(miss_api)}] album {aid} ok    ", end="\r", flush=True)
-                            return True
-                    with lock:
-                        api_errors += 1
+                            api_fetched += 1
+                            print(f"  [{i}/{total_api}] album {aid} ok    ", end="\r", flush=True)
+                            time.sleep(0.3)
+                            continue
+                    api_errors += 1
+                    print(f"  [{i}/{total_api}] album {aid}: no cover found")
                 except Exception as e:
-                    with lock:
-                        api_errors += 1
-                    print(f"  album {aid}: {e}                ")
-                return False
-
-            with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
-                list(pool.map(_fetch_via_api, miss_api))
-            print(f"Fetched {api_fetched} cover(s) via API" +
-                  (f", {api_errors} error(s)" if api_errors else "") + ".    ")
+                    api_errors += 1
+                    print(f"  [{i}/{total_api}] album {aid}: {e}")
+                time.sleep(0.3)
+            parts = [f"Fetched {api_fetched}/{total_api} cover(s) via API"]
+            if api_errors:
+                parts.append(f"{api_errors} error(s)")
+            print(", ".join(parts) + ".")
 
     return 0
 

@@ -3837,11 +3837,13 @@ class App:
                         except Exception:
                             pass
 
-                # Fallback: scan artist payload for track dicts if album fetches yielded nothing
-                if not raw_tracks:
+                # Fallback: scan artist payload only when the filter left no albums to fetch
+                # from. If albums existed but fetches failed, stay silent rather than
+                # pulling in tracks from releases the filter deliberately excluded.
+                if not raw_tracks and not albums:
                     raw_tracks.extend(self._scan_parse_tracks(payload))
 
-            if not raw_tracks:
+            if not raw_tracks and not albums:
                 payload2 = self.client.search_tracks(ctx.artist, limit=300)
                 if self._loading_key != key: return
                 a0 = ctx.artist.strip().lower()

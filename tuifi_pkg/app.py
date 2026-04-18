@@ -6919,6 +6919,9 @@ def cmd_fetch_covers(sources: List[str], api_url: str = "") -> int:
             return f"https://resources.tidal.com/images/{'/'.join(parts)}/{size}x{size}.jpg"
         return None
 
+    import concurrent.futures
+    import threading
+
     with_uuid = {aid: u for aid, u in album_map.items() if u}
     need_api  = [aid for aid, u in album_map.items() if not u]
 
@@ -6929,21 +6932,36 @@ def cmd_fetch_covers(sources: List[str], api_url: str = "") -> int:
     already   = len(album_map) - len(miss_uuid) - len(miss_api)
 
     fetched = errors = 0
+    lock = threading.Lock()
     total = len(miss_uuid)
-    for i, (aid, u) in enumerate(miss_uuid.items(), 1):
+
+    def _fetch_one(item: tuple) -> bool:
+        nonlocal fetched, errors
+        aid, u = item
         url = _uuid_to_url(u)
         if not url:
-            errors += 1
-            continue
+            with lock:
+                errors += 1
+            return False
         try:
-            print(f"  [{i}/{total}] album {aid}...", end="\r", flush=True)
             data = http_get_bytes(url, timeout=15.0)
             with open(os.path.join(COVER_CACHE_DIR, f"a{aid}.jpg"), "wb") as f:
                 f.write(data)
-            fetched += 1
+            with lock:
+                fetched += 1
+                done = fetched + errors
+            print(f"  [{done}/{total}] album {aid} ok    ", end="\r", flush=True)
+            return True
         except Exception as e:
-            print(f"  album {aid}: {e}                ")
-            errors += 1
+            with lock:
+                errors += 1
+                done = fetched + errors
+            print(f"  [{done}/{total}] album {aid}: {e}    ")
+            return False
+
+    if miss_uuid:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            list(pool.map(_fetch_one, miss_uuid.items()))
 
     if total:
         parts = [f"Fetched {fetched} cover(s)"]
@@ -6957,15 +6975,16 @@ def cmd_fetch_covers(sources: List[str], api_url: str = "") -> int:
 
     if miss_api:
         if not api_url:
-            print(f"{len(miss_api)} album(s) from queue have no cover UUID (old entries) — skipping.")
+            print(f"{len(miss_api)} album(s) have no cover UUID (old entries) — skipping.")
             print("Set an API URL in settings.jsonc or use --api to fetch them.")
         else:
             client = HiFiClient(api_url)
             api_fetched = api_errors = 0
-            for i, aid in enumerate(miss_api, 1):
+
+            def _fetch_via_api(aid: int) -> bool:
+                nonlocal api_fetched, api_errors
                 dest = os.path.join(COVER_CACHE_DIR, f"a{aid}.jpg")
                 try:
-                    print(f"  [API {i}/{len(miss_api)}] album {aid}...", end="\r", flush=True)
                     alb_data = client.album(aid)
                     uuid_str = None
                     for k in ("cover", "coverArt", "squareImage", "image"):
@@ -6979,12 +6998,21 @@ def cmd_fetch_covers(sources: List[str], api_url: str = "") -> int:
                             data = http_get_bytes(url, timeout=15.0)
                             with open(dest, "wb") as f:
                                 f.write(data)
-                            api_fetched += 1
-                            continue
-                    api_errors += 1
+                            with lock:
+                                api_fetched += 1
+                                done = api_fetched + api_errors
+                            print(f"  [API {done}/{len(miss_api)}] album {aid} ok    ", end="\r", flush=True)
+                            return True
+                    with lock:
+                        api_errors += 1
                 except Exception as e:
+                    with lock:
+                        api_errors += 1
                     print(f"  album {aid}: {e}                ")
-                    api_errors += 1
+                return False
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+                list(pool.map(_fetch_via_api, miss_api))
             print(f"Fetched {api_fetched} cover(s) via API" +
                   (f", {api_errors} error(s)" if api_errors else "") + ".    ")
 

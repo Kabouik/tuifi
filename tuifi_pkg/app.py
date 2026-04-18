@@ -1200,10 +1200,10 @@ class App:
                 items.append(("sep", alb_label))
                 items.extend(self.artist_albums)
             if self.artist_popular_tracks:
-                items.append(("sep", "Popular tracks"))
+                items.append(("sep", f"Popular tracks ({len(self.artist_popular_tracks)})"))
                 items.extend(self.artist_popular_tracks)
             if self.artist_tracks:
-                trk_label = f"Tracks ({len(self.artist_tracks)}" + ("…)" if self._loading else ")")
+                trk_label = f"All tracks ({len(self.artist_tracks)}" + ("…)" if self._loading else ")")
                 items.append(("sep", trk_label))
                 items.extend(self.artist_tracks)
             return ("artist_mixed", items)

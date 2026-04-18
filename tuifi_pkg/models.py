@@ -47,7 +47,7 @@ def _resolve_config_dir() -> str:
 def _default_downloads_dir() -> str:
     if platform.system() == "Windows" or os.path.exists("/data/data/com.termux"):
         return os.path.join(os.path.expanduser("~"), "Downloads", "tuifi")
-    return "/tmp/tuifi"
+    return "/tmp/tuifi/downloads"
 
 
 STATE_DIR      = _resolve_config_dir()

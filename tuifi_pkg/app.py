@@ -1490,7 +1490,9 @@ class App:
                 debug_log(f"  DASH: extracted direct URL from MPD: {direct_url[:120]}")
                 return direct_url
 
-            mpd_path = os.path.join(os.environ.get("TMPDIR") or tempfile.gettempdir(), f"{APP_NAME}-{track_id}-{int(time.time()*1000)}.mpd")
+            _clutter = os.path.join(os.environ.get("TMPDIR") or tempfile.gettempdir(), APP_NAME, "clutter")
+            os.makedirs(_clutter, exist_ok=True)
+            mpd_path = os.path.join(_clutter, f"{track_id}-{int(time.time()*1000)}.mpd")
             with open(mpd_path, "w", encoding="utf-8") as f:
                 f.write(raw_text)
             debug_log(f"  DASH .mpd path: {mpd_path}")
@@ -3297,7 +3299,9 @@ class App:
     def _album_cover_tmp_path(self, album_id: int) -> str:
         """Return cache path for artist cover; create tmpdir on first call."""
         if not self._album_cover_tmpdir:
-            self._album_cover_tmpdir = tempfile.mkdtemp(prefix="tuifi_artist_")
+            _covers_cache = os.path.join(os.environ.get("TMPDIR") or tempfile.gettempdir(), APP_NAME, "clutter", "covers_cache")
+            os.makedirs(_covers_cache, exist_ok=True)
+            self._album_cover_tmpdir = tempfile.mkdtemp(prefix="album_", dir=_covers_cache)
         return os.path.join(self._album_cover_tmpdir, f"{album_id}.jpg")
 
     def _fetch_cover_url_for_album(self, album: Album) -> Optional[str]:

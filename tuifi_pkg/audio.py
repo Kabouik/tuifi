@@ -32,7 +32,12 @@ class MPV:
     def start(self, url: str, resume: bool = False, start_pos: float = 0.0) -> None:
         self.stop()
         _tmp = os.environ.get("TMPDIR", "/tmp")
-        self.sock_path = f"{_tmp}/{APP_NAME}-mpv-{os.getpid()}-{int(time.time()*1000)}.sock"
+        _clutter = os.path.join(_tmp, APP_NAME, "clutter")
+        try:
+            os.makedirs(_clutter, exist_ok=True)
+        except Exception:
+            _clutter = _tmp
+        self.sock_path = os.path.join(_clutter, f"mpv-{os.getpid()}-{int(time.time()*1000)}.sock")
         try:
             if os.path.exists(self.sock_path):
                 os.unlink(self.sock_path)
@@ -59,7 +64,7 @@ class MPV:
 
         from tuifi_pkg.models import _DEBUG_LOG
         if _DEBUG_LOG:
-            self._mpv_stderr_path = f"{_tmp}/{APP_NAME}-mpv-err-{os.getpid()}.log"
+            self._mpv_stderr_path = os.path.join(_clutter, f"mpv-err-{os.getpid()}.log")
             try:
                 self._mpv_stderr_fh = open(self._mpv_stderr_path, "w")
                 stderr_target: Any = self._mpv_stderr_fh

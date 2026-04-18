@@ -173,19 +173,10 @@ def save_history(tracks: List[Any]) -> None:
 # ---------------------------------------------------------------------------
 
 def _load_jsonc(path: str, default: Any) -> Any:
-    """Load a JSONC file (JSON with // line comments).
-
-    Falls back to the equivalent .json path for migration so existing
-    settings.json files are picked up automatically on first run.
-    """
+    """Load a JSONC file (JSON with // line comments)."""
     import re as _re
-    target = path
-    if not os.path.exists(target) and path.endswith(".jsonc"):
-        fallback = path[:-1]  # drop the trailing 'c'
-        if os.path.exists(fallback):
-            target = fallback
     try:
-        with open(target, "r", encoding="utf-8") as f:
+        with open(path, "r", encoding="utf-8") as f:
             raw = f.read()
         # Strip full-line // comments (safe because we never embed // at the
         # start of a line inside a string value in our own serialiser output)
@@ -195,7 +186,26 @@ def _load_jsonc(path: str, default: Any) -> Any:
         return default
 
 
+def _migrate_settings_json() -> None:
+    """One-shot migration: if settings.json exists but settings.jsonc does not,
+    read the old file, write the new one (via save_settings), then delete it."""
+    if os.path.exists(SETTINGS_FILE):
+        return  # already on the new format
+    old_path = SETTINGS_FILE[:-1]  # strip trailing 'c' → settings.json
+    if not os.path.exists(old_path):
+        return
+    try:
+        raw = load_json(old_path, {})
+        if not isinstance(raw, dict):
+            raw = {}
+        save_settings(raw)          # writes settings.jsonc with section headers
+        os.remove(old_path)
+    except Exception:
+        pass                        # leave old file in place if anything fails
+
+
 def load_settings() -> Dict[str, Any]:
+    _migrate_settings_json()
     s = _load_jsonc(SETTINGS_FILE, {})
     if not isinstance(s, dict):
         s = {}

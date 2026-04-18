@@ -5924,7 +5924,7 @@ class App:
             self._do_info_fetch_if_due()
 
 
-            if self.current_track and not self.mp.alive():
+            if self.current_track and not self.mp.alive() and self._skip_delta == 0:
                 tp, du, pa, vo, mu = self.mp.snapshot()
                 if tp is None and du is None:
                     self.current_track = None
@@ -6061,8 +6061,12 @@ class App:
                             _, _items = self._left_items()
                             _clicked = self.left_scroll + (my - top_h)
                             if 0 <= _clicked < len(_items):
-                                self.left_idx = _clicked
-                                self.focus = "left"
+                                if self.tab == TAB_QUEUE:
+                                    self.queue_cursor = clamp(_clicked, 0, len(self.queue_items) - 1)
+                                    self.focus = "queue"
+                                else:
+                                    self.left_idx = _clicked
+                                    self.focus = "left"
                                 self.draw()
                                 self.context_actions_popup()
                             else:

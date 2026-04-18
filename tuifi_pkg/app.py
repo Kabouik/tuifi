@@ -265,6 +265,7 @@ class App:
         self._last_mpd_path: Optional[str] = None
         self._play_serial: int = 0          # bumped on every play_track call; stale threads bail
         self._play_lock = threading.Lock()  # serializes mp.start() so only one runs at a time
+        self._current_track_serial: int = 0 # serial of the play_track call that set current_track
 
         self._init_curses()
 
@@ -1571,6 +1572,7 @@ class App:
                     self.toast(f"Quality fallback: {quality}", sec=3.0)
                 self._last_mpd_path = mpd_path
                 self.current_track = t
+                self._current_track_serial = _my_serial
                 self._last_played_track = t
                 self._last_played_duration = None  # will be updated by _on_mpv_tick
                 self.last_error = None
@@ -5924,7 +5926,7 @@ class App:
             self._do_info_fetch_if_due()
 
 
-            if self.current_track and not self.mp.alive():
+            if self.current_track and not self.mp.alive() and self._play_serial == self._current_track_serial:
                 tp, du, pa, vo, mu = self.mp.snapshot()
                 if tp is None and du is None:
                     self.current_track = None

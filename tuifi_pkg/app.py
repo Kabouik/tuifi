@@ -185,6 +185,7 @@ class App:
         self.liked_playlist_cache: List[str] = []
         self.liked_filter: int = 0
         self.artist_ctx: Optional[Tuple[int, str]] = None
+        self.artist_picture: Optional[str] = None   # cover UUID for current artist
         self.artist_albums: List[Album] = []
         self.artist_tracks: List[Track] = []
         self.album_header: Optional[Album] = None
@@ -1811,14 +1812,14 @@ class App:
             self.toast("Album liked")
         self._commit_liked()
 
-    def toggle_like_artist(self, artist_id: int, name: str) -> None:
+    def toggle_like_artist(self, artist_id: int, name: str, picture: Optional[str] = None) -> None:
         if artist_id in self.liked_artist_ids:
             self.liked_artist_ids.discard(artist_id)
             self.liked_artists = [d for d in self.liked_artists if d.get("id") != artist_id]
             self.toast("Artist unliked")
         else:
             self.liked_artist_ids.add(artist_id)
-            self.liked_artists.insert(0, {"id": artist_id, "name": name})
+            self.liked_artists.insert(0, {"id": artist_id, "name": name, "picture": picture})
             self.toast("Artist liked")
         self._commit_liked()
 
@@ -1843,7 +1844,7 @@ class App:
             if cancelled: return
             for items, fn, label in [
                 (marked_albums,    self.toggle_like_album,                             "albums"),
-                (marked_artists,   lambda ar: self.toggle_like_artist(ar.id, ar.name), "artists"),
+                (marked_artists,   lambda ar: self.toggle_like_artist(ar.id, ar.name, ar.picture), "artists"),
                 (marked_playlists, self.toggle_like_playlist,                          "playlists"),
             ]:
                 if items:
@@ -1851,12 +1852,12 @@ class App:
                     self.toast(f"Liked/unliked {len(items)} {label}"); self._full_redraw(); return
             it = self._selected_left_item()
             if isinstance(it, tuple) and it[0] == "artist_header":
-                if self.artist_ctx: self.toggle_like_artist(*self.artist_ctx)
+                if self.artist_ctx: self.toggle_like_artist(self.artist_ctx[0], self.artist_ctx[1], self.artist_picture)
                 return
             if isinstance(it, tuple) and len(it) == 2 and it[0] == "album_title" and isinstance(it[1], Album):
                 self.toggle_like_album(it[1]); return
             if isinstance(it, Album): self.toggle_like_album(it); return
-            if isinstance(it, Artist): self.toggle_like_artist(it.id, it.name); return
+            if isinstance(it, Artist): self.toggle_like_artist(it.id, it.name, it.picture); return
             if isinstance(it, str) and (
                 (self.tab == TAB_PLAYLISTS and self.playlist_view_name is None) or self.tab == TAB_LIKED
             ):
@@ -3436,6 +3437,60 @@ class App:
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _fetch_artist_picture_async(self, artist: "Artist") -> None:
+        """Download and display the artist picture in the cover pane."""
+        if not artist.id or artist.id <= 0:
+            return
+        item_key = f"ar:{artist.id}"
+        if self._album_cover_loading and self._album_cover_item_key == item_key:
+            return
+        if self._album_cover_item_key == item_key and self._album_cover_path:
+            return
+        self._album_cover_item_key = item_key
+        self._album_cover_loading = True
+
+        def worker() -> None:
+            try:
+                dest = os.path.join(COVER_CACHE_DIR, f"ar{artist.id}.jpg")
+                if not os.path.exists(dest):
+                    url = self._tidal_cover_uuid_to_url(artist.picture, size=750) if artist.picture else None
+                    if not url:
+                        debug_log(f"_fetch_artist_picture_async: no picture UUID for artist={artist.id}")
+                        if self._album_cover_item_key == item_key:
+                            self._album_cover_path = None
+                            self._album_cover_render_buf = None
+                            self._album_cover_render_key = ""
+                            self._need_redraw = True
+                        return
+                    os.makedirs(COVER_CACHE_DIR, exist_ok=True)
+                    data = http_get_bytes(url, timeout=15.0)
+                    with open(dest, "wb") as f:
+                        f.write(data)
+                if self._album_cover_item_key != item_key:
+                    return
+                self._prerender_album_cover(dest)
+                self._album_cover_path = dest
+                self._need_redraw = True
+            except Exception as e:
+                debug_log(f"_fetch_artist_picture_async error: {e}")
+            finally:
+                if self._album_cover_item_key == item_key:
+                    self._album_cover_loading = False
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _selected_left_artist(self) -> Optional["Artist"]:
+        """Return Artist when cursor is on an artist header or a liked Artist row."""
+        if self.tab == TAB_ARTIST:
+            it = self._selected_left_item()
+            if isinstance(it, tuple) and it[0] == "artist_header" and self.artist_ctx:
+                return Artist(id=self.artist_ctx[0], name=self.artist_ctx[1], picture=self.artist_picture)
+        elif self.tab == TAB_LIKED:
+            it = self._selected_left_item()
+            if isinstance(it, Artist):
+                return it
+        return None
+
     def _fetch_track_cover_async(self, track: Track) -> None:
         """Download and pre-render cover for a track in a background thread.
         Checks the persistent cover cache by album_id first; only makes an
@@ -3770,11 +3825,11 @@ class App:
     def fetch_liked_async(self) -> None:
         self.liked_cache = [t for t in (mono_to_track(d) for d in self.liked_tracks) if t is not None]
         self.liked_album_cache = [
-            Album(id=d["id"], title=d.get("title", ""), artist=d.get("artist", ""), year=d.get("year", ""))
+            Album(id=d["id"], title=d.get("title", ""), artist=d.get("artist", ""), year=d.get("year", ""), cover=d.get("cover"))
             for d in self.liked_albums
         ]
         self.liked_artist_cache = [
-            Artist(id=d["id"], name=d.get("name", ""))
+            Artist(id=d["id"], name=d.get("name", ""), picture=d.get("picture"))
             for d in self.liked_artists
         ]
         self.liked_playlist_cache = [d["name"] for d in self.liked_playlists]
@@ -3790,6 +3845,7 @@ class App:
         self._last_artist_fetch_track = ctx
         self.artist_albums, self.artist_tracks = [], []
         self.artist_ctx = None
+        self.artist_picture = None
         if self._album_cover_visible:
             self._erase_album_cover_terminal()
         self._album_cover_item_key = ""
@@ -3810,10 +3866,9 @@ class App:
 
             # Cache hit after resolving aid
             if aid and int(aid) in self._artist_cache:
-                cached_albums, cached_tracks, cached_ctx = self._artist_cache[int(aid)]
-                self.artist_albums = cached_albums
-                self.artist_tracks = cached_tracks
-                self.artist_ctx = cached_ctx
+                cached = self._artist_cache[int(aid)]
+                self.artist_albums, self.artist_tracks, self.artist_ctx = cached[0], cached[1], cached[2]
+                self.artist_picture = cached[3] if len(cached) > 3 else None
                 self._loading_key = ""
                 self._loading = False
                 self._artist_tab_has_content = True
@@ -3835,6 +3890,16 @@ class App:
                 albums = self._extract_artist_albums_from_payload(payload)
                 albums = self._dedupe_albums(albums)
                 self.artist_ctx = (int(aid), ctx.artist)
+                # Extract artist picture UUID from the first album's artist field
+                _pic = None
+                for _alb in payload.get('albums', {}).get('items', []):
+                    _ad = _alb.get('artist') or {}
+                    if isinstance(_ad, dict):
+                        _p = _ad.get('picture')
+                        if isinstance(_p, str) and _p:
+                            _pic = _p
+                            break
+                self.artist_picture = _pic
 
                 # Parse all tracks from the flat tracks list in the artist payload.
                 # The API provides the complete catalogue there — no per-album calls needed.
@@ -3878,7 +3943,7 @@ class App:
                 self.artist_ctx = (int(aid), ctx.artist)
             _commit_tracks()
             if aid:
-                self._artist_cache[int(aid)] = (self.artist_albums, self.artist_tracks, self.artist_ctx)
+                self._artist_cache[int(aid)] = (self.artist_albums, self.artist_tracks, self.artist_ctx, self.artist_picture)
             self._artist_tab_has_content = True
             self.toast("Artist")
 
@@ -5605,17 +5670,23 @@ class App:
                     if _sel_item_key != self._album_cover_item_key:
                         self._fetch_track_cover_async(qt)
             else:
-                sel_alb = self._selected_left_album()
-                if sel_alb and sel_alb.id:
-                    _sel_item_key = f"a:{sel_alb.id}"
+                sel_art = self._selected_left_artist()
+                if sel_art and sel_art.id:
+                    _sel_item_key = f"ar:{sel_art.id}"
                     if _sel_item_key != self._album_cover_item_key:
-                        self._fetch_album_cover_async(sel_alb)
+                        self._fetch_artist_picture_async(sel_art)
                 else:
-                    sel_trk = self._selected_left_track()
-                    if sel_trk:
-                        _sel_item_key = f"t:{sel_trk.id}"
+                    sel_alb = self._selected_left_album()
+                    if sel_alb and sel_alb.id:
+                        _sel_item_key = f"a:{sel_alb.id}"
                         if _sel_item_key != self._album_cover_item_key:
-                            self._fetch_track_cover_async(sel_trk)
+                            self._fetch_album_cover_async(sel_alb)
+                    else:
+                        sel_trk = self._selected_left_track()
+                        if sel_trk:
+                            _sel_item_key = f"t:{sel_trk.id}"
+                            if _sel_item_key != self._album_cover_item_key:
+                                self._fetch_track_cover_async(sel_trk)
 
             if queue_panel:
                 artist_pane_w = w - left_w  # share the queue column
@@ -6872,35 +6943,58 @@ def _cc_collect(sources: List[str]) -> Dict[int, Optional[str]]:
     return result
 
 
+def _cc_collect_artists(sources: List[str]) -> Dict[int, Optional[str]]:
+    """Return {artist_id: picture_uuid_or_None} for artists in the given sources (liked only)."""
+    result: Dict[int, Optional[str]] = {}
+    if "liked" in sources:
+        data = _cc_load_json(LIKED_FILE)
+        for d in data.get("favorites_artists", []):
+            aid = d.get("id")
+            pic = d.get("picture")
+            if aid:
+                result.setdefault(int(aid), str(pic).strip() if isinstance(pic, str) and pic else None)
+    return result
+
+
 def cmd_clear_covers(keep_sources: List[str]) -> int:
     if not os.path.isdir(COVER_CACHE_DIR):
         print("Cover cache is empty.")
         return 0
 
-    keep_ids: set = set()
+    keep_album_ids: set = set()
+    keep_artist_ids: set = set()
     if keep_sources:
-        keep_ids = set(_cc_collect(keep_sources).keys())
-        print(f"Keeping covers for {len(keep_ids)} album(s) from: {', '.join(keep_sources)}")
+        keep_album_ids = set(_cc_collect(keep_sources).keys())
+        keep_artist_ids = set(_cc_collect_artists(keep_sources).keys())
+        print(f"Keeping {len(keep_album_ids)} album cover(s) and {len(keep_artist_ids)} artist picture(s) from: {', '.join(keep_sources)}")
 
     deleted = kept = 0
     for fname in os.listdir(COVER_CACHE_DIR):
         fpath = os.path.join(COVER_CACHE_DIR, fname)
         if not os.path.isfile(fpath):
             continue
-        if keep_ids and fname.startswith("a") and fname.endswith(".jpg"):
-            try:
-                if int(fname[1:-4]) in keep_ids:
-                    kept += 1
-                    continue
-            except ValueError:
-                pass
+        if fname.endswith(".jpg"):
+            if fname.startswith("ar") and keep_artist_ids:
+                try:
+                    if int(fname[2:-4]) in keep_artist_ids:
+                        kept += 1
+                        continue
+                except ValueError:
+                    pass
+            elif fname.startswith("a") and keep_album_ids:
+                try:
+                    if int(fname[1:-4]) in keep_album_ids:
+                        kept += 1
+                        continue
+                except ValueError:
+                    pass
         try:
             os.remove(fpath)
             deleted += 1
         except Exception as e:
             print(f"  Could not delete {fname}: {e}")
 
-    print(f"Deleted {deleted} cover file(s)" + (f", kept {kept}." if kept else "."))
+    print(f"Deleted {deleted} file(s)" + (f", kept {kept}." if kept else "."))
     return 0
 
 
@@ -6917,23 +7011,29 @@ def cmd_fetch_covers(sources: List[str], api_url: str = "") -> int:
             return f"https://resources.tidal.com/images/{'/'.join(parts)}/{size}x{size}.jpg"
         return None
 
-    def _cached(aid: int) -> bool:
+    def _cached_album(aid: int) -> bool:
         return os.path.exists(os.path.join(COVER_CACHE_DIR, f"a{aid}.jpg"))
+
+    def _cached_artist(aid: int) -> bool:
+        return os.path.exists(os.path.join(COVER_CACHE_DIR, f"ar{aid}.jpg"))
 
     # Collect per-source so we can report counts clearly
     per_source: Dict[str, Dict[int, Optional[str]]] = {}
     for src in sources:
         per_source[src] = _cc_collect([src])
 
-    # Merge, preserving UUID when any source has it
+    # Artist pictures (liked only)
+    artist_map = _cc_collect_artists(sources)
+
+    # Merge albums, preserving UUID when any source has it
     album_map: Dict[int, Optional[str]] = {}
     for m in per_source.values():
         for aid, uuid in m.items():
             if aid not in album_map or (uuid and not album_map[aid]):
                 album_map[aid] = uuid
 
-    if not album_map:
-        print("No albums found in the specified sources.")
+    if not album_map and not artist_map:
+        print("No albums or artists found in the specified sources.")
         return 0
 
     os.makedirs(COVER_CACHE_DIR, exist_ok=True)
@@ -6941,14 +7041,18 @@ def cmd_fetch_covers(sources: List[str], api_url: str = "") -> int:
     # Per-source summary
     for src in sources:
         m = per_source[src]
-        cached = sum(1 for aid in m if _cached(aid))
-        print(f"  {src}: {len(m)} album(s), {cached} already cached")
+        cached = sum(1 for aid in m if _cached_album(aid))
+        line = f"  {src}: {len(m)} album(s), {cached} already cached"
+        if src == "liked" and artist_map:
+            ar_cached = sum(1 for aid in artist_map if _cached_artist(aid))
+            line += f"; {len(artist_map)} artist picture(s), {ar_cached} already cached"
+        print(line)
 
     with_uuid = {aid: u for aid, u in album_map.items() if u}
     need_api  = [aid for aid, u in album_map.items() if not u]
 
-    miss_uuid = {aid: u for aid, u in with_uuid.items() if not _cached(aid)}
-    miss_api  = [aid for aid in need_api if not _cached(aid)]
+    miss_uuid = {aid: u for aid, u in with_uuid.items() if not _cached_album(aid)}
+    miss_api  = [aid for aid in need_api if not _cached_album(aid)]
     already   = len(album_map) - len(miss_uuid) - len(miss_api)
 
     if not miss_uuid and not miss_api:
@@ -7042,6 +7146,49 @@ def cmd_fetch_covers(sources: List[str], api_url: str = "") -> int:
             if api_errors:
                 parts.append(f"{api_errors} error(s)")
             print(", ".join(parts) + ".")
+
+    # Artist pictures (liked source only, UUID path — no API fallback needed)
+    miss_artists = {aid: u for aid, u in artist_map.items() if u and not _cached_artist(aid)}
+    skip_artists = sum(1 for aid, u in artist_map.items() if not u and not _cached_artist(aid))
+    if miss_artists:
+        ar_fetched = ar_errors = 0
+        total_ar = len(miss_artists)
+        print(f"Fetching {total_ar} artist picture(s)...")
+
+        def _fetch_artist(item: tuple) -> None:
+            nonlocal ar_fetched, ar_errors
+            aid, u = item
+            url = _uuid_to_url(u, size=750)
+            if not url:
+                with lock:
+                    ar_errors += 1
+                return
+            try:
+                data = http_get_bytes(url, timeout=15.0)
+                with open(os.path.join(COVER_CACHE_DIR, f"ar{aid}.jpg"), "wb") as f:
+                    f.write(data)
+                with lock:
+                    ar_fetched += 1
+                    done = ar_fetched + ar_errors
+                print(f"  [{done}/{total_ar}] artist {aid} ok    ", end="\r", flush=True)
+            except Exception as e:
+                with lock:
+                    ar_errors += 1
+                    done = ar_fetched + ar_errors
+                print(f"  [{done}/{total_ar}] artist {aid}: {e}")
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            list(pool.map(_fetch_artist, miss_artists.items()))
+        parts = [f"Fetched {ar_fetched}/{total_ar} artist picture(s)"]
+        if ar_errors:
+            parts.append(f"{ar_errors} error(s)")
+        print(", ".join(parts) + ".")
+    elif artist_map and not miss_artists:
+        ar_cached = sum(1 for aid in artist_map if _cached_artist(aid))
+        if ar_cached:
+            print(f"All {ar_cached} artist picture(s) already cached.")
+    if skip_artists:
+        print(f"{skip_artists} artist(s) have no stored picture UUID — like them again to capture it.")
 
     return 0
 

@@ -193,6 +193,7 @@ class Artist:
     id: int
     name: str
     track_id: Optional[int] = None
+    picture: Optional[str] = None  # TIDAL artist picture UUID
 
 
 # ---------------------------------------------------------------------------

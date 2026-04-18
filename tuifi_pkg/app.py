@@ -3827,8 +3827,7 @@ class App:
             def _commit_tracks() -> None:
                 partial = self._dedupe_tracks(raw_tracks)
                 partial.sort(key=_track_sort_key)
-                popular_ids = {t.id for t in self.artist_popular_tracks}
-                self.artist_tracks = [t for t in partial if t.id not in popular_ids][:600]
+                self.artist_tracks = partial[:600]
                 self._full_redraw()
 
             if aid:

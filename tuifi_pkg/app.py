@@ -2434,7 +2434,7 @@ class App:
         elif choice == 1:
             album_obj = Album(
                 id=t.album_id or self.meta.album_id.get(t.id, 0) or 0,
-                title=t.album, artist=t.artist, year=t.year,
+                title=t.album, artist=t.artist, year=t.year, cover=t.cover,
             )
             self.toggle_like_album(album_obj)
         elif choice == 2:
@@ -2470,7 +2470,7 @@ class App:
             artist_id = it.artist_id or self.meta.artist_id.get(it.id, 0) or 0
             album_id = it.album_id or self.meta.album_id.get(it.id, 0) or 0
             album_obj = Album(id=album_id, title=it.album, artist=it.artist, year=it.year,
-                              track_id=it.id if not album_id else None)
+                              track_id=it.id if not album_id else None, cover=it.cover)
             artist_obj = Artist(id=artist_id, name=it.artist,
                                 track_id=it.id if not artist_id else None)
             liked_t  = self.is_liked(it.id)
@@ -2532,7 +2532,7 @@ class App:
                 ("Go to Artist tab [5]",             lambda: self.open_artist_by_id(it.id, it.name)),
                 ("Enqueue all artist' tracks [e]",   lambda: self._enqueue_artist_async(it, insert_after_playing=False)),
                 ("Enqueue all artist' tracks next [E]", lambda: self._enqueue_artist_async(it, insert_after_playing=True)),
-                (f"{'Unlike' if liked_ar else 'Like'} artist [l]", lambda: self.toggle_like_artist(it.id, it.name)),
+                (f"{'Unlike' if liked_ar else 'Like'} artist [l]", lambda: self.toggle_like_artist(it.id, it.name, it.picture)),
                 ("Add to playlist [a]",              lambda: self._add_artist_to_playlist_async(it)),
                 ("Download artist [d]",              lambda: self._download_artist_async(it)),
                 ("Similar artists [s]",              lambda: self.show_similar_artists_dialog(it)),
@@ -3452,11 +3452,11 @@ class App:
         if self._album_cover_item_key == item_key and self._album_cover_path:
             return
         dest = os.path.join(COVER_CACHE_DIR, f"ar{artist.id}.jpg")
-        # If we have neither a UUID nor a cached file, the picture isn't available
-        # yet (artist worker may still be fetching). Don't lock the item_key so the
-        # next redraw retries automatically once artist_picture is populated.
-        if not artist.picture and not os.path.exists(dest):
-            return
+        # If we have neither a UUID nor a cached file, the picture may need an API
+        # lookup. Lock the item_key so we attempt the fetch exactly once (not on
+        # every redraw). The artist worker skips locking when picture is absent so
+        # that re-draws can retry once artist_picture is populated; here we always
+        # proceed and fall back to the ?id= endpoint when picture is None.
         self._album_cover_item_key = item_key
         self._album_cover_loading = True
 
@@ -3464,9 +3464,29 @@ class App:
             try:
                 dest = os.path.join(COVER_CACHE_DIR, f"ar{artist.id}.jpg")
                 if not os.path.exists(dest):
-                    url = self._tidal_cover_uuid_to_url(artist.picture, size=750) if artist.picture else None
+                    pic = artist.picture
+                    if not pic:
+                        # No UUID saved — try the ?id= endpoint as a fallback
+                        try:
+                            _id_payload = http_get_json(self.client._u("/artist/", {"id": int(artist.id)}), timeout=8.0)
+                            _ar = _id_payload.get('artist') or {}
+                            if isinstance(_ar, dict):
+                                _p = _ar.get('picture')
+                                if isinstance(_p, str) and _p:
+                                    pic = _p
+                            if not pic:
+                                _cov = _id_payload.get('cover') or {}
+                                if isinstance(_cov, dict):
+                                    for _sz in ('750', '640', '480'):
+                                        _u = _cov.get(_sz)
+                                        if isinstance(_u, str) and _u.startswith('http'):
+                                            pic = _u
+                                            break
+                        except Exception as _e:
+                            debug_log(f"_fetch_artist_picture_async ?id= fallback: {_e}")
+                    url = self._tidal_cover_uuid_to_url(pic, size=750) if pic else None
                     if not url:
-                        debug_log(f"_fetch_artist_picture_async: no picture UUID for artist={artist.id}")
+                        debug_log(f"_fetch_artist_picture_async: no picture URL for artist={artist.id}")
                         if self._album_cover_item_key == item_key:
                             self._album_cover_path = None
                             self._album_cover_render_buf = None
@@ -6485,6 +6505,7 @@ class App:
                         if self._artist_tab_has_content and not _ar_no_confirm:
                             self._artist_pending_ctx = ctx
                             self.switch_tab(TAB_ARTIST, refresh=False)
+                            self._reset_left_cursor()
                         else:
                             self._artist_pending_ctx = None
                             self.switch_tab(TAB_ARTIST, refresh=False)

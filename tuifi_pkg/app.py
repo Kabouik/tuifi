@@ -5986,6 +5986,18 @@ class App:
                 self.toast(f"Resumed from {fmt_time(_resume_pos)}")
             self.jump_to_playing_in_queue()
 
+        # If starting on the Playback tab with preview-next enabled, move the
+        # queue cursor to the next track (after any auto-resume has reset it).
+        if self.tab == TAB_PLAYBACK and self._preview_next and self.queue_overlay and self._album_cover_pane:
+            if self.priority_queue:
+                _nxt = self.priority_queue[0]
+            else:
+                _nxt = self.queue_play_idx + 1
+                if _nxt >= len(self.queue_items) and self.repeat_mode == 1:
+                    _nxt = 0
+            if 0 <= _nxt < len(self.queue_items):
+                self.queue_cursor = _nxt
+
         def _mk_ctrl(names, fallback=()):
             def _check(c):
                 try: return curses.keyname(c) in names

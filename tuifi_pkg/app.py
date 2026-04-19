@@ -5186,7 +5186,6 @@ class App:
                 if isinstance(it, Album):
                     yv = year_norm(it.year)
                     ys = f", {yv}" if (self.show_track_year and yv != "????") else ""
-                    _tc = f" ({it.n_tracks})" if it.n_tracks is not None else ""
                     liked_alb = it.id in self.liked_album_ids
                     base_attr = curses.A_REVERSE if selected else 0
                     marked = (i in self.marked_left_idx)
@@ -5202,25 +5201,28 @@ class App:
                         self.stdscr.addstr(yy, px, "♥ "[:pw], base_attr | self.C(14))
                         px += 2; pw -= 2
                     if pw > 0:
-                        if self._show_singles_eps and it.type in ("SINGLE", "EP"):
-                            _type_label = " [ep]" if it.type == "EP" else " [si]"
-                            _clean_title = re.sub(r'\s*-\s*(single|ep)\s*$', '', it.title, flags=re.IGNORECASE)
-                            _title_part = _clean_title[:pw]
-                            _label_part = _type_label
-                            _date_part = ys + _tc
-                            _title_w = min(len(_title_part), pw)
-                            self.stdscr.addstr(yy, px, _title_part[:pw].ljust(0)[:pw], base_attr | self.C(8))
-                            if _title_w < pw:
-                                _rem = pw - _title_w
-                                _label_only = _label_part[:_rem]
-                                self.stdscr.addstr(yy, px + _title_w, _label_only, base_attr | self.C(5))
-                                _after_label = _title_w + len(_label_only)
-                                if _after_label < pw:
-                                    _dpart = _date_part[:pw - _after_label].ljust(pw - _after_label)[:pw - _after_label]
-                                    self.stdscr.addstr(yy, px + _after_label, _dpart, base_attr | self.C(8))
+                        _is_si_ep = self._show_singles_eps and it.type in ("SINGLE", "EP")
+                        _title = re.sub(r'\s*-\s*(single|ep)\s*$', '', it.title, flags=re.IGNORECASE) if _is_si_ep else it.title
+                        # Segments: main (blue), purple prefix (purple), blue suffix (blue)
+                        _main = f"{_title}{ys}"
+                        if _is_si_ep:
+                            _seg_purple = f" [{'ep' if it.type == 'EP' else 'si'} "
+                            _seg_blue   = f"{it.n_tracks}]" if it.n_tracks is not None else "]"
                         else:
-                            self.stdscr.addstr(yy, px, f"{it.title}{ys}{_tc}"[:pw].ljust(pw)[:pw],
-                                               base_attr | self.C(8))
+                            _seg_purple = ""
+                            _seg_blue   = f" [{it.n_tracks}]" if it.n_tracks is not None else ""
+                        _pos = 0
+                        def _seg(s, attr):
+                            nonlocal _pos
+                            if _pos >= pw or not s: return
+                            avail = pw - _pos
+                            self.stdscr.addstr(yy, px + _pos, s[:avail], base_attr | attr)
+                            _pos += min(len(s), avail)
+                        _seg(_main, self.C(8))
+                        _seg(_seg_purple, self.C(5))
+                        _seg(_seg_blue, self.C(8))
+                        if _pos < pw:
+                            self.stdscr.addstr(yy, px + _pos, " " * (pw - _pos), base_attr)
                     continue
             if typ == "album_mixed":
                 if isinstance(it, tuple) and it[0] == "album_title" and isinstance(it[1], Album):

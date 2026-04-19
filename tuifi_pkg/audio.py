@@ -46,6 +46,7 @@ class MPV:
         args = [
             "mpv", "--no-video", "--force-window=no", "--really-quiet",
             "--idle=no", f"--input-ipc-server={self.sock_path}",
+            "--reset-on-next-file=no",
         ]
         if not resume:
             args.append("--no-resume-playback")

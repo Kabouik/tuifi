@@ -217,6 +217,8 @@ class App:
         self._last_played_track: Optional[Track] = None   # survives end-of-track; used for post-end seek
         self._last_played_duration: Optional[float] = None  # last known duration while mpv was alive
         self.toast_msg = ""; self.toast_until = 0.0
+        self._artist_status: str = ""
+        self._artist_all_tracks_loading: bool = False
         self.show_help = False; self.help_scroll = 0
 
         self.info_scroll = 0; self.info_loading = False; self.info_follow_selection = True; self._info_refresh_due = 0.0
@@ -1206,9 +1208,11 @@ class App:
                 items.append(("sep", f"-- Top tracks ({len(self.artist_top_tracks)})"))
                 items.extend(self.artist_top_tracks)
                 if self.artist_tracks:
-                    all_lbl = f"-- All tracks ({len(self.artist_tracks)}{'…' if self._loading else ''})"
+                    all_lbl = f"-- All tracks ({len(self.artist_tracks)}{'…' if self._artist_all_tracks_loading else ''})"
                     items.append(("sep", all_lbl))
                     items.extend(self.artist_tracks)
+                elif self._artist_all_tracks_loading:
+                    items.append(("sep", "-- All tracks (…)"))
             elif self.artist_tracks:
                 trk_label = f"Tracks ({len(self.artist_tracks)}" + ("…)" if self._loading else ")")
                 items.append(("sep", trk_label))
@@ -3877,6 +3881,8 @@ class App:
         self.artist_albums, self.artist_top_tracks, self.artist_tracks = [], [], []
         self.artist_ctx = None
         self.artist_picture = None
+        self._artist_status = ""
+        self._artist_all_tracks_loading = False
         if self._album_cover_visible:
             self._erase_album_cover_terminal()
         self._album_cover_item_key = ""
@@ -3909,19 +3915,6 @@ class App:
                 self._full_redraw()
                 return
 
-            def _parse_tracks_from_payload(payload: Dict[str, Any]) -> List[Track]:
-                tracks_list = payload.get('tracks', [])
-                if isinstance(tracks_list, dict):
-                    tracks_list = tracks_list.get('items', [])
-                out: List[Track] = []
-                if isinstance(tracks_list, list):
-                    for d in tracks_list:
-                        if isinstance(d, dict):
-                            t = self._parse_track_obj(d)
-                            if t:
-                                out.append(t)
-                return out
-
             def _extract_picture(payload: Dict[str, Any]) -> Optional[str]:
                 for _alb in payload.get('albums', {}).get('items', []):
                     _ad = _alb.get('artist') or {}
@@ -3940,9 +3933,11 @@ class App:
                 albums = self._dedupe_albums(self._extract_artist_albums_from_payload(payload1))
                 self.artist_ctx = (int(aid), ctx.artist)
                 self.artist_picture = _extract_picture(payload1)
-                top = self._dedupe_tracks(_parse_tracks_from_payload(payload1))
+                top = self._dedupe_tracks(self._scan_parse_tracks(payload1))
                 top.sort(key=_track_sort_key)
-                self.artist_top_tracks = top[:600]
+                self.artist_top_tracks = top
+                self._artist_all_tracks_loading = True
+                self._artist_status = "Fetching all tracks…"
 
                 if albums:
                     BATCH = 8
@@ -3959,9 +3954,11 @@ class App:
                 if self._loading_key != key: return
                 payload2 = self.client.artist(int(aid))
                 if self._loading_key != key: return
-                all_tracks = self._dedupe_tracks(_parse_tracks_from_payload(payload2))
+                all_tracks = self._dedupe_tracks(self._scan_parse_tracks(payload2))
                 all_tracks.sort(key=_track_sort_key)
-                self.artist_tracks = all_tracks[:600]
+                self.artist_tracks = all_tracks
+                self._artist_all_tracks_loading = False
+                self._artist_status = ""
                 self._full_redraw()
 
             if not self.artist_top_tracks and not self.artist_tracks and not albums:
@@ -3971,9 +3968,10 @@ class App:
                 a0 = ctx.artist.strip().lower()
                 fallback = [t for t in self._extract_tracks_from_search(payload_s)
                             if t.artist.strip().lower() == a0]
-                fallback = self._dedupe_tracks(fallback)
-                fallback.sort(key=_track_sort_key)
-                self.artist_tracks = fallback[:600]
+                self.artist_tracks = self._dedupe_tracks(fallback)
+                self.artist_tracks.sort(key=_track_sort_key)
+                self._artist_all_tracks_loading = False
+                self._artist_status = ""
 
             if not albums:
                 src = self.artist_tracks or self.artist_top_tracks
@@ -5402,6 +5400,8 @@ class App:
             right = "DLERR"
         elif now < self.toast_until and self.toast_msg:
             right = self.toast_msg
+        elif self._artist_status:
+            right = self._artist_status
         if right:
             right = _truncate_to_display_width(right, max(0, w - 2))
             tpos = max(0, col_limit - _str_display_width(right))
@@ -6758,30 +6758,33 @@ class App:
                             # if _i <= 0 we're already in the first section, stay
 
                     elif self.tab == TAB_ARTIST:
-                        # Artist tab: full-cycle — artist_header ↔ Albums ↔ Tracks (album-groups)
-                        _artist_idx  = 0 if (_items and isinstance(_items[0], tuple) and _items[0][0] == "artist_header") else -1
-                        _first_album = next((i for i, x in enumerate(_items) if isinstance(x, Album)), len(_items))
-                        _first_track = next((i for i, x in enumerate(_items) if isinstance(x, Track)), len(_items))
-                        _last_album  = next((i for i in range(len(_items) - 1, -1, -1) if isinstance(_items[i], Album)), -1)
-                        _cur_item    = _items[_cur] if 0 <= _cur < len(_items) else None
-
+                        # Sep-based section jumping (artist_header counts as a section boundary)
+                        def _is_boundary(x):
+                            return isinstance(x, tuple) and x[0] in ("sep", "artist_header")
                         if _dir > 0:
-                            if isinstance(_cur_item, tuple) and _cur_item[0] == "artist_header":
-                                _new = _first_album if _first_album < len(_items) else _first_track
-                            elif isinstance(_cur_item, Album):
-                                _new = _first_track if _first_track < len(_items) else _cur
-                            elif isinstance(_cur_item, Track):
-                                _new = _alb_down(_items, _cur)
+                            _i = _cur + 1
+                            while _i < len(_items):
+                                if _is_boundary(_items[_i]):
+                                    _j = _i + 1
+                                    while _j < len(_items) and _is_boundary(_items[_j]):
+                                        _j += 1
+                                    _new = min(_j, len(_items) - 1)
+                                    break
+                                _i += 1
+                            else:
+                                _new = len(_items) - 1
                         else:
-                            if isinstance(_cur_item, Album):
-                                _new = max(0, _artist_idx) if _artist_idx >= 0 else 0
-                            elif isinstance(_cur_item, Track):
-                                _n2 = _alb_up(_items, _cur)
-                                if _n2 == _cur:
-                                    # first track of first group → jump to last album
-                                    _new = _last_album if _last_album >= 0 else max(0, _artist_idx if _artist_idx >= 0 else 0)
-                                else:
-                                    _new = _n2
+                            _i = _cur - 1
+                            while _i >= 0 and not _is_boundary(_items[_i]):
+                                _i -= 1
+                            if _i > 0:
+                                _i -= 1
+                                while _i >= 0 and not _is_boundary(_items[_i]):
+                                    _i -= 1
+                                _j = (_i + 1) if _i >= 0 else 0
+                                while _j < len(_items) and _is_boundary(_items[_j]):
+                                    _j += 1
+                                _new = _j
 
                     else:
                         # All other tabs: plain album-group jump within the item list

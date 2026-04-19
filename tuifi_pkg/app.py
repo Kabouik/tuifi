@@ -256,6 +256,7 @@ class App:
         self._mouse_long_press_pending: bool = False
         self._cover_lyrics: bool = True; self._cover_lyrics_max_scroll: int = 10_000
         self._show_singles_eps: bool = bool(self.settings.get("include_singles_and_eps_in_artist_tab", False))
+        self._album_track_limit: int = clamp(int(self.settings.get("album_track_limit", 500) or 500), 1, 500)
         self._last_artist_fetch_track: Optional["Track"] = None
         self._artist_cache: Dict[int, Tuple[List[Any], List[Any], Tuple[int, str]]] = {}
 
@@ -3803,7 +3804,7 @@ class App:
         return None
 
     def _fetch_album_tracks_by_album_id(self, album_id: int) -> List[Track]:
-        return self._extract_tracks_from_album_payload(self.client.album(int(album_id)))
+        return self._extract_tracks_from_album_payload(self.client.album(int(album_id), limit=self._album_track_limit))
 
     def open_album_from_album_obj(self, album: Album) -> None:
         self.switch_tab(TAB_ALBUM, refresh=False)
@@ -5551,7 +5552,7 @@ class App:
             " g/G       go to top/bottom",
             " j/k/\u2193/\u2191   go down/up",
             " ^\u2193/^\u2191     jump to next/prev section (sep-based in tabs 5 and 7)",
-            " {/}       jump to prev/next album group within a track list",
+            " Alt+\u2193/\u2191  jump to next/prev album group within a track list",
             " c         color/bw",
             " w/y/d/n   album/year/duration/line number fields",
             " T         status bar",
@@ -5588,6 +5589,7 @@ class App:
             "",
             " Artist tab:",
             " include_singles_and_eps_in_artist_tab: show singles/EPs (default: false, toggle with #)",
+            " album_track_limit: max tracks fetched per album (default: 500, API max: 500)",
             " cover_pane: show side cover pane on startup (default: true, toggle with C)",
             " playback_tab_layout: default layout when entering tab 0",
             "   values: \"lyrics\" (default), \"miniqueue\", \"miniqueue_cover\"",
@@ -6076,8 +6078,10 @@ class App:
             return _check
         _is_ctrl_right = _mk_ctrl((b"kRIT5", b"kRIT3"), (444, 560))
         _is_ctrl_left  = _mk_ctrl((b"kLFT5", b"kLFT3"), (443, 545))
-        _is_ctrl_down  = _mk_ctrl((b"kDN5", b"kDN3"))
-        _is_ctrl_up    = _mk_ctrl((b"kUP5", b"kUP3"))
+        _is_ctrl_down  = _mk_ctrl((b"kDN5",))
+        _is_ctrl_up    = _mk_ctrl((b"kUP5",))
+        _is_alt_down   = _mk_ctrl((b"kDN3",))
+        _is_alt_up     = _mk_ctrl((b"kUP3",))
 
         def _gkey(t: Track) -> tuple:
             return (year_norm(t.year), t.album.lower())
@@ -6771,9 +6775,9 @@ class App:
                     self._need_redraw = True
                 continue
 
-            # {/}: jump between album groups within a track list
-            if ch in (ord("{"), ord("}")):
-                _dir2 = 1 if ch == ord("}") else -1
+            # Alt+Down/Up: jump between album groups within a track list
+            if isinstance(ch, int) and (_is_alt_down(ch) or _is_alt_up(ch)):
+                _dir2 = 1 if _is_alt_down(ch) else -1
                 if self._queue_context():
                     _q = self.queue_items
                     _c = self.queue_cursor

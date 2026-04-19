@@ -79,9 +79,12 @@ class HiFiClient:
     def album(self, album_id: int) -> Dict[str, Any]:
         return http_get_json(self._u("/album/", {"id": int(album_id)}))
 
-    def artist(self, artist_id: int) -> Dict[str, Any]:
+    def artist(self, artist_id: int, skip_tracks: bool = False) -> Dict[str, Any]:
         try:
-            return http_get_json(self._u("/artist/", {"f": int(artist_id)}))
+            params: Dict[str, Any] = {"f": int(artist_id)}
+            if skip_tracks:
+                params["skip_tracks"] = True
+            return http_get_json(self._u("/artist/", params))
         except Exception:
             return http_get_json(self._u("/artist/", {"id": int(artist_id)}))
 

@@ -189,6 +189,7 @@ class App:
         self.artist_ctx: Optional[Tuple[int, str]] = None
         self.artist_picture: Optional[str] = None   # cover UUID for current artist
         self.artist_albums: List[Album] = []
+        self.artist_top_tracks: List[Track] = []
         self.artist_tracks: List[Track] = []
         self.album_header: Optional[Album] = None
         self.album_tracks: List[Track] = []
@@ -1104,27 +1105,11 @@ class App:
 
     def _fetch_artist_catalog_by_artist_id(self, artist_id: int) -> Tuple[List[Album], List[Track]]:
         payload = self.client.artist(int(artist_id))
-
         albums = self._extract_artist_albums_from_payload(payload)
-        tracks: List[Track] = []
-
-        for alb in albums:
-            if alb.id:
-                try:
-                    tracks.extend(self._fetch_album_tracks_by_album_id(alb.id))
-                except Exception:
-                    pass
-
-        if not tracks:
-            tracks.extend(self._scan_parse_tracks(payload))
-
-        tracks = self._dedupe_tracks(tracks)
-
+        tracks = self._dedupe_tracks(self._scan_parse_tracks(payload))
         tracks.sort(key=_track_sort_key)
-
         if not albums and tracks:
             albums = self._build_synthetic_albums(tracks)
-
         return albums, tracks
 
     # ---------------------------------------------------------------------------
@@ -1178,7 +1163,7 @@ class App:
     def _left_items(self) -> Tuple[str, List[Any]]:
         if self._loading:
             # For the Artist tab, fall through to show partial data while loading
-            if not (self.tab == TAB_ARTIST and (self.artist_ctx or self.artist_albums or self.artist_tracks)):
+            if not (self.tab == TAB_ARTIST and (self.artist_ctx or self.artist_albums or self.artist_top_tracks or self.artist_tracks)):
                 return ("loading", [])
         if self.tab == TAB_RECOMMENDED and getattr(self, "_recommended_pending_ctx", None):
             _rc = self._recommended_pending_ctx
@@ -1217,7 +1202,14 @@ class App:
                 alb_label = f"Albums ({len(self.artist_albums)}" + ("…" if self._loading else "") + _sep_hint
                 items.append(("sep", alb_label))
                 items.extend(self.artist_albums)
-            if self.artist_tracks:
+            if self.artist_top_tracks:
+                items.append(("sep", f"-- Top tracks ({len(self.artist_top_tracks)})"))
+                items.extend(self.artist_top_tracks)
+                if self.artist_tracks:
+                    all_lbl = f"-- All tracks ({len(self.artist_tracks)}{'…' if self._loading else ''})"
+                    items.append(("sep", all_lbl))
+                    items.extend(self.artist_tracks)
+            elif self.artist_tracks:
                 trk_label = f"Tracks ({len(self.artist_tracks)}" + ("…)" if self._loading else ")")
                 items.append(("sep", trk_label))
                 items.extend(self.artist_tracks)
@@ -3882,7 +3874,7 @@ class App:
             self._last_artist_fetch_track = ctx
             return
         self._last_artist_fetch_track = ctx
-        self.artist_albums, self.artist_tracks = [], []
+        self.artist_albums, self.artist_top_tracks, self.artist_tracks = [], [], []
         self.artist_ctx = None
         self.artist_picture = None
         if self._album_cover_visible:
@@ -3906,58 +3898,53 @@ class App:
             # Cache hit after resolving aid
             if aid and int(aid) in self._artist_cache:
                 cached = self._artist_cache[int(aid)]
-                self.artist_albums, self.artist_tracks, self.artist_ctx = cached[0], cached[1], cached[2]
-                self.artist_picture = cached[3] if len(cached) > 3 else None
+                self.artist_albums    = cached[0]
+                self.artist_top_tracks = cached[1]
+                self.artist_tracks    = cached[2]
+                self.artist_ctx       = cached[3]
+                self.artist_picture   = cached[4] if len(cached) > 4 else None
                 self._loading_key = ""
                 self._loading = False
                 self._artist_tab_has_content = True
                 self._full_redraw()
                 return
 
-            albums: List[Album] = []
-            raw_tracks: List[Track] = []
-
-            def _commit_tracks() -> None:
-                partial = self._dedupe_tracks(raw_tracks)
-                partial.sort(key=_track_sort_key)
-                self.artist_tracks = partial[:600]
-                self._full_redraw()
-
-            if aid:
-                payload = self.client.artist(int(aid))
-                if self._loading_key != key: return
-                albums = self._extract_artist_albums_from_payload(payload)
-                albums = self._dedupe_albums(albums)
-                self.artist_ctx = (int(aid), ctx.artist)
-                # Extract artist picture UUID from the first album's artist field
-                _pic = None
-                for _alb in payload.get('albums', {}).get('items', []):
-                    _ad = _alb.get('artist') or {}
-                    if isinstance(_ad, dict):
-                        _p = _ad.get('picture')
-                        if isinstance(_p, str) and _p:
-                            _pic = _p
-                            break
-                self.artist_picture = _pic
-
-                # Parse all tracks from the flat tracks list in the artist payload.
-                # The API provides the complete catalogue there — no per-album calls needed.
+            def _parse_tracks_from_payload(payload: Dict[str, Any]) -> List[Track]:
                 tracks_list = payload.get('tracks', [])
                 if isinstance(tracks_list, dict):
                     tracks_list = tracks_list.get('items', [])
+                out: List[Track] = []
                 if isinstance(tracks_list, list):
                     for d in tracks_list:
                         if isinstance(d, dict):
                             t = self._parse_track_obj(d)
                             if t:
-                                raw_tracks.append(t)
+                                out.append(t)
+                return out
 
-                if not albums:
-                    self._full_redraw()
-                else:
-                    # Publish albums in small batches and kick off cover downloads.
-                    # Tracks are already populated so the first redraw shows everything.
-                    _commit_tracks()
+            def _extract_picture(payload: Dict[str, Any]) -> Optional[str]:
+                for _alb in payload.get('albums', {}).get('items', []):
+                    _ad = _alb.get('artist') or {}
+                    if isinstance(_ad, dict):
+                        _p = _ad.get('picture')
+                        if isinstance(_p, str) and _p:
+                            return _p
+                return None
+
+            albums: List[Album] = []
+
+            if aid:
+                # Phase 1: fast — albums + top tracks (skip full track aggregation)
+                payload1 = self.client.artist(int(aid), skip_tracks=True)
+                if self._loading_key != key: return
+                albums = self._dedupe_albums(self._extract_artist_albums_from_payload(payload1))
+                self.artist_ctx = (int(aid), ctx.artist)
+                self.artist_picture = _extract_picture(payload1)
+                top = self._dedupe_tracks(_parse_tracks_from_payload(payload1))
+                top.sort(key=_track_sort_key)
+                self.artist_top_tracks = top[:600]
+
+                if albums:
                     BATCH = 8
                     for batch_start in range(0, len(albums), BATCH):
                         if self._loading_key != key: return
@@ -3965,24 +3952,42 @@ class App:
                         self.artist_albums = albums[:batch_start + len(batch)]
                         self._full_redraw()
                         self._prefetch_album_covers_async(batch, int(aid))
+                else:
+                    self._full_redraw()
 
-            if not raw_tracks and not albums:
-                payload2 = self.client.search_tracks(ctx.artist, limit=300)
+                # Phase 2: slow — full track aggregation
+                if self._loading_key != key: return
+                payload2 = self.client.artist(int(aid))
+                if self._loading_key != key: return
+                all_tracks = self._dedupe_tracks(_parse_tracks_from_payload(payload2))
+                all_tracks.sort(key=_track_sort_key)
+                self.artist_tracks = all_tracks[:600]
+                self._full_redraw()
+
+            if not self.artist_top_tracks and not self.artist_tracks and not albums:
+                # Search fallback when aid resolution failed
+                payload_s = self.client.search_tracks(ctx.artist, limit=300)
                 if self._loading_key != key: return
                 a0 = ctx.artist.strip().lower()
-                raw_tracks = [t for t in self._extract_tracks_from_search(payload2) if t.artist.strip().lower() == a0]
+                fallback = [t for t in self._extract_tracks_from_search(payload_s)
+                            if t.artist.strip().lower() == a0]
+                fallback = self._dedupe_tracks(fallback)
+                fallback.sort(key=_track_sort_key)
+                self.artist_tracks = fallback[:600]
 
             if not albums:
-                albums = self._build_synthetic_albums(raw_tracks)
+                src = self.artist_tracks or self.artist_top_tracks
+                albums = self._build_synthetic_albums(src)
 
-            # Final commit with fully deduped/sorted results
             albums = self._dedupe_albums(albums)
             self.artist_albums = albums[:500]
             if aid:
                 self.artist_ctx = (int(aid), ctx.artist)
-            _commit_tracks()
-            if aid:
-                self._artist_cache[int(aid)] = (self.artist_albums, self.artist_tracks, self.artist_ctx, self.artist_picture)
+                self._artist_cache[int(aid)] = (
+                    self.artist_albums, self.artist_top_tracks, self.artist_tracks,
+                    self.artist_ctx, self.artist_picture,
+                )
+            self._full_redraw()
             self._artist_tab_has_content = True
             self.toast("Artist")
 
@@ -5031,7 +5036,7 @@ class App:
         typ, items = self._left_items()
         if h <= 0 or w <= 0: return
         if self._loading:
-            if self.tab == TAB_ARTIST and (self.artist_ctx or self.artist_albums or self.artist_tracks):
+            if self.tab == TAB_ARTIST and (self.artist_ctx or self.artist_albums or self.artist_top_tracks or self.artist_tracks):
                 pass  # fall through; partial content visible, "…" shown in section headers
             else:
                 self.stdscr.addstr(y, x, "Loading…", self.C(4))

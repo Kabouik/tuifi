@@ -6114,6 +6114,40 @@ class App:
                 return i
             return cur
 
+        def _is_boundary_artist(x):
+            return isinstance(x, tuple) and x[0] in ("sep", "artist_header")
+
+        def _section_jump_left(items: list, cur: int, direction: int) -> int:
+            """Return the index of the first item in the next/prev section."""
+            is_bnd = _is_boundary_artist if self.tab == TAB_ARTIST else (
+                lambda x: isinstance(x, tuple) and x[0] == "sep")
+            use_seps = self.tab == TAB_ARTIST or (self.tab == TAB_LIKED and self.liked_filter == 0)
+            if not use_seps:
+                return _alb_down(items, cur) if direction > 0 else _alb_up(items, cur)
+            if direction > 0:
+                i = cur + 1
+                while i < len(items):
+                    if is_bnd(items[i]):
+                        j = i + 1
+                        while j < len(items) and is_bnd(items[j]):
+                            j += 1
+                        return min(j, len(items) - 1)
+                    i += 1
+                return len(items) - 1
+            else:
+                i = cur - 1
+                while i >= 0 and not is_bnd(items[i]):
+                    i -= 1
+                if i > 0:
+                    i -= 1
+                    while i >= 0 and not is_bnd(items[i]):
+                        i -= 1
+                    j = (i + 1) if i >= 0 else 0
+                    while j < len(items) and is_bnd(items[j]):
+                        j += 1
+                    return j
+                return cur
+
         def _tog(attr: str, on: str, off: str) -> None:
             v = not getattr(self, attr)
             setattr(self, attr, v)
@@ -6775,103 +6809,36 @@ class App:
                     self._need_redraw = True
                 continue
 
-            # Alt+Down/Up: jump between album groups within a track list
+            # Alt+Down/Up: album-group jump within a track section; falls back to section jump at boundaries
             if isinstance(ch, int) and (_is_alt_down(ch) or _is_alt_up(ch)):
-                _dir2 = 1 if _is_alt_down(ch) else -1
+                _dir = 1 if _is_alt_down(ch) else -1
                 if self._queue_context():
-                    _q = self.queue_items
-                    _c = self.queue_cursor
-                    self.queue_cursor = clamp(
-                        _alb_down(_q, _c) if _dir2 > 0 else _alb_up(_q, _c),
-                        0, max(0, len(_q) - 1))
+                    _q = self.queue_items; _c = self.queue_cursor
+                    self.queue_cursor = clamp(_alb_down(_q, _c) if _dir > 0 else _alb_up(_q, _c), 0, max(0, len(_q) - 1))
                     self._need_redraw = True
                 else:
-                    _typ2, _items2 = self._left_items()
-                    _c2 = self.left_idx
-                    _n2 = _alb_down(_items2, _c2) if _dir2 > 0 else _alb_up(_items2, _c2)
-                    self.left_idx = clamp(_n2, 0, max(0, len(_items2) - 1))
+                    _typ, _items = self._left_items()
+                    _cur = self.left_idx
+                    _cur_it = _items[_cur] if 0 <= _cur < len(_items) else None
+                    _new = _alb_down(_items, _cur) if _dir > 0 else _alb_up(_items, _cur)
+                    if _new == _cur:  # no album-group movement: fall back to section jump
+                        _new = _section_jump_left(_items, _cur, _dir)
+                    self.left_idx = clamp(_new, 0, max(0, len(_items) - 1))
                     self._need_redraw = True
                 continue
 
-            # Ctrl+Down/Ctrl+Up: jump between album groups/sections
+            # Ctrl+Down/Ctrl+Up: section jump
             if isinstance(ch, int) and (_is_ctrl_down(ch) or _is_ctrl_up(ch)):
                 _dir = 1 if _is_ctrl_down(ch) else -1
                 if self._queue_context():
-                    # Jump between album groups in queue
-                    _q = self.queue_items
-                    _c = self.queue_cursor
+                    _q = self.queue_items; _c = self.queue_cursor
                     _n = _alb_down(_q, _c) if _dir > 0 else _alb_up(_q, _c)
                     self.queue_cursor = clamp(_n, 0, max(0, len(_q) - 1))
                     self._need_redraw = True
                 else:
                     _typ, _items = self._left_items()
                     _cur = self.left_idx
-                    _new = _cur
-
-                    if self.tab == TAB_LIKED and self.liked_filter == 0:
-                        # sep-based section jump
-                        if _dir > 0:
-                            _i = _cur + 1
-                            while _i < len(_items):
-                                if isinstance(_items[_i], tuple) and _items[_i][0] == "sep":
-                                    _j = _i + 1
-                                    while _j < len(_items) and isinstance(_items[_j], tuple) and _items[_j][0] == "sep":
-                                        _j += 1
-                                    _new = min(_j, len(_items) - 1)
-                                    break
-                                _i += 1
-                            else:
-                                _new = len(_items) - 1
-                        else:
-                            # Walk back to the sep that starts our section, then back to the previous sep
-                            _i = _cur - 1
-                            while _i >= 0 and not (isinstance(_items[_i], tuple) and _items[_i][0] == "sep"):
-                                _i -= 1
-                            # _i is now at current section's sep (or -1)
-                            if _i > 0:
-                                _i -= 1
-                                while _i >= 0 and not (isinstance(_items[_i], tuple) and _items[_i][0] == "sep"):
-                                    _i -= 1
-                                # _i is at prev section's sep; jump to its first non-sep item
-                                _j = (_i + 1) if _i >= 0 else 0
-                                while _j < len(_items) and isinstance(_items[_j], tuple) and _items[_j][0] == "sep":
-                                    _j += 1
-                                _new = _j
-                            # if _i <= 0 we're already in the first section, stay
-
-                    elif self.tab == TAB_ARTIST:
-                        # Sep-based section jumping (artist_header counts as a section boundary)
-                        def _is_boundary(x):
-                            return isinstance(x, tuple) and x[0] in ("sep", "artist_header")
-                        if _dir > 0:
-                            _i = _cur + 1
-                            while _i < len(_items):
-                                if _is_boundary(_items[_i]):
-                                    _j = _i + 1
-                                    while _j < len(_items) and _is_boundary(_items[_j]):
-                                        _j += 1
-                                    _new = min(_j, len(_items) - 1)
-                                    break
-                                _i += 1
-                            else:
-                                _new = len(_items) - 1
-                        else:
-                            _i = _cur - 1
-                            while _i >= 0 and not _is_boundary(_items[_i]):
-                                _i -= 1
-                            if _i > 0:
-                                _i -= 1
-                                while _i >= 0 and not _is_boundary(_items[_i]):
-                                    _i -= 1
-                                _j = (_i + 1) if _i >= 0 else 0
-                                while _j < len(_items) and _is_boundary(_items[_j]):
-                                    _j += 1
-                                _new = _j
-
-                    else:
-                        # All other tabs: plain album-group jump within the item list
-                        _new = _alb_down(_items, _cur) if _dir > 0 else _alb_up(_items, _cur)
-
+                    _new = _section_jump_left(_items, _cur, _dir)
                     self.left_idx = clamp(_new, 0, max(0, len(_items) - 1))
                     self._need_redraw = True
                 continue

@@ -397,6 +397,8 @@ def save_settings(s: Dict[str, Any]) -> None:
         "show_toggles", "show_track_album", "show_track_year",
         "show_track_duration", "show_numbers", "tab_align",
         "include_singles_and_eps_in_artist_tab",
+        "playback_tab_preview_next",
+        "cover_pane",
     )
 
     _section("── RUNTIME STATE  (managed automatically, do not edit) " + "─" * 14)

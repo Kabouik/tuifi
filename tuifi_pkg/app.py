@@ -233,6 +233,7 @@ class App:
 
         # Side cover preview pane (toggled with C, persists across sessions)
         self._album_cover_pane: bool = bool(self.settings.get("cover_pane", True))
+        self._preview_next: bool = bool(self.settings.get("playback_tab_preview_next", False))
         self._album_cover_item_key: str = ""   # "a:{album_id}" or "t:{track_id}"
         self._album_cover_path: Optional[str] = None
         self._album_cover_loading: bool = False
@@ -721,6 +722,7 @@ class App:
             "autoplay": AUTOPLAY_NAMES[self.autoplay], "initial_tab": self.tab,
             "tab_align": self.tab_align,
             "include_singles_and_eps_in_artist_tab": self._show_singles_eps,
+            "playback_tab_preview_next": self._preview_next,
             "remember_last_input": bool(self.settings.get("remember_last_input", False)),
             "tsv_max_col_width": int(self.settings.get("tsv_max_col_width", 32) or 32),
             "autoplay_n": self.autoplay_n,
@@ -5355,6 +5357,8 @@ class App:
                 parts.append(f"pq: {len(self.priority_queue)}")
             if self._show_singles_eps:
                 parts.append("singles/EPs: on")
+            if self._preview_next:
+                parts.append("preview: yes")
             # Show buffer size when autoplay is active
             with self._autoplay_lock:
                 buf_n = len(self._autoplay_buffer)
@@ -5467,6 +5471,7 @@ class App:
             "\x01 VIEW",
             " q         mini-queue overlay",
             " C         side cover pane",
+            " N         preview next track cover when entering playback tab",
             " Tab       move cursor between main view and mini-queue overlay",
             " z         jump to playing track in the mini-queue",
             " ^\u2190/^\u2192/1-9 Navigate main tabs and sub-tabs",
@@ -5487,6 +5492,7 @@ class App:
             " S         shuffle (off, on)",
             " F         file quality",
             " #         show/hide singles and EPs in artist tab",
+            " N         preview next track cover (requires miniqueue + cover pane)",
             "",
             "\x01 AUTOPLAY MODES",
             " off:         no automatic queue extension",
@@ -5514,6 +5520,8 @@ class App:
             " cover_pane: show side cover pane on startup (default: true, toggle with C)",
             " playback_tab_layout: default layout when entering tab 0",
             "   values: \"lyrics\" (default), \"miniqueue\", \"miniqueue_cover\"",
+            " playback_tab_preview_next: move queue cursor to next track on entering tab 0 (toggle with N)",
+            "   (requires miniqueue + cover pane; default: false)",
             "",
             " Download file structure:",
             " download_dir (Linux default: /tmp/tuifi/)",
@@ -5835,6 +5843,7 @@ class App:
         self.toast(f"Liked: {LIKED_FILTER_NAMES[f]}")
 
     def switch_tab(self, t: int, refresh: bool = True) -> None:
+        _entering = (t != self.tab)
         # save current tab position before switching
         self._tab_positions[self.tab] = (self.left_idx, self.left_scroll)
         if t != self.tab:
@@ -5903,6 +5912,15 @@ class App:
             self.fetch_cover_async(self.current_track)
             if self.queue_overlay:
                 self.jump_to_playing_in_queue()
+                if self._album_cover_pane and self._preview_next:
+                    if self.priority_queue:
+                        _nxt = self.priority_queue[0]
+                    else:
+                        _nxt = self.queue_play_idx + 1
+                        if _nxt >= len(self.queue_items) and self.repeat_mode == 1:
+                            _nxt = 0
+                    if 0 <= _nxt < len(self.queue_items):
+                        self.queue_cursor = _nxt
 
         self._full_redraw()
 
@@ -6578,6 +6596,22 @@ class App:
                     # Only erase the rendered image; keep cached paths/tmpdir intact.
                     self._erase_album_cover_terminal()
                 self._full_redraw()
+                continue
+            if ch == ord("N"):
+                self._preview_next = not self._preview_next
+                self.settings["playback_tab_preview_next"] = self._preview_next
+                self.toast(f"Preview next: {'on' if self._preview_next else 'off'}")
+                self._persist_settings()
+                if self._preview_next and self.tab == TAB_PLAYBACK and self.queue_overlay and self._album_cover_pane:
+                    if self.priority_queue:
+                        _nxt = self.priority_queue[0]
+                    else:
+                        _nxt = self.queue_play_idx + 1
+                        if _nxt >= len(self.queue_items) and self.repeat_mode == 1:
+                            _nxt = 0
+                    if 0 <= _nxt < len(self.queue_items):
+                        self.queue_cursor = _nxt
+                    self._full_redraw()
                 continue
 
             if ch == ord("#"):

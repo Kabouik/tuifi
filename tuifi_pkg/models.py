@@ -186,6 +186,7 @@ class Album:
     year: str
     track_id: Optional[int] = None
     cover: Optional[str] = None  # TIDAL cover UUID (e.g. "abc-def-…") or full URL
+    type: Optional[str] = None   # e.g. "ALBUM", "SINGLE", "EP" as returned by the API
 
 
 @dataclass

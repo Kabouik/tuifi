@@ -204,7 +204,6 @@ class App:
         self._mix_tab_has_content: bool = False
         self._artist_tab_has_content: bool = False
         self._album_tab_has_content: bool = False
-        self._fetch_tracks_status: str = ""
         self._recommended_pending_ctx: Optional[Track] = None
         self._mix_pending_ctx = None  # Track | Album | Artist
         self._artist_pending_ctx: Optional[Track] = None
@@ -3883,7 +3882,6 @@ class App:
             self._last_artist_fetch_track = ctx
             return
         self._last_artist_fetch_track = ctx
-        self._fetch_tracks_status = ""
         self.artist_albums, self.artist_tracks = [], []
         self.artist_ctx = None
         self.artist_picture = None
@@ -3958,7 +3956,7 @@ class App:
                     self._full_redraw()
                 else:
                     # Publish albums in small batches and kick off cover downloads.
-                    # Flat tracks shown first, then per-album fetching enriches the list.
+                    # Tracks are already populated so the first redraw shows everything.
                     _commit_tracks()
                     BATCH = 8
                     for batch_start in range(0, len(albums), BATCH):
@@ -3967,27 +3965,6 @@ class App:
                         self.artist_albums = albums[:batch_start + len(batch)]
                         self._full_redraw()
                         self._prefetch_album_covers_async(batch, int(aid))
-
-                    # Progressive per-album track enrichment
-                    self._fetch_tracks_status = "Fetching tracks…"
-                    self._full_redraw()
-                    seen_ids: Set[int] = {t.id for t in raw_tracks}
-                    for alb in albums:
-                        if self._loading_key != key:
-                            self._fetch_tracks_status = ""
-                            return
-                        if not alb.id:
-                            continue
-                        try:
-                            alb_tracks = self._fetch_album_tracks_by_album_id(alb.id)
-                            new_tracks = [t for t in alb_tracks if t.id not in seen_ids]
-                            if new_tracks:
-                                seen_ids.update(t.id for t in new_tracks)
-                                raw_tracks.extend(new_tracks)
-                                _commit_tracks()
-                        except Exception:
-                            pass
-                    self._fetch_tracks_status = ""
 
             if not raw_tracks and not albums:
                 payload2 = self.client.search_tracks(ctx.artist, limit=300)
@@ -4004,7 +3981,6 @@ class App:
             if aid:
                 self.artist_ctx = (int(aid), ctx.artist)
             _commit_tracks()
-            self._fetch_tracks_status = ""
             if aid:
                 self._artist_cache[int(aid)] = (self.artist_albums, self.artist_tracks, self.artist_ctx, self.artist_picture)
             self._artist_tab_has_content = True
@@ -5421,8 +5397,6 @@ class App:
             right = "DLERR"
         elif now < self.toast_until and self.toast_msg:
             right = self.toast_msg
-        elif self._fetch_tracks_status:
-            right = self._fetch_tracks_status
         if right:
             right = _truncate_to_display_width(right, max(0, w - 2))
             tpos = max(0, col_limit - _str_display_width(right))

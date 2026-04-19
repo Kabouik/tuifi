@@ -5206,11 +5206,13 @@ class App:
                         # Segments: main (blue), purple prefix (purple), blue suffix (blue)
                         _main = f"{_title}{ys}"
                         if _is_si_ep:
-                            _seg_purple = f" [{'ep' if it.type == 'EP' else 'si'} "
-                            _seg_blue   = f"{it.n_tracks}]" if it.n_tracks is not None else "]"
+                            _seg_blue1  = " ["
+                            _seg_purple = f"{'ep' if it.type == 'EP' else 'si'}"
+                            _seg_blue2  = f", {it.n_tracks} t]" if it.n_tracks is not None else "]"
                         else:
+                            _seg_blue1  = ""
                             _seg_purple = ""
-                            _seg_blue   = f" [{it.n_tracks}]" if it.n_tracks is not None else ""
+                            _seg_blue2  = f" [{it.n_tracks} t]" if it.n_tracks is not None else ""
                         _pos = 0
                         def _seg(s, attr):
                             nonlocal _pos
@@ -5219,8 +5221,9 @@ class App:
                             self.stdscr.addstr(yy, px + _pos, s[:avail], base_attr | attr)
                             _pos += min(len(s), avail)
                         _seg(_main, self.C(8))
+                        _seg(_seg_blue1, self.C(8))
                         _seg(_seg_purple, self.C(5))
-                        _seg(_seg_blue, self.C(8))
+                        _seg(_seg_blue2, self.C(8))
                         if _pos < pw:
                             self.stdscr.addstr(yy, px + _pos, " " * (pw - _pos), base_attr)
                     continue

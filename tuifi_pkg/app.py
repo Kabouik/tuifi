@@ -931,7 +931,9 @@ class App:
             if isinstance(cover, str):
                 cover = cover.strip() or None
             alb_type = str(obj.get("type") or "").upper() or None
-            return Album(id=aid, title=title, artist=artist, year=album_year_from_obj(obj), cover=cover, type=alb_type)
+            n_tracks_raw = obj.get("numberOfTracks")
+            n_tracks = int(n_tracks_raw) if n_tracks_raw is not None else None
+            return Album(id=aid, title=title, artist=artist, year=album_year_from_obj(obj), cover=cover, type=alb_type, n_tracks=n_tracks)
         except Exception:
             return None
 
@@ -1038,7 +1040,7 @@ class App:
                 year_norm(a.year),
             )
             if k not in best:
-                best[k] = Album(id=a.id, title=a.title, artist=a.artist, year=a.year, track_id=a.track_id, cover=a.cover, type=a.type)
+                best[k] = Album(id=a.id, title=a.title, artist=a.artist, year=a.year, track_id=a.track_id, cover=a.cover, type=a.type, n_tracks=a.n_tracks)
                 continue
             cur = best[k]
             # Prefer the lowest non-zero id (tends to be the primary/canonical release)
@@ -1052,6 +1054,8 @@ class App:
                 cur.cover = a.cover
             if not cur.type and a.type:
                 cur.type = a.type
+            if cur.n_tracks is None and a.n_tracks is not None:
+                cur.n_tracks = a.n_tracks
         out = list(best.values())
         out.sort(key=lambda a: (-(int(a.year) if year_norm(a.year) != "????" else 0), a.title.lower()))
         return out
@@ -5158,6 +5162,7 @@ class App:
                 if isinstance(it, Album):
                     yv = year_norm(it.year)
                     ys = f", {yv}" if (self.show_track_year and yv != "????") else ""
+                    _tc = f" ({it.n_tracks})" if it.n_tracks is not None else ""
                     liked_alb = it.id in self.liked_album_ids
                     base_attr = curses.A_REVERSE if selected else 0
                     marked = (i in self.marked_left_idx)
@@ -5174,17 +5179,15 @@ class App:
                         px += 2; pw -= 2
                     if pw > 0:
                         if self._show_singles_eps and it.type in ("SINGLE", "EP"):
-                            _type_label = " (ep)" if it.type == "EP" else " (si)"
+                            _type_label = " [ep]" if it.type == "EP" else " [si]"
                             _clean_title = re.sub(r'\s*-\s*(single|ep)\s*$', '', it.title, flags=re.IGNORECASE)
                             _title_part = _clean_title[:pw]
                             _label_part = _type_label
-                            _date_part = ys
-                            _full = f"{_title_part}{_label_part}{_date_part}"
+                            _date_part = ys + _tc
                             _title_w = min(len(_title_part), pw)
                             self.stdscr.addstr(yy, px, _title_part[:pw].ljust(0)[:pw], base_attr | self.C(8))
                             if _title_w < pw:
                                 _rem = pw - _title_w
-                                _label_trunc = (_label_part + _date_part)[:_rem]
                                 _label_only = _label_part[:_rem]
                                 self.stdscr.addstr(yy, px + _title_w, _label_only, base_attr | self.C(5))
                                 _after_label = _title_w + len(_label_only)
@@ -5192,7 +5195,7 @@ class App:
                                     _dpart = _date_part[:pw - _after_label].ljust(pw - _after_label)[:pw - _after_label]
                                     self.stdscr.addstr(yy, px + _after_label, _dpart, base_attr | self.C(8))
                         else:
-                            self.stdscr.addstr(yy, px, f"{it.title}{ys}"[:pw].ljust(pw)[:pw],
+                            self.stdscr.addstr(yy, px, f"{it.title}{ys}{_tc}"[:pw].ljust(pw)[:pw],
                                                base_attr | self.C(8))
                     continue
             if typ == "album_mixed":

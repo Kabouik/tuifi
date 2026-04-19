@@ -1205,14 +1205,14 @@ class App:
                 items.append(("sep", alb_label))
                 items.extend(self.artist_albums)
             if self.artist_top_tracks:
-                items.append(("sep", f"-- Top tracks ({len(self.artist_top_tracks)})"))
+                items.append(("sep", f"Top tracks ({len(self.artist_top_tracks)})"))
                 items.extend(self.artist_top_tracks)
                 if self.artist_tracks:
-                    all_lbl = f"-- All tracks ({len(self.artist_tracks)}{'…' if self._artist_all_tracks_loading else ''})"
+                    all_lbl = f"All tracks ({len(self.artist_tracks)}{'…' if self._artist_all_tracks_loading else ''})"
                     items.append(("sep", all_lbl))
                     items.extend(self.artist_tracks)
                 elif self._artist_all_tracks_loading:
-                    items.append(("sep", "-- All tracks (…)"))
+                    items.append(("sep", "All tracks (…)"))
             elif self.artist_tracks:
                 trk_label = f"Tracks ({len(self.artist_tracks)}" + ("…)" if self._loading else ")")
                 items.append(("sep", trk_label))
@@ -3950,13 +3950,26 @@ class App:
                 else:
                     self._full_redraw()
 
-                # Phase 2: slow — full track aggregation
+                # Phase 2: per-album fetching for complete track list
                 if self._loading_key != key: return
-                payload2 = self.client.artist(int(aid))
-                if self._loading_key != key: return
-                all_tracks = self._dedupe_tracks(self._scan_parse_tracks(payload2))
-                all_tracks.sort(key=_track_sort_key)
-                self.artist_tracks = all_tracks
+                seen_ids: Set[int] = {t.id for t in self.artist_top_tracks}
+                all_tracks: List[Track] = []
+                for alb in albums:
+                    if self._loading_key != key:
+                        self._artist_all_tracks_loading = False
+                        self._artist_status = ""
+                        return
+                    if not alb.id:
+                        continue
+                    try:
+                        for t in self._fetch_album_tracks_by_album_id(alb.id):
+                            if t.id not in seen_ids:
+                                seen_ids.add(t.id)
+                                all_tracks.append(t)
+                        self.artist_tracks = sorted(all_tracks, key=_track_sort_key)
+                        self._full_redraw()
+                    except Exception:
+                        pass
                 self._artist_all_tracks_loading = False
                 self._artist_status = ""
                 self._full_redraw()
@@ -3987,7 +4000,14 @@ class App:
                 )
             self._full_redraw()
             self._artist_tab_has_content = True
-            self.toast("Artist")
+            _n_top = len(self.artist_top_tracks)
+            _n_all = len(self.artist_tracks)
+            if _n_all:
+                self.toast(f"Artist — {_n_top} top, {_n_all} total tracks")
+            elif _n_top:
+                self.toast(f"Artist — {_n_top} top tracks")
+            else:
+                self.toast("Artist")
 
         self._bg(worker, loading_key=key, on_error="Error", record_error=True)
 
@@ -5182,16 +5202,20 @@ class App:
                     if pw > 0:
                         _is_si_ep = self._show_singles_eps and it.type in ("SINGLE", "EP")
                         _title = re.sub(r'\s*-\s*(single|ep)\s*$', '', it.title, flags=re.IGNORECASE) if _is_si_ep else it.title
-                        # Segments: main (blue), purple prefix (purple), blue suffix (blue)
+                        # Segments: main title (blue), "[" (blue), type (purple), sep (blue), count (white)
                         _main = f"{_title}{ys}"
                         if _is_si_ep:
-                            _seg_blue1  = " ["
+                            _seg_open   = " ["
                             _seg_purple = f"{'ep' if it.type == 'EP' else 'si'}"
-                            _seg_blue2  = f", {it.n_tracks} t]" if it.n_tracks is not None else "]"
-                        else:
-                            _seg_blue1  = ""
+                            _seg_sep    = ", " if it.n_tracks is not None else ""
+                            _seg_count  = f"{it.n_tracks} t]" if it.n_tracks is not None else "]"
+                        elif it.n_tracks is not None:
+                            _seg_open   = " ["
                             _seg_purple = ""
-                            _seg_blue2  = f" [{it.n_tracks} t]" if it.n_tracks is not None else ""
+                            _seg_sep    = ""
+                            _seg_count  = f"{it.n_tracks} t]"
+                        else:
+                            _seg_open = _seg_purple = _seg_sep = _seg_count = ""
                         _pos = 0
                         def _seg(s, attr):
                             nonlocal _pos
@@ -5200,9 +5224,10 @@ class App:
                             self.stdscr.addstr(yy, px + _pos, s[:avail], base_attr | attr)
                             _pos += min(len(s), avail)
                         _seg(_main, self.C(8))
-                        _seg(_seg_blue1, self.C(8))
+                        _seg(_seg_open, self.C(8))
                         _seg(_seg_purple, self.C(5))
-                        _seg(_seg_blue2, self.C(8))
+                        _seg(_seg_sep, self.C(8))
+                        _seg(_seg_count, self.C(13))
                         if _pos < pw:
                             self.stdscr.addstr(yy, px + _pos, " " * (pw - _pos), base_attr)
                     continue
@@ -5237,8 +5262,42 @@ class App:
                     yv = year_norm(it.year)
                     ys = f", {yv}" if (self.show_track_year and yv != "????") else ""
                     marked = (i in self.marked_left_idx)
-                    self._draw_liked_row(yy, x, w, i, selected, marked,
-                                         f"{it.artist} — {it.title}{ys}", self.C(8))
+                    _alb_type = str(it.type or "").upper()
+                    _is_si_ep_l = _alb_type in ("SINGLE", "EP")
+                    base_attr = curses.A_REVERSE if selected else 0
+                    offs = self._draw_line_no(yy, x, i + 1, w) if self.show_numbers else 0
+                    px2 = x + offs; pw2 = max(0, w - offs - 1)
+                    pref = "+  " if marked else "   "
+                    if pw2 > 0:
+                        self.stdscr.addstr(yy, px2, pref[:pw2], base_attr | (self.C(15) if marked else 0))
+                        px2 += 3; pw2 -= 3
+                    if pw2 > 0:
+                        self.stdscr.addstr(yy, px2, "♥ "[:pw2], base_attr | self.C(14))
+                        px2 += 2; pw2 -= 2
+                    if pw2 > 0:
+                        _lmain = f"{it.artist} — {it.title}{ys}"
+                        if _is_si_ep_l:
+                            _lo = " ["; _lp = "ep" if _alb_type == "EP" else "si"
+                            _ls = ", " if it.n_tracks is not None else ""
+                            _lc = f"{it.n_tracks} t]" if it.n_tracks is not None else "]"
+                        elif it.n_tracks is not None:
+                            _lo = " ["; _lp = ""; _ls = ""; _lc = f"{it.n_tracks} t]"
+                        else:
+                            _lo = _lp = _ls = _lc = ""
+                        _lpos = 0
+                        def _lseg(s, attr):
+                            nonlocal _lpos
+                            if _lpos >= pw2 or not s: return
+                            av = pw2 - _lpos
+                            self.stdscr.addstr(yy, px2 + _lpos, s[:av], base_attr | attr)
+                            _lpos += min(len(s), av)
+                        _lseg(_lmain, self.C(8))
+                        _lseg(_lo, self.C(8))
+                        _lseg(_lp, self.C(5))
+                        _lseg(_ls, self.C(8))
+                        _lseg(_lc, self.C(13))
+                        if _lpos < pw2:
+                            self.stdscr.addstr(yy, px2 + _lpos, " " * (pw2 - _lpos), base_attr)
                     continue
                 if isinstance(it, Artist):
                     marked = (i in self.marked_left_idx)
@@ -5491,7 +5550,8 @@ class App:
             " ;/Bkspc   go back to last tab without refreshing",
             " g/G       go to top/bottom",
             " j/k/\u2193/\u2191   go down/up",
-            " ^\u2193/^\u2191     jump to adjacent sub-section (tabs 5 and 7) or to next artist/album in list",
+            " ^\u2193/^\u2191     jump to next/prev section (sep-based in tabs 5 and 7)",
+            " {/}       jump to prev/next album group within a track list",
             " c         color/bw",
             " w/y/d/n   album/year/duration/line number fields",
             " T         status bar",
@@ -6708,6 +6768,24 @@ class App:
                     self._goto_liked_filter(nxt_f)
                 else:
                     self.switch_tab(nxt_tab, refresh=True)
+                    self._need_redraw = True
+                continue
+
+            # {/}: jump between album groups within a track list
+            if ch in (ord("{"), ord("}")):
+                _dir2 = 1 if ch == ord("}") else -1
+                if self._queue_context():
+                    _q = self.queue_items
+                    _c = self.queue_cursor
+                    self.queue_cursor = clamp(
+                        _alb_down(_q, _c) if _dir2 > 0 else _alb_up(_q, _c),
+                        0, max(0, len(_q) - 1))
+                    self._need_redraw = True
+                else:
+                    _typ2, _items2 = self._left_items()
+                    _c2 = self.left_idx
+                    _n2 = _alb_down(_items2, _c2) if _dir2 > 0 else _alb_up(_items2, _c2)
+                    self.left_idx = clamp(_n2, 0, max(0, len(_items2) - 1))
                     self._need_redraw = True
                 continue
 

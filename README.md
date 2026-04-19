@@ -51,7 +51,7 @@ While [HiFi API instances with unrestricted access](https://github.com/monochrom
 
 - Contextual menus on tracks, albums & artists
 - Keyboard-oriented control
-- Customizable (colors, optional TSV mode, show/hide metadata fields, file hierarchy for downloads, autoplay buffer, autoresume playback on launch, _etc._)
+- Customizable (colors, optional TSV mode, show/hide metadata fields, file hierarchy for downloads, autoextend buffer, autoresume playback on launch, _etc._)
 
 # Usage
 
@@ -138,7 +138,7 @@ Configuration file directory per platform:
 </tbody>
 </table>
 
-`settings.jsonc` can be edited to change UI options, colours, metadata field widths, autoplay buffer size, download destinations and naming conventions, TIDAL HiFi API URL, _etc._ Check the file for options not documented in this README.
+`settings.jsonc` can be edited to change UI options, colours, metadata field widths, autoextend buffer size, download destinations and naming conventions, TIDAL HiFi API URL, _etc._ Check the file for options not documented in this README.
 
 Other state files stored in the same directory:
 

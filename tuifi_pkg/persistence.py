@@ -254,9 +254,9 @@ def load_settings() -> Dict[str, Any]:
     s.setdefault("mute", False)
     s.setdefault("quality", QUALITY_ORDER[0])   # e.g. "lossless", "high", "low"
 
-    # -- Playback / autoplay --
-    s.setdefault("autoplay", AUTOPLAY_OFF)      # 0=off 1=mix 2=recommended
-    s.setdefault("autoplay_n", 3)               # tracks added per autoplay refill
+    # -- Playback / autoextend --
+    s.setdefault("autoextend", AUTOPLAY_OFF)    # 0=off 1=mix 2=recommended
+    s.setdefault("autoextend_n", 3)             # tracks added per autoextend refill
     s.setdefault("auto_resume_playback", True)  # resume last position on startup
 
     # -- UI chrome --
@@ -329,7 +329,7 @@ def save_settings(s: Dict[str, Any]) -> None:
     # Inline hint shown after the value for settings with discrete options.
     _hints: Dict[str, str] = {
         "quality":             "HI_RES_LOSSLESS | LOSSLESS | HIGH | LOW",
-        "autoplay":            "0=off  1=mix  2=recommended",
+        "autoextend":          "0=off  1=mix  2=recommended",
         "playback_tab_layout": "lyrics | miniqueue | miniqueue_cover",
         "download_structure":  "placeholders: {artist} {album} {year}",
         "download_filename":   "placeholders: {track:02d} {artist} {title} {album} {year}",
@@ -392,7 +392,7 @@ def save_settings(s: Dict[str, Any]) -> None:
     _section("── IN-APP TOGGLES  (changed via UI keys, edit to set defaults) " + "─" * 6)
     _keys(
         "volume", "mute", "quality",
-        "autoplay", "autoplay_n",
+        "autoextend", "autoextend_n",
         "color_mode", "queue_overlay",
         "show_toggles", "show_track_album", "show_track_year",
         "show_track_duration", "show_numbers", "tab_align",

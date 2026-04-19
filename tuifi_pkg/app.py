@@ -139,12 +139,14 @@ class App:
         q0 = str(self.settings.get("quality") or QUALITY_ORDER[0])
         self.quality_idx = QUALITY_ORDER.index(q0) if q0 in QUALITY_ORDER else 0
 
-        # autoplay: 0=off 1=mix 2=recommended  (migrate old bool True→recommended)
-        raw_ap = self.settings.get("autoplay", AUTOPLAY_OFF)
+        # autoextend: 0=off 1=mix 2=recommended  (migrate old "autoplay" key and bool True→recommended)
+        raw_ap = self.settings.get("autoextend", self.settings.get("autoplay", AUTOPLAY_OFF))
         if isinstance(raw_ap, str):
             raw_ap = AUTOPLAY_NAMES.index(raw_ap) if raw_ap in AUTOPLAY_NAMES else AUTOPLAY_OFF
         self.autoplay: int = clamp(int(AUTOPLAY_RECOMMENDED if raw_ap is True else raw_ap), 0, 2)
-        self.autoplay_n: int = max(1, int(self.settings.get("autoplay_n", 3) or 3))
+        self.autoplay_n: int = max(1, int(self.settings.get("autoextend_n", self.settings.get("autoplay_n", 3)) or 3))
+        self.settings.pop("autoplay", None)
+        self.settings.pop("autoplay_n", None)
 
         # ---- autoplay state ----
         # Ring buffer of recently played tracks (up to 10), newest last
@@ -719,13 +721,13 @@ class App:
             "show_track_album": self.show_track_album, "show_track_year": self.show_track_year,
             "show_track_duration": self.show_track_duration,
             "quality": QUALITY_ORDER[self.quality_idx],
-            "autoplay": AUTOPLAY_NAMES[self.autoplay], "initial_tab": self.tab,
+            "autoextend": AUTOPLAY_NAMES[self.autoplay], "initial_tab": self.tab,
             "tab_align": self.tab_align,
             "include_singles_and_eps_in_artist_tab": self._show_singles_eps,
             "playback_tab_preview_next": self._preview_next,
             "remember_last_input": bool(self.settings.get("remember_last_input", False)),
             "tsv_max_col_width": int(self.settings.get("tsv_max_col_width", 32) or 32),
-            "autoplay_n": self.autoplay_n,
+            "autoextend_n": self.autoplay_n,
             "history_max": int(self.settings.get("history_max", 0) or 0),
             "auto_resume_playback": bool(self.settings.get("auto_resume_playback", False)),
             "playback_tab_layout": str(self.settings.get("playback_tab_layout", "lyrics")),
@@ -5345,26 +5347,22 @@ class App:
             if self.shuffle_on:
                 parts.append("shuffle")
             if self.autoplay != AUTOPLAY_OFF:
-                parts.append(f"autoplay: {AUTOPLAY_NAMES[self.autoplay]}")
-            parts.append(QUALITY_ORDER[self.quality_idx].lower())
+                with self._autoplay_lock:
+                    buf_n = len(self._autoplay_buffer)
+                    fetching = self._autoplay_prefetch_running
+                _buf_s = "…" if fetching else str(buf_n)
+                parts.append(f"autoextend: {AUTOPLAY_NAMES[self.autoplay]}+{_buf_s}")
+            parts.append(f"qual: {QUALITY_ORDER[self.quality_idx].lower()}")
             cur_vol = int(vo) if vo is not None else self.desired_volume
             parts.append(f"vol: {cur_vol}")
             if mu if mu is not None else self.desired_mute:
                 parts.append("muted")
-            if self.tab_align:
-                parts.append("tsv")
             if self.priority_queue:
                 parts.append(f"pq: {len(self.priority_queue)}")
             if self._show_singles_eps:
                 parts.append("singles/EPs: on")
             if self._preview_next:
                 parts.append("preview: yes")
-            # Show buffer size when autoplay is active
-            with self._autoplay_lock:
-                buf_n = len(self._autoplay_buffer)
-                fetching = self._autoplay_prefetch_running
-            if self.autoplay != AUTOPLAY_OFF and (buf_n > 0 or fetching):
-                parts.append(f"buffer: {'…' if fetching else buf_n}")
             line1 = " ? help  |  " + "   ".join(parts)
             self.stdscr.addstr(y, x, line1[:max(0, w - 1)].ljust(max(0, w - 1)), curses.A_DIM if self.color_mode else 0)
         else:
@@ -5487,14 +5485,14 @@ class App:
             " \\         toggle TSV mode",
             "",
             "\x01 TOGGLES",
-            " A         autoplay mode (off, mix, recommended)",
+            " A         autoextend mode (off, mix, recommended)",
             " R         repeat mode (off, all, one)",
             " S         shuffle (off, on)",
             " F         file quality",
             " #         show/hide singles and EPs in artist tab",
             " N         preview next track cover (requires miniqueue + cover pane)",
             "",
-            "\x01 AUTOPLAY MODES",
+            "\x01 AUTOEXTEND MODES",
             " off:         no automatic queue extension",
             " mix:         refill queue from track mix",
             " recommended: refill queue from track recommendations",
@@ -5506,8 +5504,8 @@ class App:
             f" api: API base URL (current: {self.settings.get('api', '') or 'not set'})",
             " if not set, the first invocation of tuifi with the --api runtime flag will set it",
             "",
-            " Autoplay:",
-            " autoplay_n:  number of tracks to add per autoplay refill (default: 3)",
+            " Autoextend:",
+            " autoextend_n:  number of tracks to add per autoextend refill (default: 3)",
             "",
             " History tab:",
             " history_max: max history entries to keep (default: 0 = unlimited)",
@@ -6114,6 +6112,15 @@ class App:
                 if tp is None and du is None:
                     self.current_track = None
                     self.next_track()
+                    if self._preview_next and self.tab == TAB_PLAYBACK and self.queue_overlay and self._album_cover_pane:
+                        if self.priority_queue:
+                            _nxt = self.priority_queue[0]
+                        else:
+                            _nxt = self.queue_play_idx + 1
+                            if _nxt >= len(self.queue_items) and self.repeat_mode == 1:
+                                _nxt = 0
+                        if 0 <= _nxt < len(self.queue_items):
+                            self.queue_cursor = _nxt
                     self._full_redraw()
 
             if now - last_persist > 2.0:
@@ -6133,6 +6140,15 @@ class App:
                 self._skip_delta = 0
                 if n_q > 0:
                     self.play_queue_index(target)
+                    if self._preview_next and self.tab == TAB_PLAYBACK and self.queue_overlay and self._album_cover_pane:
+                        if self.priority_queue:
+                            _nxt = self.priority_queue[0]
+                        else:
+                            _nxt = self.queue_play_idx + 1
+                            if _nxt >= n_q and self.repeat_mode == 1:
+                                _nxt = 0
+                        if 0 <= _nxt < n_q:
+                            self.queue_cursor = _nxt
 
             self.draw()
 
@@ -6592,7 +6608,7 @@ class App:
 
             if ch == ord("A"):
                 self.autoplay = (self.autoplay + 1) % 3
-                self.toast(f"Autoplay: {AUTOPLAY_NAMES[self.autoplay]}")
+                self.toast(f"Autoextend: {AUTOPLAY_NAMES[self.autoplay]}")
                 # Reset buffer/seed when mode changes
                 with self._autoplay_lock:
                     self._autoplay_buffer = []

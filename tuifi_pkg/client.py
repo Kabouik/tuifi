@@ -76,8 +76,11 @@ class HiFiClient:
     def lyrics(self, track_id: int) -> Dict[str, Any]:
         return http_get_json(self._u("/lyrics/", {"id": int(track_id)}))
 
-    def album(self, album_id: int, limit: int = 500) -> Dict[str, Any]:
-        return http_get_json(self._u("/album/", {"id": int(album_id), "limit": int(limit)}))
+    def album(self, album_id: int, limit: Optional[int] = None) -> Dict[str, Any]:
+        q: Dict[str, Any] = {"id": int(album_id)}
+        if limit is not None:
+            q["limit"] = int(limit)
+        return http_get_json(self._u("/album/", q))
 
     def artist(self, artist_id: int, skip_tracks: bool = False) -> Dict[str, Any]:
         try:

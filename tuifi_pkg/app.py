@@ -5555,12 +5555,12 @@ class App:
             " P         resume playback from last known position",
             "",
             "\x01 ACTIONS",
-            " :/!       contextual actions menu",
+            " :/!/RMB   contextual actions menu",
             " e/E       enqueue to end/next",
             " b         add selected to priority queue (play next)",
             " B         clear priority flags",
             " 4         show mix based on selected track, album, or artist",
-            " 0         show album cover art (requires chafa or ueberzugpp)",
+            " 0         show album cover art (requires chafa, ueberzugpp, or kitty)",
             " 5/6       show artist/album content relative to selected",
             " s         find similar artists",
             " D         download (selected, marked, album, all tracks of a playlist)",
@@ -5578,15 +5578,15 @@ class App:
             "",
             "\x01 GENERAL",
             " /         search TIDAL",
-            " f         filter term in current view (in playback tab: filter lyrics)",
-            " (/)       prev/next filter hit (in playback tab: prev/next lyrics match)",
-            " h/?       help (also: right-click on empty area)",
+            " f         filter term in current view",
+            " (/)       prev/next filter hit",
+            " h/?       help (also: RMB on empty area)",
             " Esc       close prompts",
             " Q         quit",
             "",
             "\x01 VIEW",
             " q         miniqueue overlay",
-            " C         side minicover pane",
+            " C         side minicover overlay",
             " N         preview next track cover when entering playback tab",
             " Tab       move cursor between main view and miniqueue overlay",
             " z         jump to playing track in the miniqueue",
@@ -5598,8 +5598,8 @@ class App:
             " j/k/\u2193/\u2191   go down/up",
             " ^\u2193/^\u2191     jump to next/prev section (sep-based in tabs 5 and 7)",
             " Alt+\u2193/\u2191  jump to next/prev album group within a track list",
-            " c         color/bw",
-            " w/y/d/n/t album/year/duration/line number/album track count fields",
+            " C         color/bw",
+            " w/y/d/N/t album/year/duration/line number/album track count fields",
             " T         status bar",
             " \\         toggle TSV mode",
             "",
@@ -5610,7 +5610,7 @@ class App:
             " F         file quality",
             " #         show/hide singles and EPs in artist tab",
             " t         show/hide album track count",
-            " N         preview next track cover in playback tab (requires miniqueue + minicover pane)",
+            " n         preview next track cover in playback tab (requires miniqueue + minicover)",
             "",
             "\x01 AUTOEXTEND MODES",
             " off:         no automatic queue extension",
@@ -6239,7 +6239,7 @@ class App:
             ord("F"): lambda: (setattr(self, "quality_idx", (self.quality_idx + 1) % len(QUALITY_ORDER)),
                                self.toast(f"Quality: {QUALITY_ORDER[self.quality_idx]}")),
             ord("T"): lambda: _tog("show_toggles", "Toggles: on", "Toggles: off"),
-            ord("c"): lambda: _tog("color_mode", "Color", "B/W"),
+            ord("C"): lambda: _tog("color_mode", "Color", "B/W"),
             ord("w"): lambda: _tog("show_track_album", "Album field: on", "Album field: off"),
             ord("y"): lambda: _tog("show_track_year", "Year field: on", "Year field: off"),
             ord("<"): lambda: _skip(-1),
@@ -6252,7 +6252,7 @@ class App:
             ord(")"): lambda: self.lyrics_filter_next(1) if self.tab == TAB_PLAYBACK and self._cover_lyrics and not self.queue_overlay else self.filter_next(+1),
             ord("p"): lambda: self.play_queue_index(self.queue_play_idx) if not self.mp.alive() and self.queue_items else self.toggle_pause(),
             ord(";"): lambda: self.switch_tab(self._prev_tab, refresh=False) if self._prev_tab != self.tab else None,
-            ord("n"): lambda: self.playlists_create() if self.tab == TAB_PLAYLISTS else _tog("show_line_numbers", "Line numbers: on", "Line numbers: off"),
+            ord("N"): lambda: self.playlists_create() if self.tab == TAB_PLAYLISTS else _tog("show_line_numbers", "Line numbers: on", "Line numbers: off"),
             ord("t"): lambda: _tog("show_album_track_count", "Album track count: on", "Album track count: off"),
             ord("d"): lambda: self.playlists_delete_current() if self.tab == TAB_PLAYLISTS else _tog("show_track_duration", "Duration field: on", "Duration field: off"),
         }
@@ -6778,7 +6778,7 @@ class App:
                 if self.autoplay != AUTOPLAY_OFF:
                     self._autoplay_trigger_prefetch()
                 continue
-            if ch == ord("C"):
+            if ch == ord("c"):
                 self._album_cover_pane = not self._album_cover_pane
                 self.settings["cover_pane"] = self._album_cover_pane
                 if not self._album_cover_pane:
@@ -6786,7 +6786,7 @@ class App:
                     self._erase_album_cover_terminal()
                 self._full_redraw()
                 continue
-            if ch == ord("N"):
+            if ch == ord("n"):
                 self._preview_next = not self._preview_next
                 self.settings["playback_tab_preview_next"] = self._preview_next
                 self.toast(f"Preview next: {'on' if self._preview_next else 'off'}")

@@ -255,7 +255,7 @@ def load_settings() -> Dict[str, Any]:
     s.setdefault("quality", QUALITY_ORDER[0])   # e.g. "lossless", "high", "low"
 
     # -- Playback / autoextend --
-    s.setdefault("autoextend", AUTOPLAY_OFF)    # 0=off 1=mix 2=recommended
+    s.setdefault("autoextend", AUTOPLAY_OFF)    # off/mix/recommended
     s.setdefault("autoextend_n", 3)             # tracks added per autoextend refill
     s.setdefault("auto_resume_playback", True)  # resume last position on startup
 
@@ -266,7 +266,8 @@ def load_settings() -> Dict[str, Any]:
     s.setdefault("show_track_album", True)
     s.setdefault("show_track_year", True)
     s.setdefault("show_track_duration", True)
-    s.setdefault("show_numbers", False)
+    s.setdefault("show_line_numbers", False)
+    s.setdefault("show_album_track_count", True)
     s.setdefault("tab_align", True)
 
     # -- History --
@@ -274,11 +275,12 @@ def load_settings() -> Dict[str, Any]:
 
     # -- Artist tab --
     s.setdefault("include_singles_and_eps_in_artist_tab", False)  # toggle with #
+    s.setdefault("max_all_tracks_number", 0)                      # 0 = unlimited
 
     # -- Miscellaneous user preferences --
     s.setdefault("remember_last_input", False)     # prefill search/filter with last query within a session
     s.setdefault("playback_tab_layout", "lyrics")  # right-pane layout: "lyrics", "cover", etc.
-    s.setdefault("cover_lyrics_color_pair", 0)     # 0 = auto
+    s.setdefault("cover_lyrics_color_pair", "default")  # color name; "default" = terminal default
 
     # -- Confirmation prompts when switching to a tab that already has content --
     # Set to true to skip the "press again to confirm" step and fetch immediately.
@@ -297,7 +299,8 @@ def load_settings() -> Dict[str, Any]:
     s.setdefault("color_album",     "blue")
     s.setdefault("color_year",      "blue")
     s.setdefault("color_duration",  "blue")
-    s.setdefault("color_numbers",   "blue")
+    s.setdefault("color_line_numbers",        "blue")
+    s.setdefault("color_album_track_count",   "white")
     s.setdefault("color_title",     "white")
     s.setdefault("color_separator", "white")
     s.setdefault("color_liked",     "white")
@@ -329,7 +332,7 @@ def save_settings(s: Dict[str, Any]) -> None:
     # Inline hint shown after the value for settings with discrete options.
     _hints: Dict[str, str] = {
         "quality":             "HI_RES_LOSSLESS | LOSSLESS | HIGH | LOW",
-        "autoextend":          "0=off  1=mix  2=recommended",
+        "autoextend":          "off | mix | recommended",
         "playback_tab_layout": "lyrics | miniqueue | miniqueue_cover",
         "download_structure":  "placeholders: {artist} {album} {year}",
         "download_filename":   "placeholders: {track:02d} {artist} {title} {album} {year}",
@@ -340,7 +343,8 @@ def save_settings(s: Dict[str, Any]) -> None:
         "tsv_max_year_width":  "0=unlimited",
         "tsv_max_duration_width": "0=unlimited",
         "history_max":         "0=unlimited",
-        "cover_lyrics_color_pair": "0=default; any curses color-pair index",
+        "max_all_tracks_number": "0=unlimited",
+        "cover_lyrics_color_pair": "color name for lyrics panel text; \"default\" = terminal default",
         "initial_tab":         "last active tab, restored on startup",
     }
 
@@ -365,7 +369,7 @@ def save_settings(s: Dict[str, Any]) -> None:
         "remember_last_input",
         "history_max",
         "playback_tab_layout",
-        "cover_lyrics_color_pair",
+        "max_all_tracks_number",
         "recommended_tab_no_confirm_refetch",
         "mix_tab_no_confirm_refetch",
         "artist_tab_no_confirm_refetch",
@@ -376,8 +380,9 @@ def save_settings(s: Dict[str, Any]) -> None:
     _keys(
         "color_playing", "color_paused", "color_error", "color_chrome",
         "color_accent", "color_artist", "color_album", "color_year",
-        "color_duration", "color_numbers", "color_title",
+        "color_duration", "color_line_numbers", "color_album_track_count", "color_title",
         "color_separator", "color_liked", "color_mark",
+        "cover_lyrics_color_pair",
     )
 
     _section("── DOWNLOADS " + "─" * 56)
@@ -395,7 +400,7 @@ def save_settings(s: Dict[str, Any]) -> None:
         "autoextend", "autoextend_n",
         "color_mode", "queue_overlay",
         "show_toggles", "show_track_album", "show_track_year",
-        "show_track_duration", "show_numbers", "tab_align",
+        "show_track_duration", "show_line_numbers", "show_album_track_count", "tab_align",
         "include_singles_and_eps_in_artist_tab",
         "playback_tab_preview_next",
         "cover_pane",

@@ -119,7 +119,8 @@ class App:
         self.color_mode = bool(self.settings.get("color_mode"))
         self.queue_overlay = bool(self.settings.get("queue_overlay"))
         self.show_toggles = bool(self.settings.get("show_toggles"))
-        self.show_numbers = bool(self.settings.get("show_numbers"))
+        self.show_line_numbers = bool(self.settings.get("show_line_numbers", False))
+        self.show_album_track_count = bool(self.settings.get("show_album_track_count", True))
         self.show_track_album = bool(self.settings.get("show_track_album", True))
         self.show_track_year = bool(self.settings.get("show_track_year", True))
         self.show_track_duration = bool(self.settings.get("show_track_duration", False))
@@ -139,7 +140,7 @@ class App:
         q0 = str(self.settings.get("quality") or QUALITY_ORDER[0])
         self.quality_idx = QUALITY_ORDER.index(q0) if q0 in QUALITY_ORDER else 0
 
-        # autoextend: 0=off 1=mix 2=recommended  (migrate old "autoplay" key and bool True→recommended)
+        # autoextend: off/mix/recommended  (migrate old "autoplay" key and bool True→recommended)
         raw_ap = self.settings.get("autoextend", self.settings.get("autoplay", AUTOPLAY_OFF))
         if isinstance(raw_ap, str):
             raw_ap = AUTOPLAY_NAMES.index(raw_ap) if raw_ap in AUTOPLAY_NAMES else AUTOPLAY_OFF
@@ -256,7 +257,7 @@ class App:
         self._mouse_long_press_pending: bool = False
         self._cover_lyrics: bool = True; self._cover_lyrics_max_scroll: int = 10_000
         self._show_singles_eps: bool = bool(self.settings.get("include_singles_and_eps_in_artist_tab", False))
-        self._album_track_limit: int = clamp(int(self.settings.get("album_track_limit", 500) or 500), 1, 500)
+        self._max_all_tracks: int = int(self.settings.get("max_all_tracks_number", 0) or 0)
         self._last_artist_fetch_track: Optional["Track"] = None
         self._artist_cache: Dict[int, Tuple[List[Any], List[Any], Tuple[int, str]]] = {}
 
@@ -659,6 +660,8 @@ class App:
             "cyan": curses.COLOR_CYAN, "white": curses.COLOR_WHITE,
         }
         s = str(name).strip().lower()
+        if not s or s == "default":
+            return -1  # terminal default foreground
         if s in mapping:
             return mapping[s]
         try:
@@ -686,15 +689,32 @@ class App:
             curses.start_color()
             curses.use_default_colors()
             s = self.settings
-            for _p, _k, _d in [
-                (1,"color_playing","green"), (2,"color_paused","yellow"), (3,"color_error","red"),
-                (4,"color_chrome","black"),  (5,"color_accent","magenta"),(6,"color_accent","magenta"),
-                (7,"color_artist","white"),  (8,"color_album","blue"),    (9,"color_duration","black"),
-                (10,"color_numbers","black"),(11,"color_title","white"),  (12,"color_year","blue"),
-                (13,"color_separator","white"),(14,"color_liked","white"),(15,"color_mark","red"),
-            ]:
-                curses.init_pair(_p, self._name_to_curses_color(s.get(_k, _d)), -1)
+            def _cp(key: str, default: str) -> int:
+                return self._name_to_curses_color(s.get(key, default))
+            curses.init_pair(1,  _cp("color_playing",  "green"),   -1)
+            curses.init_pair(2,  _cp("color_paused",   "yellow"),  -1)
+            curses.init_pair(3,  _cp("color_error",    "red"),     -1)
+            curses.init_pair(4,  _cp("color_chrome",   "black"),   -1)
+            curses.init_pair(5,  _cp("color_accent",   "magenta"), -1)
+            curses.init_pair(6,  _cp("color_accent",   "magenta"), -1)
+            curses.init_pair(7,  _cp("color_artist",   "white"),   -1)
+            curses.init_pair(8,  _cp("color_album",    "blue"),    -1)
+            curses.init_pair(9,  _cp("color_duration", "black"),   -1)
+            curses.init_pair(10, _cp("color_line_numbers", "black"), -1)
+            curses.init_pair(11, _cp("color_title",     "white"),  -1)
+            curses.init_pair(12, _cp("color_year",      "blue"),   -1)
+            curses.init_pair(13, _cp("color_separator", "white"),  -1)
+            curses.init_pair(14, _cp("color_liked",     "white"),  -1)
+            curses.init_pair(15, _cp("color_mark",      "red"),    -1)
             curses.init_pair(16, curses.COLOR_WHITE, curses.COLOR_BLACK)
+            curses.init_pair(17, _cp("color_album_track_count", "white"), -1)
+            # pair 18: cover_lyrics_color_pair — accepts color name; migrate old numeric 0 → "default"
+            _lyric_color_raw = s.get("cover_lyrics_color_pair", "default")
+            if isinstance(_lyric_color_raw, (int, float)) or (
+                    isinstance(_lyric_color_raw, str) and _lyric_color_raw.strip().lstrip("-").isdigit()):
+                _lyric_color_raw = "default"
+                s["cover_lyrics_color_pair"] = "default"
+            curses.init_pair(18, self._name_to_curses_color(_lyric_color_raw), -1)
 
     def C(self, pair: int) -> int:
         if self.color_mode and curses.has_colors():
@@ -721,7 +741,8 @@ class App:
         self.settings.update({
             "volume": self.desired_volume, "mute": self.desired_mute,
             "color_mode": self.color_mode, "queue_overlay": self.queue_overlay,
-            "show_toggles": self.show_toggles, "show_numbers": self.show_numbers,
+            "show_toggles": self.show_toggles, "show_line_numbers": self.show_line_numbers,
+            "show_album_track_count": self.show_album_track_count,
             "show_track_album": self.show_track_album, "show_track_year": self.show_track_year,
             "show_track_duration": self.show_track_duration,
             "quality": QUALITY_ORDER[self.quality_idx],
@@ -735,7 +756,7 @@ class App:
             "history_max": int(self.settings.get("history_max", 0) or 0),
             "auto_resume_playback": bool(self.settings.get("auto_resume_playback", False)),
             "playback_tab_layout": str(self.settings.get("playback_tab_layout", "lyrics")),
-            "cover_lyrics_color_pair": int(self.settings.get("cover_lyrics_color_pair", 0) or 0),
+            "cover_lyrics_color_pair": self.settings.get("cover_lyrics_color_pair", "default"),
             "recommended_tab_no_confirm_refetch": bool(self.settings.get("recommended_tab_no_confirm_refetch", False)),
             "mix_tab_no_confirm_refetch": bool(self.settings.get("mix_tab_no_confirm_refetch", False)),
             "artist_tab_no_confirm_refetch": bool(self.settings.get("artist_tab_no_confirm_refetch", False)),
@@ -3274,7 +3295,7 @@ class App:
     def _draw_playback_lyrics_panel(self, y: int, x: int, h: int, w: int) -> None:
         """Draw lyrics as a right-side panel in the playback tab."""
         if w < 10: return
-        lyr_attr = curses.color_pair(int(self.settings.get("cover_lyrics_color_pair", 0))) if self.color_mode and curses.has_colors() else 0
+        lyr_attr = self.C(18) if self.color_mode and curses.has_colors() else 0
         # Title bar: show filter state or navigation hint
         if self._lyrics_filter_q and self._lyrics_filter_hits:
             n = len(self._lyrics_filter_hits)
@@ -3804,7 +3825,7 @@ class App:
         return None
 
     def _fetch_album_tracks_by_album_id(self, album_id: int) -> List[Track]:
-        return self._extract_tracks_from_album_payload(self.client.album(int(album_id), limit=self._album_track_limit))
+        return self._extract_tracks_from_album_payload(self.client.album(int(album_id)))
 
     def open_album_from_album_obj(self, album: Album) -> None:
         self.switch_tab(TAB_ALBUM, refresh=False)
@@ -3953,8 +3974,18 @@ class App:
 
                 # Phase 2: per-album fetching for complete track list
                 if self._loading_key != key: return
-                seen_ids: Set[int] = {t.id for t in self.artist_top_tracks}
+                debug_log(f"fetch_artist_async phase2: {len(albums)} albums")
+                # If Phase 1 (skip_tracks) returned no albums, re-fetch without skip_tracks to get them
+                if not albums:
+                    try:
+                        payload_full = self.client.artist(int(aid))
+                        albums = self._dedupe_albums(self._extract_artist_albums_from_payload(payload_full))
+                        debug_log(f"fetch_artist_async phase2 fallback albums: {len(albums)}")
+                    except Exception as _e:
+                        debug_log(f"fetch_artist_async phase2 album fallback error: {_e}")
+                seen_ids: Set[int] = set()
                 all_tracks: List[Track] = []
+                _max = self._max_all_tracks
                 for alb in albums:
                     if self._loading_key != key:
                         self._artist_all_tracks_loading = False
@@ -3962,15 +3993,22 @@ class App:
                         return
                     if not alb.id:
                         continue
+                    if _max and len(all_tracks) >= _max:
+                        break
                     try:
-                        for t in self._fetch_album_tracks_by_album_id(alb.id):
+                        fetched = self._fetch_album_tracks_by_album_id(alb.id)
+                        debug_log(f"fetch_artist_async album {alb.id}: {len(fetched)} tracks")
+                        for t in fetched:
                             if t.id not in seen_ids:
                                 seen_ids.add(t.id)
                                 all_tracks.append(t)
+                                if _max and len(all_tracks) >= _max:
+                                    break
                         self.artist_tracks = sorted(all_tracks, key=_track_sort_key)
+                        self._artist_status = f"Fetching all tracks… {len(all_tracks)}"
                         self._full_redraw()
-                    except Exception:
-                        pass
+                    except Exception as _e:
+                        debug_log(f"fetch_artist_async album {alb.id} error: {_e}")
                 self._artist_all_tracks_loading = False
                 self._artist_status = ""
                 self._full_redraw()
@@ -4935,7 +4973,7 @@ class App:
             self.stdscr.addstr(y + 1, x + idx, "─" * min(len(cur), max(0, w - idx - 1)), self.C(5) or curses.A_BOLD)
 
     def _draw_line_no(self, y: int, x: int, idx1: int, width: int) -> int:
-        if not self.show_numbers or width < 5:
+        if not self.show_line_numbers or width < 5:
             return 0
         s = f"{idx1:>4} "
         self.stdscr.addstr(y, x, s[:width], self.C(10))
@@ -5155,7 +5193,7 @@ class App:
                     artist_id, name = it[1]
                     liked_artist = artist_id in self.liked_artist_ids
                     base_attr = curses.A_REVERSE if selected else 0
-                    offs = self._draw_line_no(yy, x, i + 1, w) if self.show_numbers else 0
+                    offs = self._draw_line_no(yy, x, i + 1, w) if self.show_line_numbers else 0
                     px = x + offs; pw = max(0, w - offs - 1)
                     if pw > 0:
                         self.stdscr.addstr(yy, px, "  "[:pw], base_attr)
@@ -5171,7 +5209,7 @@ class App:
                     continue
                 if isinstance(it, tuple) and it[0] == "sep":
                     line = f"──── {it[1]}" if self.tab_align else f"── {it[1]}"
-                    offs = self._draw_line_no(yy, x, i + 1, w) if self.show_numbers else 0
+                    offs = self._draw_line_no(yy, x, i + 1, w) if self.show_line_numbers else 0
                     avail = max(0, w - offs - 1)
                     _TOGGLE_SUFFIX = "(#: toggle)"
                     _suf_idx = line.find(_TOGGLE_SUFFIX)
@@ -5189,7 +5227,7 @@ class App:
                     liked_alb = it.id in self.liked_album_ids
                     base_attr = curses.A_REVERSE if selected else 0
                     marked = (i in self.marked_left_idx)
-                    offs = self._draw_line_no(yy, x, i + 1, w) if self.show_numbers else 0
+                    offs = self._draw_line_no(yy, x, i + 1, w) if self.show_line_numbers else 0
                     px = x + offs; pw = max(0, w - offs - 1)
                     indent_w = 5 if self.tab_align else 3
                     pref = ("+" + " " * (indent_w - 1)) if marked else (" " * indent_w)
@@ -5203,20 +5241,23 @@ class App:
                     if pw > 0:
                         _is_si_ep = self._show_singles_eps and it.type in ("SINGLE", "EP")
                         _title = re.sub(r'\s*-\s*(single|ep)\s*$', '', it.title, flags=re.IGNORECASE) if _is_si_ep else it.title
-                        # Segments: main title (blue), "[" (blue), type (purple), sep (blue), count (white)
+                        # Segments: main title, "[" (album), type (purple), sep (album), count (C17), "]" (album)
                         _main = f"{_title}{ys}"
+                        _show_cnt = self.show_album_track_count
                         if _is_si_ep:
                             _seg_open   = " ["
-                            _seg_purple = f"{'ep' if it.type == 'EP' else 'si'}"
-                            _seg_sep    = ", " if it.n_tracks is not None else ""
-                            _seg_count  = f"{it.n_tracks} t]" if it.n_tracks is not None else "]"
-                        elif it.n_tracks is not None:
+                            _seg_purple = "ep" if it.type == "EP" else "si"
+                            _seg_sep    = ", " if (_show_cnt and it.n_tracks is not None) else ""
+                            _seg_count  = f"{it.n_tracks} t" if (_show_cnt and it.n_tracks is not None) else ""
+                            _seg_close  = "]"
+                        elif _show_cnt and it.n_tracks is not None:
                             _seg_open   = " ["
                             _seg_purple = ""
                             _seg_sep    = ""
-                            _seg_count  = f"{it.n_tracks} t]"
+                            _seg_count  = f"{it.n_tracks} t"
+                            _seg_close  = "]"
                         else:
-                            _seg_open = _seg_purple = _seg_sep = _seg_count = ""
+                            _seg_open = _seg_purple = _seg_sep = _seg_count = _seg_close = ""
                         _pos = 0
                         def _seg(s, attr):
                             nonlocal _pos
@@ -5228,7 +5269,8 @@ class App:
                         _seg(_seg_open, self.C(8))
                         _seg(_seg_purple, self.C(5))
                         _seg(_seg_sep, self.C(8))
-                        _seg(_seg_count, self.C(13))
+                        _seg(_seg_count, self.C(17))
+                        _seg(_seg_close, self.C(8))
                         if _pos < pw:
                             self.stdscr.addstr(yy, px + _pos, " " * (pw - _pos), base_attr)
                     continue
@@ -5239,7 +5281,7 @@ class App:
                     ys = f", {yv}" if (self.show_track_year and yv != "????") else ""
                     liked_alb = a.id in self.liked_album_ids
                     base_attr = (curses.A_REVERSE if selected else 0) | self.C(8)
-                    offs = self._draw_line_no(yy, x, i + 1, w) if self.show_numbers else 0
+                    offs = self._draw_line_no(yy, x, i + 1, w) if self.show_line_numbers else 0
                     px = x + offs; pw = max(0, w - offs - 1)
                     if pw > 0:
                         self.stdscr.addstr(yy, px, "  "[:pw], base_attr)
@@ -5256,7 +5298,7 @@ class App:
             if typ == "liked_mixed":
                 if isinstance(it, tuple) and it[0] == "sep":
                     line = f"── {it[1]} ──"
-                    offs = self._draw_line_no(yy, x, i + 1, w) if self.show_numbers else 0
+                    offs = self._draw_line_no(yy, x, i + 1, w) if self.show_line_numbers else 0
                     self.stdscr.addstr(yy, x + offs, line[:max(0, w - offs - 1)].ljust(max(0, w - offs - 1)), self.C(4))
                     continue
                 if isinstance(it, Album):
@@ -5266,7 +5308,7 @@ class App:
                     _alb_type = str(it.type or "").upper()
                     _is_si_ep_l = _alb_type in ("SINGLE", "EP")
                     base_attr = curses.A_REVERSE if selected else 0
-                    offs = self._draw_line_no(yy, x, i + 1, w) if self.show_numbers else 0
+                    offs = self._draw_line_no(yy, x, i + 1, w) if self.show_line_numbers else 0
                     px2 = x + offs; pw2 = max(0, w - offs - 1)
                     pref = "+  " if marked else "   "
                     if pw2 > 0:
@@ -5277,14 +5319,16 @@ class App:
                         px2 += 2; pw2 -= 2
                     if pw2 > 0:
                         _lmain = f"{it.artist} — {it.title}{ys}"
+                        _show_cnt_l = self.show_album_track_count
                         if _is_si_ep_l:
                             _lo = " ["; _lp = "ep" if _alb_type == "EP" else "si"
-                            _ls = ", " if it.n_tracks is not None else ""
-                            _lc = f"{it.n_tracks} t]" if it.n_tracks is not None else "]"
-                        elif it.n_tracks is not None:
-                            _lo = " ["; _lp = ""; _ls = ""; _lc = f"{it.n_tracks} t]"
+                            _ls = ", " if (_show_cnt_l and it.n_tracks is not None) else ""
+                            _lc = f"{it.n_tracks} t" if (_show_cnt_l and it.n_tracks is not None) else ""
+                            _lx = "]"
+                        elif _show_cnt_l and it.n_tracks is not None:
+                            _lo = " ["; _lp = ""; _ls = ""; _lc = f"{it.n_tracks} t"; _lx = "]"
                         else:
-                            _lo = _lp = _ls = _lc = ""
+                            _lo = _lp = _ls = _lc = _lx = ""
                         _lpos = 0
                         def _lseg(s, attr):
                             nonlocal _lpos
@@ -5296,7 +5340,8 @@ class App:
                         _lseg(_lo, self.C(8))
                         _lseg(_lp, self.C(5))
                         _lseg(_ls, self.C(8))
-                        _lseg(_lc, self.C(13))
+                        _lseg(_lc, self.C(17))
+                        _lseg(_lx, self.C(8))
                         if _lpos < pw2:
                             self.stdscr.addstr(yy, px2 + _lpos, " " * (pw2 - _lpos), base_attr)
                     continue
@@ -5317,7 +5362,7 @@ class App:
                 continue
 
             if typ == "playlists":
-                offs = self._draw_line_no(yy, x, i + 1, w) if self.show_numbers else 0
+                offs = self._draw_line_no(yy, x, i + 1, w) if self.show_line_numbers else 0
                 liked_pl = str(it) in self.liked_playlist_ids
                 marked = (i in self.marked_left_idx)
                 count = len(self.playlists.get(str(it), []))
@@ -5336,7 +5381,7 @@ class App:
                     self.stdscr.addstr(yy, px, content[:pw].ljust(pw)[:pw], base_attr)
                 continue
 
-            offs = self._draw_line_no(yy, x, i + 1, w) if self.show_numbers else 0
+            offs = self._draw_line_no(yy, x, i + 1, w) if self.show_line_numbers else 0
             self.stdscr.addstr(yy, x + offs, str(it)[:max(0, w - offs - 1)].ljust(max(0, w - offs - 1)),
                                curses.A_REVERSE if selected else 0)
 
@@ -5393,7 +5438,7 @@ class App:
             playing = alive and ct is not None and ct.id == t.id and i == self.queue_play_idx
             pfx_sym, pfx_color = ("▶", self.C(1)) if (playing and not pa) else ("⏸", self.C(2)) if (playing and pa) else ("", 0)
 
-            offs = self._draw_line_no(yy, x, i + 1, w) if self.show_numbers else 0
+            offs = self._draw_line_no(yy, x, i + 1, w) if self.show_line_numbers else 0
             px = x + offs
             pw = w - offs
             if pw <= 0: continue
@@ -5554,7 +5599,7 @@ class App:
             " ^\u2193/^\u2191     jump to next/prev section (sep-based in tabs 5 and 7)",
             " Alt+\u2193/\u2191  jump to next/prev album group within a track list",
             " c         color/bw",
-            " w/y/d/n   album/year/duration/line number fields",
+            " w/y/d/n/t album/year/duration/line number/album track count fields",
             " T         status bar",
             " \\         toggle TSV mode",
             "",
@@ -5589,7 +5634,7 @@ class App:
             "",
             " Artist tab:",
             " include_singles_and_eps_in_artist_tab: show singles/EPs (default: false, toggle with #)",
-            " album_track_limit: max tracks fetched per album (default: 500, API max: 500)",
+            " max_all_tracks_number: max total tracks in All tracks section (default: 0 = unlimited)",
             " cover_pane: show side cover pane on startup (default: true, toggle with C)",
             " playback_tab_layout: default layout when entering tab 0",
             "   values: \"lyrics\" (default), \"miniqueue\", \"miniqueue_cover\"",
@@ -5605,7 +5650,8 @@ class App:
             " Colors:",
             " color_playing  color_paused  color_error  color_chrome  color_accent",
             " color_artist   color_title   color_album  color_year    color_separator",
-            " color_duration color_numbers color_liked  color_mark",
+            " color_duration color_line_numbers color_album_track_count color_liked  color_mark",
+            " cover_lyrics_color_pair: lyrics panel text color (e.g. white, cyan; default: terminal default)",
             " values: black red green yellow blue magenta cyan white (or 0-255)",
             "",
             " TSV fields (general or per field overrides):",
@@ -5687,7 +5733,7 @@ class App:
                         content: str, color: int = 0) -> None:
         """Draw a liked-item row: line_no + mark prefix + ♥ + content."""
         base_attr = curses.A_REVERSE if selected else 0
-        offs = self._draw_line_no(yy, x, i + 1, w) if self.show_numbers else 0
+        offs = self._draw_line_no(yy, x, i + 1, w) if self.show_line_numbers else 0
         px = x + offs; pw = max(0, w - offs - 1)
         pref = "+  " if marked else "   "
         if pw > 0:
@@ -6203,7 +6249,8 @@ class App:
             ord(")"): lambda: self.lyrics_filter_next(1) if self.tab == TAB_PLAYBACK and self._cover_lyrics and not self.queue_overlay else self.filter_next(+1),
             ord("p"): lambda: self.play_queue_index(self.queue_play_idx) if not self.mp.alive() and self.queue_items else self.toggle_pause(),
             ord(";"): lambda: self.switch_tab(self._prev_tab, refresh=False) if self._prev_tab != self.tab else None,
-            ord("n"): lambda: self.playlists_create() if self.tab == TAB_PLAYLISTS else _tog("show_numbers", "Line numbers: on", "Line numbers: off"),
+            ord("n"): lambda: self.playlists_create() if self.tab == TAB_PLAYLISTS else _tog("show_line_numbers", "Line numbers: on", "Line numbers: off"),
+            ord("t"): lambda: _tog("show_album_track_count", "Album track count: on", "Album track count: off"),
             ord("d"): lambda: self.playlists_delete_current() if self.tab == TAB_PLAYLISTS else _tog("show_track_duration", "Duration field: on", "Duration field: off"),
         }
 

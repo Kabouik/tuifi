@@ -24,3 +24,8 @@
    :DONE: auto-advance now guarded by _play_serial == _current_track_serial; any play_track call bumps _play_serial, suppressing the auto-advance for the entire bg-thread lifetime until the new track is confirmed (app.py ~5929)
 ** DONE [#A] RMB in queue tab does not visually select the track before showing the context menu
    :DONE: RMB handler now checks tab == TAB_QUEUE and updates queue_cursor/focus="queue" instead of left_idx (app.py ~6063)
+** When preview is enabled and we go to tab 2, the next song is selected instead of the current
+** In tab 0, the lyrics paen should not reduce the main cover size
+** In tab 0, clicking on the main cover cycles view types, and when going back to miniqueue + minicover, it forgets about preview mode being enabled and just selects the current track
+** We may be able to fetch all metadata to TIDAL directly (without sending origin or referer) and just use HiFi for audio; check Discord recommendation
+** Cycle through known apis in case of issues? Remember past ones and try them?

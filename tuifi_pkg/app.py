@@ -6471,6 +6471,18 @@ class App:
                                     _ctrl_digit = _key_n2 - 48
                                 elif 1 <= _key_n2 <= 9:
                                     _ctrl_digit = _key_n2
+                elif _c2 == ord('_'):
+                    # FIX: Swallow APC sequences (like terminal graphics probe responses)
+                    _seq = []
+                    for _ in range(128):
+                        _c3 = self.stdscr.getch()
+                        if _c3 == -1:
+                            break
+                        _seq.append(_c3)
+                        # Stop reading when we hit the String Terminator (ESC + \)
+                        if len(_seq) >= 2 and _seq[-2] == 27 and _seq[-1] == ord('\\'):
+                            break
+                    continue
                 elif ord('1') <= _c2 <= ord('9'):
                     # Alt+digit (ESC immediately followed by a digit, nodelay so no gap)
                     _ctrl_digit = _c2 - ord('0')

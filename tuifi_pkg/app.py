@@ -4579,26 +4579,29 @@ class App:
         box_h = min(h - 6, max(8, len(artists) + 4))
         y0, x0, win = self._popup_win(box_h, box_w)
         idx = 0
+        filt_q = ""
         _last_click: tuple = (0.0, -1)
         hint = " j/k ^n/^p: navigate  Enter/5: go to  q/Esc: close "
-        hint2 = " a: add to playlist   e/E: enqueue    l: like "
+        hint2 = " a: add to playlist   e/E: enqueue    l: like   f/!/:: filter "
         try:
             while True:
                 if self._need_redraw:
                     self._popup_refresh(y0, x0, box_h, box_w)
 
-                idx = clamp(idx, 0, len(artists) - 1)
+                visible = [a for a in artists if not filt_q or filt_q in a.name.lower()] or artists
+                idx = clamp(idx, 0, len(visible) - 1)
                 win.erase()
                 win.box()
-                win.addstr(0, 2, f" Similar to {artist.name} "[:box_w - 2], self.C(4))
+                title = f" Similar to {artist.name} [{filt_q}] " if filt_q else f" Similar to {artist.name} "
+                win.addstr(0, 2, title[:box_w - 2], self.C(4))
                 inner_h = box_h - 3
                 scroll = max(0, idx - inner_h + 1) if idx >= inner_h else 0
                 for row in range(inner_h):
                     fi = scroll + row
-                    if fi >= len(artists):
+                    if fi >= len(visible):
                         break
                     attr = curses.A_REVERSE if fi == idx else 0
-                    win.addstr(1 + row, 2, artists[fi].name[:box_w - 4].ljust(box_w - 4), attr)
+                    win.addstr(1 + row, 2, visible[fi].name[:box_w - 4].ljust(box_w - 4), attr)
                 win.addstr(box_h - 2, 2, hint[:box_w - 4], self.C(10))
                 win.addstr(box_h - 1, 2, hint2[:box_w - 4], self.C(10))
                 h_scr, w_scr = self.stdscr.getmaxyx()
@@ -4624,36 +4627,41 @@ class App:
                         continue
                     if bstate & curses.BUTTON1_PRESSED:
                         row_in_box = my - y0 - 1
-                        if 0 <= row_in_box < inner_h and scroll + row_in_box < len(artists):
+                        if 0 <= row_in_box < inner_h and scroll + row_in_box < len(visible):
                             fi = scroll + row_in_box
                             now_t = time.time()
                             is_dbl = now_t - _last_click[0] < 0.35 and _last_click[1] == fi
                             _last_click = (now_t, fi)
                             if is_dbl:
-                                ar = artists[fi]
+                                ar = visible[fi]
                                 self.open_artist_by_id(ar.id, ar.name)
                                 break
                             idx = fi
                     continue
 
                 if ch in (ord("j"), curses.KEY_DOWN, 14):
-                    idx = min(len(artists) - 1, idx + 1)
+                    idx = min(len(visible) - 1, idx + 1)
                 elif ch in (ord("k"), curses.KEY_UP, 16):
                     idx = max(0, idx - 1)
                 elif ch in (10, 13, ord("5")):
-                    ar = artists[idx]
+                    ar = visible[idx]
                     self.open_artist_by_id(ar.id, ar.name)
                     break
                 elif ch == ord("e"):
-                    self._enqueue_artist_async(artists[idx], insert_after_playing=False)
-                    self.toast(f"Enqueued {artists[idx].name}")
+                    self._enqueue_artist_async(visible[idx], insert_after_playing=False)
+                    self.toast(f"Enqueued {visible[idx].name}")
                 elif ch == ord("E"):
-                    self._enqueue_artist_async(artists[idx], insert_after_playing=True)
-                    self.toast(f"Enqueued next: {artists[idx].name}")
+                    self._enqueue_artist_async(visible[idx], insert_after_playing=True)
+                    self.toast(f"Enqueued next: {visible[idx].name}")
                 elif ch == ord("a"):
-                    self._add_artist_to_playlist_async(artists[idx])
+                    self._add_artist_to_playlist_async(visible[idx])
                 elif ch == ord("l"):
-                    self.toggle_like_artist(artists[idx].id, artists[idx].name)
+                    self.toggle_like_artist(visible[idx].id, visible[idx].name)
+                elif ch in (ord("f"), ord("/"), ord("!"), ord(":")):
+                    q = self.prompt_text("Filter:", filt_q)
+                    if q is not None:
+                        filt_q = q.strip().lower()
+                        idx = 0
                 elif ch in (27, ord("q"), ord("s"), ord("i"), ord("c")):
                     break
         finally:
@@ -5721,22 +5729,24 @@ class App:
         except curses.error:
             pass
 
-    def _render_popup_lines(self, win, lines: List[str], start: int, inner_h: int, box_w: int) -> None:
+    def _render_popup_lines(self, win, lines: List[str], start: int, inner_h: int, box_w: int,
+                            hit_lines: "frozenset[int]" = frozenset()) -> None:
         """Render lines into a popup window, supporting \\x01 highlighted headers."""
         for i in range(inner_h):
             idx = start + i
             if idx >= len(lines):
                 break
             line = lines[idx]
+            extra = curses.A_BOLD if idx in hit_lines else 0
             if line.startswith("\x01"):
                 text = line[1:][:box_w - 4].ljust(box_w - 4)
                 try:
-                    win.addstr(1 + i, 2, text, curses.color_pair(16))
+                    win.addstr(1 + i, 2, text, curses.color_pair(16) | extra)
                 except curses.error:
                     pass
             else:
                 try:
-                    win.addstr(1 + i, 2, line[:box_w - 4])
+                    win.addstr(1 + i, 2, line[:box_w - 4], extra)
                 except curses.error:
                     pass
 
@@ -5877,6 +5887,9 @@ class App:
         inner_h = box_h - 2
         max_scroll = max(0, len(lines) - inner_h)
         scroll = clamp(getattr(self, "help_scroll", 0), 0, max_scroll)
+        filt_q = ""
+        filt_hits: List[int] = []
+        filt_pos = -1
         self._hide_cover_for_popup = True
         self._need_redraw = True
         self.draw()
@@ -5888,14 +5901,17 @@ class App:
                     self._popup_refresh(y0, x0, box_h, box_w)
 
                 scroll = clamp(scroll, 0, max_scroll)
+                filt_hits = [i for i, l in enumerate(lines) if filt_q and filt_q in l.lower()]
                 win.erase()
                 win.box()
-                win.addstr(0, 2, " Help "[:box_w - 2], self.C(4))
-                self._render_popup_lines(win, lines, scroll, inner_h, box_w)
+                title = f" Help [{filt_q}] " if filt_q else " Help "
+                win.addstr(0, 2, title[:box_w - 2], self.C(4))
+                self._render_popup_lines(win, lines, scroll, inner_h, box_w,
+                                         hit_lines=frozenset(filt_hits))
+                hint_str = " j/k ^n/^p: scroll   (/)  prev/next hit   g/G: top/bottom   h/?/q/Esc: close" if filt_q else \
+                           " j/k ^n/^p: scroll   PgUp/PgDn: pages   g/G: top/bottom   h/?/q/Esc: close"
                 try:
-                    win.addstr(box_h - 1, 2,
-                               " j/k ^n/^p: scroll   PgUp/PgDn: pages   g/G: top/bottom   h/?/q/Esc: close"[:box_w - 4],
-                               self.C(10))
+                    win.addstr(box_h - 1, 2, hint_str[:box_w - 4], self.C(10))
                 except curses.error:
                     pass
                 h_scr, w_scr = self.stdscr.getmaxyx()
@@ -5924,11 +5940,28 @@ class App:
                     continue
                 if ch in (27, ord("?"), ord("Q"), ord("q"), ord("h")):
                     break
+                if ch in (ord("f"), ord("/"), ord("!"), ord(":")):
+                    q = self.prompt_text("Filter:", filt_q)
+                    if q is not None:
+                        filt_q = q.strip().lower()
+                        filt_pos = -1
+                        if filt_q:
+                            filt_hits = [i for i, l in enumerate(lines) if filt_q in l.lower()]
+                            if filt_hits:
+                                filt_pos = 0
+                                scroll = clamp(filt_hits[0], 0, max_scroll)
+                    continue
                 _p = self._page_step()
                 if ch in (curses.KEY_DOWN, ord("j"), 14):
                     scroll = min(scroll + 1, max_scroll)
                 elif ch in (curses.KEY_UP, ord("k"), 16):
                     scroll = max(0, scroll - 1)
+                elif ch == ord("(") and filt_hits:
+                    filt_pos = (filt_pos - 1) % len(filt_hits)
+                    scroll = clamp(filt_hits[filt_pos], 0, max_scroll)
+                elif ch == ord(")") and filt_hits:
+                    filt_pos = (filt_pos + 1) % len(filt_hits)
+                    scroll = clamp(filt_hits[filt_pos], 0, max_scroll)
                 elif ch == curses.KEY_PPAGE:
                     scroll = max(0, scroll - _p)
                 elif ch == curses.KEY_NPAGE:

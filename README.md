@@ -1,7 +1,7 @@
 # tuifi
 
 > [!WARNING]
-> Tidal has begun blocking HiFi API accounts en masse starting from around now. Until a solution is found, you may have trouble using `tuifi`, with a public or private instance. There is nothing `tuifi` can do about and issues you may encounter related to this do not come from `tuifi`, but developerss are working on the HiFi side to work around the situation.
+> TIDAL has begun blocking HiFi API accounts en masse starting from around now. Until a solution is found, you may have trouble using =tuifi=, with a public or private instance. There is nothing =tuifi= can do about it and issues you may encounter related to this do not come from =tuifi= itself, but developers are working on the HiFi side to work around the situation.
 
 1.  [Features](#features)
 2.  [Usage](#usage)

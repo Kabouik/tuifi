@@ -2598,6 +2598,7 @@ class App:
                 ("Add to playlist [a]",                            lambda: self._add_playlist_to_playlist_async(it)),
                 ("Download with subfolders [d]",                   lambda: self._download_playlist_async(it, flat=False)),
                 ("Download flat [D]",                              lambda: self._download_playlist_async(it, flat=True)),
+                ("Delete",                                         lambda: self.playlists_delete_current()),
                 ("Show lyrics [v]",                                lambda: curses.ungetch(ord("v"))),
                 ("Show info [i]",                                  lambda: curses.ungetch(ord("i"))),
             ]
@@ -2758,7 +2759,7 @@ class App:
                         except curses.error:
                             pass
                 hint  = " j/k ^n/^p: navigate   g/G: top/bottom   x: remove   % pause   $ cancel "
-                hint2 = " f: filter   q/&/Esc: close "
+                hint2 = " f/!/:: filter   q/&/Esc: close "
                 win.addstr(box_h - 2, 2, hint[:box_w - 4], self.C(10))
                 win.addstr(box_h - 1, 2, hint2[:box_w - 4], self.C(10))
                 # Also refresh the status bar so playback progress stays live
@@ -2808,7 +2809,7 @@ class App:
                     trk_to_remove = rows[cursor][0]
                     self.dl.remove(trk_to_remove.id)
                     cursor = min(cursor, max(0, len(rows) - 2))
-                elif ch == ord("f"):
+                elif ch in (ord("f"), ord("/"), ord("!"), ord(":")):
                     q = self.prompt_text("Filter:", filt_q)
                     if q is not None:
                         filt_q = q.strip().lower()
@@ -5766,7 +5767,8 @@ class App:
             " 0         show album cover art (requires chafa, ueberzugpp, or kitty)",
             " 5/6       show artist/album content relative to selected",
             " s         find similar artists",
-            " D         download (selected, marked, album, all tracks of a playlist)",
+            " d         download selection (tracks/albums/artists, marked or cursor)",
+            " D         download as album (track selection \u2192 full album; album/artist: same as d)",
             " %         pause / resume download queue",
             " $         cancel pending downloads (current track finishes)",
             " &         show download queue dialog",
@@ -5805,7 +5807,7 @@ class App:
             " ^\u2193/^\u2191     jump to next/prev section (sep-based in tabs 5 and 7)",
             " Alt+\u2193/\u2191  jump to next/prev album group within a track list",
             " C         color/bw",
-            " w/y/d/N/t album/year/duration/line number/album track count fields",
+            " w/y/r/N/t album/year/duration/line number/album track count fields",
             " T         status bar",
             " \\         toggle TSV mode",
             "",
@@ -6474,7 +6476,7 @@ class App:
             ord(";"): lambda: self.switch_tab(self._prev_tab, refresh=False) if self._prev_tab != self.tab else None,
             ord("N"): lambda: self.playlists_create() if self.tab == TAB_PLAYLISTS else _tog("show_line_numbers", "Line numbers: on", "Line numbers: off"),
             ord("t"): lambda: _tog("show_album_track_count", "Album track count: on", "Album track count: off"),
-            ord("d"): lambda: self.playlists_delete_current() if self.tab == TAB_PLAYLISTS else self._download_liked_current() if self.tab == TAB_LIKED and not self._queue_context() else _tog("show_track_duration", "Duration field: on", "Duration field: off"),
+            ord("r"): lambda: _tog("show_track_duration", "Duration field: on", "Duration field: off"),
             ord("%"): lambda: self.toast("Download paused" if self.dl.toggle_pause() else "Download resumed"),
             ord("$"): lambda: (self.dl.cancel(), self.toast("Download queue cancelled")),
             ord("&"): self.show_download_queue_dialog,
@@ -7214,37 +7216,34 @@ class App:
                     self.queue_cursor = m[0] if delta < 0 else m[-1]
                 continue
 
-            if ch == ord("D"):
+            if ch == ord("d"):
                 if self._queue_context():
                     marked = self._marked_tracks_from_queue()
                     if marked:
                         self.start_download_tracks(marked)
                     else:
                         t = self._queue_selected_track()
-                        if t and t.album_id:
-                            self._bg_download_album(Album(id=t.album_id, title=t.album, artist=t.artist, year=t.year, cover=t.cover))
-                        elif t:
+                        if t:
                             self.start_download_tracks([t])
                     continue
                 if self.tab == TAB_PLAYLISTS and self.playlist_view_name is None:
                     self.playlists_download_prompt()
                     continue
-                if not self._queue_context():
-                    marked_albums, marked_artists, marked_playlists, _cancelled = self._marked_batch()
-                    if _cancelled: continue
-                    if marked_albums:
-                        self._download_marked_albums_async(marked_albums)
-                        continue
-                    if marked_artists:
-                        self._download_marked_artists_async(marked_artists)
-                        continue
-                    if marked_playlists:
-                        self.start_download_tracks(self._tracks_from_playlists(marked_playlists))
-                        continue
-                if not self._queue_context() and self.tab == TAB_ALBUM and self._selected_album_title_line():
+                marked_albums, marked_artists, marked_playlists, _cancelled = self._marked_batch()
+                if _cancelled: continue
+                if marked_albums:
+                    self._download_marked_albums_async(marked_albums)
+                    continue
+                if marked_artists:
+                    self._download_marked_artists_async(marked_artists)
+                    continue
+                if marked_playlists:
+                    self.start_download_tracks(self._tracks_from_playlists(marked_playlists))
+                    continue
+                if self.tab == TAB_ALBUM and self._selected_album_title_line():
                     self.start_download_tracks(list(self.album_tracks))
                     continue
-                if not self._queue_context() and self.tab == TAB_ARTIST:
+                if self.tab == TAB_ARTIST:
                     _dit = self._selected_left_item()
                     if isinstance(_dit, tuple) and _dit[0] == "artist_header":
                         if self.artist_albums:
@@ -7257,23 +7256,83 @@ class App:
                 if self.tab == TAB_PLAYLISTS and self.playlist_view_name is not None:
                     self.start_download_tracks(list(self.playlist_view_tracks))
                     continue
-                if not self._queue_context() and self.tab == TAB_LIKED:
-                    marked_tracks = self._marked_tracks_from_left()
-                    if marked_tracks:
-                        seen_albums: set = set()
-                        solo: List[Track] = []
-                        for _mt in marked_tracks:
-                            if _mt.album_id and _mt.album_id not in seen_albums:
-                                seen_albums.add(_mt.album_id)
-                                self._bg_download_album(Album(id=_mt.album_id, title=_mt.album, artist=_mt.artist, year=_mt.year, cover=_mt.cover))
-                            elif not _mt.album_id:
-                                solo.append(_mt)
-                        if solo:
-                            self.start_download_tracks(solo)
+                if self.tab == TAB_LIKED:
+                    _mt = self._marked_tracks_from_left()
+                    if _mt:
+                        self.start_download_tracks(_mt)
                     else:
                         self._download_liked_current()
                     continue
                 self.start_download_tracks(self._target_tracks())
+                continue
+
+            if ch == ord("D"):
+                if self._queue_context():
+                    marked = self._marked_tracks_from_queue()
+                    if marked:
+                        _seen_alb: set = set()
+                        _solo: List[Track] = []
+                        for _mt in marked:
+                            if _mt.album_id and _mt.album_id not in _seen_alb:
+                                _seen_alb.add(_mt.album_id)
+                                self._bg_download_album(Album(id=_mt.album_id, title=_mt.album, artist=_mt.artist, year=_mt.year, cover=_mt.cover))
+                            elif not _mt.album_id:
+                                _solo.append(_mt)
+                        if _solo:
+                            self.start_download_tracks(_solo)
+                    else:
+                        t = self._queue_selected_track()
+                        if t and t.album_id:
+                            self._bg_download_album(Album(id=t.album_id, title=t.album, artist=t.artist, year=t.year, cover=t.cover))
+                        elif t:
+                            self.start_download_tracks([t])
+                    continue
+                if self.tab == TAB_PLAYLISTS and self.playlist_view_name is None:
+                    self.playlists_download_prompt()
+                    continue
+                marked_albums, marked_artists, marked_playlists, _cancelled = self._marked_batch()
+                if _cancelled: continue
+                if marked_albums:
+                    self._download_marked_albums_async(marked_albums)
+                    continue
+                if marked_artists:
+                    self._download_marked_artists_async(marked_artists)
+                    continue
+                if marked_playlists:
+                    self.start_download_tracks(self._tracks_from_playlists(marked_playlists))
+                    continue
+                if self.tab == TAB_ALBUM and self._selected_album_title_line():
+                    self.start_download_tracks(list(self.album_tracks))
+                    continue
+                if self.tab == TAB_ARTIST:
+                    _dit = self._selected_left_item()
+                    if isinstance(_dit, tuple) and _dit[0] == "artist_header":
+                        if self.artist_albums:
+                            self._download_marked_albums_async(self.artist_albums)
+                        continue
+                    alb = self._selected_left_album()
+                    if alb:
+                        self._bg_download_album(alb)
+                        continue
+                if self.tab == TAB_PLAYLISTS and self.playlist_view_name is not None:
+                    self.start_download_tracks(list(self.playlist_view_tracks))
+                    continue
+                # For tracks (any tab): download their album(s) instead
+                _mt = self._marked_tracks_from_left() or ([t] if (t := self._selected_left_track()) else [])
+                if _mt:
+                    _seen_alb2: set = set()
+                    _solo2: List[Track] = []
+                    for _tr in _mt:
+                        if _tr.album_id and _tr.album_id not in _seen_alb2:
+                            _seen_alb2.add(_tr.album_id)
+                            self._bg_download_album(Album(id=_tr.album_id, title=_tr.album, artist=_tr.artist, year=_tr.year, cover=_tr.cover))
+                        elif not _tr.album_id:
+                            _solo2.append(_tr)
+                    if _solo2:
+                        self.start_download_tracks(_solo2)
+                    continue
+                if self.tab == TAB_LIKED:
+                    self._download_liked_current()
                 continue
 
             # In the playback tab with the inline lyrics panel (no queue overlay, no

@@ -2383,6 +2383,7 @@ class App:
                 self._draw_status(h_scr - 2, 0, w_scr)
                 self.stdscr.noutrefresh()
                 win.touchwin()
+                win.noutrefresh()
                 curses.doupdate()
 
                 try:
@@ -2765,6 +2766,7 @@ class App:
                 self._draw_status(h_scr - 2, 0, w_scr)
                 self.stdscr.noutrefresh()
                 win.touchwin()
+                win.noutrefresh()
                 curses.doupdate()
                 ch = win.getch()
                 if ch == -1:
@@ -2780,6 +2782,8 @@ class App:
                             manual_scroll = True
                             cursor = min(max(0, len(rows) - 1), cursor + 1)
                         elif bstate & curses.BUTTON1_PRESSED:
+                            if not (y0 <= _my < y0 + box_h and x0 <= _mx < x0 + box_w):
+                                break
                             row_in_box = _my - y0 - 4  # 4 = title+summary+progress+separator
                             if 0 <= row_in_box < inner_rows:
                                 clicked = scroll + row_in_box
@@ -4367,6 +4371,7 @@ class App:
                 self._draw_status(h_scr - 2, 0, w_scr)
                 self.stdscr.noutrefresh()
                 win.touchwin()
+                win.noutrefresh()
                 curses.doupdate()
 
                 ch = self._get_wch_int()
@@ -4599,6 +4604,7 @@ class App:
                 self._draw_status(h_scr - 2, 0, w_scr)
                 self.stdscr.noutrefresh()
                 win.touchwin()  # force full resend so popup stays visible over sixel
+                win.noutrefresh()
                 curses.doupdate()
 
                 self.stdscr.timeout(100)
@@ -4833,13 +4839,14 @@ class App:
                     except curses.error:
                         pass
                 try:
-                    win.addstr(box_h - 1, 2, " j/k: scroll   g/G: top/bottom   q/v/Esc: close "[:box_w - 4], self.C(10))
+                    win.addstr(box_h - 1, 2, " j/k ^n/^p: scroll   g/G: top/bottom   q/v/Esc: close"[:box_w - 4], self.C(10))
                 except curses.error:
                     pass
                 h_scr, w_scr = self.stdscr.getmaxyx()
                 self._draw_status(h_scr - 2, 0, w_scr)
                 self.stdscr.noutrefresh()
                 win.touchwin()
+                win.noutrefresh()
                 curses.doupdate()
 
                 ch = self._get_wch_int()
@@ -5886,7 +5893,7 @@ class App:
                 self._render_popup_lines(win, lines, scroll, inner_h, box_w)
                 try:
                     win.addstr(box_h - 1, 2,
-                               " j/k/wheel: scroll   PgUp/PgDn: pages   g/G: top/bottom   h/?/q/Esc: close "[:box_w - 4],
+                               " j/k ^n/^p: scroll   PgUp/PgDn: pages   g/G: top/bottom   h/?/q/Esc: close"[:box_w - 4],
                                self.C(10))
                 except curses.error:
                     pass
@@ -5894,6 +5901,7 @@ class App:
                 self._draw_status(h_scr - 2, 0, w_scr)
                 self.stdscr.noutrefresh()
                 win.touchwin()
+                win.noutrefresh()
                 curses.doupdate()
 
                 ch = self._get_wch_int()
@@ -5916,9 +5924,9 @@ class App:
                 if ch in (27, ord("?"), ord("Q"), ord("q"), ord("h")):
                     break
                 _p = self._page_step()
-                if ch in (curses.KEY_DOWN, ord("j")):
+                if ch in (curses.KEY_DOWN, ord("j"), 14):
                     scroll = min(scroll + 1, max_scroll)
-                elif ch in (curses.KEY_UP, ord("k")):
+                elif ch in (curses.KEY_UP, ord("k"), 16):
                     scroll = max(0, scroll - 1)
                 elif ch == curses.KEY_PPAGE:
                     scroll = max(0, scroll - _p)
@@ -6049,25 +6057,35 @@ class App:
                 qt = self.queue_items[clamp(self.queue_cursor, 0, len(self.queue_items) - 1)]
                 if isinstance(qt, Track):
                     _sel_item_key = f"t:{qt.id}"
-                    if _sel_item_key != self._album_cover_item_key:
-                        self._fetch_track_cover_async(qt)
             else:
                 sel_art = self._selected_left_artist()
                 if sel_art and sel_art.id:
                     _sel_item_key = f"ar:{sel_art.id}"
-                    if _sel_item_key != self._album_cover_item_key:
-                        self._fetch_artist_picture_async(sel_art)
                 else:
                     sel_alb = self._selected_left_album()
                     if sel_alb and sel_alb.id:
                         _sel_item_key = f"a:{sel_alb.id}"
-                        if _sel_item_key != self._album_cover_item_key:
-                            self._fetch_album_cover_async(sel_alb)
                     else:
                         sel_trk = self._selected_left_track()
                         if sel_trk:
                             _sel_item_key = f"t:{sel_trk.id}"
-                            if _sel_item_key != self._album_cover_item_key:
+
+            if _sel_item_key and _sel_item_key != self._album_cover_item_key:
+                if self._queue_context() and self.queue_items:
+                    qt = self.queue_items[clamp(self.queue_cursor, 0, len(self.queue_items) - 1)]
+                    if isinstance(qt, Track):
+                        self._fetch_track_cover_async(qt)
+                else:
+                    sel_art = self._selected_left_artist()
+                    if sel_art and sel_art.id:
+                        self._fetch_artist_picture_async(sel_art)
+                    else:
+                        sel_alb = self._selected_left_album()
+                        if sel_alb and sel_alb.id:
+                            self._fetch_album_cover_async(sel_alb)
+                        else:
+                            sel_trk = self._selected_left_track()
+                            if sel_trk:
                                 self._fetch_track_cover_async(sel_trk)
 
             if queue_panel:

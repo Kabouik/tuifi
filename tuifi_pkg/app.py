@@ -5639,10 +5639,7 @@ class App:
             return " Queue 0/0"
         pq_info = f" [+{len(self.priority_queue)}]" if self.priority_queue else ""
         n = clamp(self.queue_play_idx + 1, 1, len(self.queue_items))
-        m = len(self.queue_items)
-        if self._preview_next and self._album_cover_pane and self.queue_overlay and self.tab == TAB_PLAYBACK:
-            return f" {n}/{m}{pq_info}"
-        return f" Queue {n}/{m}{pq_info}"
+        return f" Queue {n}/{len(self.queue_items)}{pq_info}"
 
     def _draw_queue(self, y: int, x: int, h: int, w: int) -> None:
         if h <= 1 or w <= 0: return
@@ -6205,7 +6202,7 @@ class App:
             try:
                 self.stdscr.addch(0, w - artist_pane_w, "│", self.C(4))
                 self.stdscr.addstr(0, w - artist_pane_w + 1,
-                                   "Next in queue:"[:max(0, artist_pane_w - 2)], self.C(4))
+                                   " Next in queue:"[:max(0, artist_pane_w - 2)], self.C(4))
             except curses.error:
                 pass
         if self.tab == TAB_LIKED:

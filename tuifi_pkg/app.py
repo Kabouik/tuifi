@@ -3649,6 +3649,8 @@ class App:
                 if self._album_cover_item_key != item_key:
                     return  # selection changed while downloading
                 self._prerender_album_cover(dest)
+                if self._album_cover_item_key != item_key:
+                    return
                 self._album_cover_path = dest
                 self._need_redraw = True
             except Exception as e:
@@ -3717,6 +3719,8 @@ class App:
                 if self._album_cover_item_key != item_key:
                     return
                 self._prerender_album_cover(dest)
+                if self._album_cover_item_key != item_key:
+                    return
                 self._album_cover_path = dest
                 self._need_redraw = True
             except Exception as e:
@@ -3765,6 +3769,8 @@ class App:
                     if self._album_cover_item_key != item_key:
                         return
                     self._prerender_album_cover(_dest)
+                    if self._album_cover_item_key != item_key:
+                        return
                     self._album_cover_path = _dest
                     self._need_redraw = True
                 except Exception as e:
@@ -3798,6 +3804,8 @@ class App:
                 if self._album_cover_item_key != item_key:
                     return
                 self._prerender_album_cover(dest)
+                if self._album_cover_item_key != item_key:
+                    return
                 self._album_cover_path = dest
                 self._need_redraw = True
             except Exception as e:
@@ -6250,6 +6258,12 @@ class App:
         finally:
             sys.stdout.buffer.write(b"\033[?2026l")
             sys.stdout.buffer.flush()
+
+        # Cover rendering was deferred this frame (debounce window still open).
+        # Re-assert _need_redraw so the loop keeps ticking until the window
+        # expires and the cover gets written on the first un-throttled frame.
+        if _throttle_cover:
+            self._need_redraw = True
 
 
     # ---------------------------------------------------------------------------

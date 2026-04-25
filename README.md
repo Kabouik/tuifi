@@ -16,7 +16,7 @@
 8.  [License](#license)
 9.  [Mirrors](#mirrors)
 
-A feature-rich-ish TUI music player built on top of [TIDAL HiFi API](https://github.com/binimum/hifi-api): browse, search, stream, batch download, organize and manage lossless music from your comfy terminal.
+A feature-rich-ish TUI music player built on top of [TIDAL HiFi API](https://github.com/binimum/hifi-api): browse, search, stream, mix, batch download, find artists, organize and manage lossless music from your comfy terminal.
 
 While [HiFi API instances with unrestricted access](https://github.com/monochrome-music/monochrome/blob/main/INSTANCES.md#official--community-apis) used to exist, this may be considered as music piracy in many countries and does not give artists the love they deserve. This project is intended for TIDAL subscribers who also self-host their own [HiFi](https://github.com/binimum/hifi-api) instance for convenience, and favor a keyboard-driven terminal workflow over a web player.
 

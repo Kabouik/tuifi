@@ -2741,7 +2741,7 @@ class App:
                             win.addstr(track_str[: box_w - 4 - len(prefix)], hi)
                         except curses.error:
                             pass
-                hint = " j/k ^n/^p: navigate   % pause   $ cancel   f filter   q/Esc/& close "
+                hint = " j/k ^n/^p: navigate   % pause   $ cancel   f filter   q/&/Esc close "
                 win.addstr(box_h - 1, 2, hint[:box_w - 4], self.C(10))
                 # Also refresh the status bar so playback progress stays live
                 h_scr, w_scr = self.stdscr.getmaxyx()

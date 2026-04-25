@@ -252,6 +252,7 @@ class App:
         self._album_cover_visible_rows: int = 0
         self._album_cover_visible_cols: int = 0
         self._album_cover_pane_write_key: str = ""  # last rendered (path:x:top:w:h); skip write if unchanged
+        self._cover_defer_until: float = 0.0         # wall-clock time after which cover writes are allowed again
         self._album_cover_rows_offset: int = 0       # rows reserved for minicover above miniqueue (used by mouse handler)
 
         self._q_overlay_scroll: int = 0
@@ -6057,13 +6058,31 @@ class App:
         # fully erased for the duration: ncurses scroll corrupts residual sixel rows.
         hide_cover = getattr(self, "_hide_cover_for_popup", False)
 
-        _throttle_cover = False
-        if (self.tab == TAB_PLAYBACK and self.cover_path and self._cover_sixel_visible
-                and not hide_cover):
-            _next = self.stdscr.getch()
-            if _next != -1:
-                curses.ungetch(_next)
-                _throttle_cover = True
+        # Peek at the input queue once; push it back if present.
+        # Used for both the playback-tab cover throttle and the pane-cover debounce.
+        _now = time.time()
+        _peeked = self.stdscr.getch()
+        if _peeked != -1:
+            curses.ungetch(_peeked)
+            self._cover_defer_until = _now + 0.020   # 20 ms quiet window
+
+        _cover_debounce = _now < self._cover_defer_until
+        _backend = self._cover_backend()
+
+        # Throttle/debounce: skip the erase+rewrite cycle while the user is still
+        # scrolling (input pending) or within 20 ms of the last event.
+        # This applies to:
+        #   • the playback-tab main cover (sixel/kitty) — same as the original throttle
+        #   • the minicover pane on non-kitty backends (sixel/chafa/ueberzugpp), where
+        #     stdscr.erase() would blank the cover area every frame
+        # Kitty pane images live in a separate graphics layer that curses can't touch,
+        # so they don't need the erase skip — the write_key check alone is sufficient.
+        _throttle_cover = _cover_debounce and (
+            (self.tab == TAB_PLAYBACK and self.cover_path
+             and self._cover_sixel_visible and not hide_cover)
+            or (self._album_cover_pane and self._album_cover_visible
+                and _backend != "chafa-kitty")
+        )
 
         if not _throttle_cover:
             # On the playback tab with a valid cover, keep the existing sixel in place
@@ -6077,10 +6096,8 @@ class App:
             # stdscr.erase()/refresh() don't touch, so the old image stays visible
             # until the new one overwrites it. Erasing explicitly causes a one-frame
             # flash of empty space before the replacement arrives.
-            if self._album_cover_visible and self._cover_backend() != "chafa-kitty":
+            if self._album_cover_visible and _backend != "chafa-kitty":
                 # Only erase when the cover path has actually changed (new artist/album).
-                # Skipping the erase avoids the costly clear+rewrite cycle every frame
-                # while the user is just scrolling within the same context.
                 cur_path = self._album_cover_path or ""
                 if not self._album_cover_pane_write_key or \
                         not self._album_cover_pane_write_key.startswith(cur_path + ":"):
@@ -6091,7 +6108,7 @@ class App:
             # geometry are unchanged.  Kitty images live in a separate graphics layer and
             # survive curses erases, so their write_key remains valid.
             self._cover_sixel_visible = False
-            if self._cover_backend() != "chafa-kitty":
+            if _backend != "chafa-kitty":
                 self._album_cover_pane_write_key = ""
             self.stdscr.erase()
 
@@ -6190,7 +6207,10 @@ class App:
         # Persist offset so the mouse handler can compute correct queue click rows.
         self._album_cover_rows_offset = artist_cover_rows if queue_panel else 0
 
-        if _pane_active and self._album_cover_path and artist_pane_w > 0:
+        # Prevent ncurses scroll-region optimisation for the pane rows (same reason
+        # as the TAB_PLAYBACK block above).  Skip during throttle/debounce: those rows
+        # must NOT be repainted with spaces when the cover write is also being skipped.
+        if _pane_active and self._album_cover_path and artist_pane_w > 0 and not _throttle_cover:
             _ar_rows = artist_cover_rows if queue_panel else usable_h
             if _ar_rows > 0:
                 self.stdscr.redrawln(top_h, _ar_rows)

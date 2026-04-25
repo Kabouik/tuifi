@@ -2598,7 +2598,7 @@ class App:
                 ("Add to playlist [a]",                            lambda: self._add_playlist_to_playlist_async(it)),
                 ("Download with subfolders [d]",                   lambda: self._download_playlist_async(it, flat=False)),
                 ("Download flat [D]",                              lambda: self._download_playlist_async(it, flat=True)),
-                ("Delete",                                         lambda: self.playlists_delete_current()),
+                ("Delete [x]",                                     lambda: self.playlists_delete_current()),
                 ("Show lyrics [v]",                                lambda: curses.ungetch(ord("v"))),
                 ("Show info [i]",                                  lambda: curses.ungetch(ord("i"))),
             ]
@@ -2759,7 +2759,7 @@ class App:
                         except curses.error:
                             pass
                 hint  = " j/k ^n/^p: navigate   g/G: top/bottom   x: remove   % pause   $ cancel "
-                hint2 = " f/!/:: filter   q/&/Esc: close "
+                hint2 = " f/!/:: filter   q/#/Esc: close "
                 win.addstr(box_h - 2, 2, hint[:box_w - 4], self.C(10))
                 win.addstr(box_h - 1, 2, hint2[:box_w - 4], self.C(10))
                 # Also refresh the status bar so playback progress stays live
@@ -2820,7 +2820,7 @@ class App:
                     self.dl.toggle_pause()
                 elif ch == ord("$"):
                     self.dl.cancel()
-                elif ch in (27, ord("q"), ord("&")):
+                elif ch in (27, ord("q"), ord("#")):
                     break
         finally:
             self._download_dialog_open = False
@@ -5749,7 +5749,7 @@ class App:
             "",
             "\x01 PLAYBACK                                           PLAYLISTS (8)",
             " p         play/pause                               n     new list",
-            " m         mute                                     d     delete list",
+            " m         mute                                     x     delete list",
             " -/+       volume                                   Enter open list",
             " ←/→       seek 5s                                  Bkspc exit list",
             " Shift ←/→ seek 30s                                 e/E   enqueue to end/next",
@@ -5767,11 +5767,11 @@ class App:
             " 0         show album cover art (requires chafa, ueberzugpp, or kitty)",
             " 5/6       show artist/album content relative to selected",
             " s         find similar artists",
-            " d         download selection (tracks/albums/artists, marked or cursor)",
-            " D         download as album (track selection \u2192 full album; album/artist: same as d)",
-            " %         pause / resume download queue",
+            " d         download selected track(s), album(s) or artist(s)",
+            " D         download full album(s) for selected track(s)",
+            " #         show download queue dialog",
+            " %         pause/resume download queue",
             " $         cancel pending downloads (current track finishes)",
-            " &         show download queue dialog",
             " Space     (un)mark selected and advance",
             " u/U       (un)mark all",
             " l         (un)like selected or marked: track, album, artist,  playlist",
@@ -5807,8 +5807,8 @@ class App:
             " ^\u2193/^\u2191     jump to next/prev section (sep-based in tabs 5 and 7)",
             " Alt+\u2193/\u2191  jump to next/prev album group within a track list",
             " C         color/bw",
-            " w/y/r/N/t album/year/duration/line number/album track count fields",
-            " T         status bar",
+            " W/Y/R/T/N show/hide fields for album, year, duration, album track count, line number",
+            " t         status bar",
             " \\         toggle TSV mode",
             "",
             "\x01 TOGGLES",
@@ -5816,8 +5816,7 @@ class App:
             " R         repeat mode (off, all, one)",
             " S         shuffle (off, on)",
             " F         file quality",
-            " #         show/hide singles and EPs in artist tab",
-            " t         show/hide album track count",
+            " &         show/hide singles and EPs in artist tab",
             " n         preview next track cover in playback tab (requires miniqueue + minicover)",
             "",
             "\x01 AUTOEXTEND MODES",
@@ -5842,7 +5841,7 @@ class App:
             " auto_resume_playback: resume last position on startup (default: true)",
             "",
             " Artist tab:",
-            " include_singles_and_eps_in_artist_tab: show singles/EPs (default: false, toggle with #)",
+            " include_singles_and_eps_in_artist_tab: show singles/EPs (default: false, toggle with &)",
             " max_all_tracks_number: max total tracks in All tracks section (default: 0 = unlimited)",
             "",
             " Playback tab:",
@@ -6460,10 +6459,10 @@ class App:
             ord("S"): lambda: _tog("shuffle_on", "Shuffle: on", "Shuffle: off"),
             ord("F"): lambda: (setattr(self, "quality_idx", (self.quality_idx + 1) % len(QUALITY_ORDER)),
                                self.toast(f"Quality: {QUALITY_ORDER[self.quality_idx]}")),
-            ord("T"): lambda: _tog("show_toggles", "Toggles: on", "Toggles: off"),
+            ord("t"): lambda: _tog("show_toggles", "Toggles: on", "Toggles: off"),
             ord("C"): lambda: _tog("color_mode", "Color", "B/W"),
-            ord("w"): lambda: _tog("show_track_album", "Album field: on", "Album field: off"),
-            ord("y"): lambda: _tog("show_track_year", "Year field: on", "Year field: off"),
+            ord("W"): lambda: _tog("show_track_album", "Album field: on", "Album field: off"),
+            ord("Y"): lambda: _tog("show_track_year", "Year field: on", "Year field: off"),
             ord("<"): lambda: _skip(-1),
             ord(","): lambda: _skip(-1),
             ord(">"): lambda: _skip(+1),
@@ -6475,11 +6474,10 @@ class App:
             ord("p"): lambda: self.play_queue_index(self.queue_play_idx) if not self.mp.alive() and self.queue_items else self.toggle_pause(),
             ord(";"): lambda: self.switch_tab(self._prev_tab, refresh=False) if self._prev_tab != self.tab else None,
             ord("N"): lambda: self.playlists_create() if self.tab == TAB_PLAYLISTS else _tog("show_line_numbers", "Line numbers: on", "Line numbers: off"),
-            ord("t"): lambda: _tog("show_album_track_count", "Album track count: on", "Album track count: off"),
-            ord("r"): lambda: _tog("show_track_duration", "Duration field: on", "Duration field: off"),
+            ord("T"): lambda: _tog("show_album_track_count", "Album track count: on", "Album track count: off"),
             ord("%"): lambda: self.toast("Download paused" if self.dl.toggle_pause() else "Download resumed"),
             ord("$"): lambda: (self.dl.cancel(), self.toast("Download queue cancelled")),
-            ord("&"): self.show_download_queue_dialog,
+            ord("#"): self.show_download_queue_dialog,
         }
 
         while True:
@@ -7040,7 +7038,7 @@ class App:
                     self._full_redraw()
                 continue
 
-            if ch == ord("#"):
+            if ch == ord("&"):
                 self._show_singles_eps = not self._show_singles_eps
                 self.settings["include_singles_and_eps_in_artist_tab"] = self._show_singles_eps
                 self.toast(f"Singles/EPs: {'on' if self._show_singles_eps else 'off'}")
@@ -7138,6 +7136,9 @@ class App:
                         self.playlist_names = sorted(self.playlists.keys())
                         self._reset_left_cursor()
                         self._full_redraw()
+                    continue
+                if ch == ord("x") and self.playlist_view_name is None:
+                    self.playlists_delete_current()
                     continue
                 if ch == ord("x") and self.playlist_view_name is not None:
                     pname = self.playlist_view_name

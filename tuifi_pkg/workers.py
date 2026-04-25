@@ -78,11 +78,38 @@ class DownloadManager:
         self._queue: List[Track] = []
         self._thread: Optional[threading.Thread] = None
         self.active = False
+        self.paused = False
+        self._resume_event = threading.Event()
+        self._resume_event.set()
         self.progress_line = ""
         self.progress_clear_at = 0.0
         self.error: Optional[str] = None
         self._total = 0
         self._completed = 0
+
+    def toggle_pause(self) -> bool:
+        """Toggle pause state. Returns True if now paused."""
+        with self._lock:
+            self.paused = not self.paused
+        if self.paused:
+            self._resume_event.clear()
+        else:
+            self._resume_event.set()
+        return self.paused
+
+    def cancel(self) -> None:
+        """Clear pending queue. Current download finishes normally."""
+        with self._lock:
+            n = len(self._queue)
+            self._queue.clear()
+            self._total -= n
+        self.paused = False
+        self._resume_event.set()
+
+    def queue_snapshot(self) -> tuple:
+        """Return (pending_tracks, completed, total) as a safe copy."""
+        with self._lock:
+            return list(self._queue), self._completed, self._total
 
     def enqueue(self, tracks: List[Track], worker_fn) -> None:
         if not tracks:
@@ -102,6 +129,7 @@ class DownloadManager:
         self.active = True
         self.error = None
         while True:
+            self._resume_event.wait()
             with self._lock:
                 if not self._queue:
                     break

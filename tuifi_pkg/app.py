@@ -36,7 +36,7 @@ from tuifi_pkg.models import (
     Track, Album, Artist,
     debug_log, _DEBUG_LOG,
     _resolve_config_dir, _default_downloads_dir,
-    STATE_DIR, QUEUE_FILE, LIKED_FILE, PLAYLISTS_FILE, HISTORY_FILE, SETTINGS_FILE, DOWNLOADS_DIR, COVER_CACHE_DIR,
+    STATE_DIR, QUEUE_FILE, LIKED_FILE, PLAYLISTS_FILE, HISTORY_FILE, SETTINGS_FILE, DOWNLOADS_DIR, DOWNLOAD_LOG_FILE, COVER_CACHE_DIR,
     mkdirp, clamp, safe_filename, year_norm, album_year_from_obj,
     fmt_time, fmt_dur,
     track_to_mono, mono_to_track,
@@ -859,26 +859,6 @@ class App:
     def is_liked(self, tid: int) -> bool:
         return tid in self.liked_ids
 
-    def web_base(self) -> str:
-        # TODO: derive this properly. The two approaches tried so far are both
-        # unsatisfactory:
-        #   1. Strip the "api." subdomain from the API URL — fragile; not all
-        #      instances expose a web UI at that domain, and the mapping is not
-        #      guaranteed.
-        #   2. Hardcode a specific public instance — works for most users today
-        #      but is wrong in principle.
-        # For now we hardcode monochrome.tf: it is a known public TIDAL web
-        # client, and any user who can open tuifi already has a working API
-        # instance, so the domain is reachable.
-        #
-        # u = urllib.parse.urlparse(self.api_base)
-        # host = u.netloc
-        # scheme = u.scheme or "https"
-        # if host.startswith("api."):
-        #     host = host[4:]
-        # return f"{scheme}://{host}"
-        return "https://monochrome.tf"
-
     def open_url(self, url: str) -> None:
         try:
             if os.path.exists("/data/data/com.termux"):
@@ -986,6 +966,10 @@ class App:
 
     def _looks_like_track_dict(self, d: Dict[str, Any]) -> bool:
         if "id" not in d or not (("title" in d) or ("name" in d)):
+            return False
+        if d.get("type") in ("ALBUM", "SINGLE", "EP", "COMPILATION"):
+            return False
+        if "numberOfTracks" in d or "numberOfVideos" in d:
             return False
         return any(k in d for k in ("trackNumber", "trackNo", "duration", "durationSeconds",
                                     "trackDuration", "isrc", "artists", "artist"))
@@ -2172,17 +2156,35 @@ class App:
         self._enqueue_tracks(self._target_tracks(), insert_after_playing)
 
     def _fetch_artist_tracks(self, artist: Artist) -> List[Track]:
-        """Blocking: fetch and dedupe all tracks for a single artist (catalog then search fallback)."""
-        tracks: List[Track] = []
+        """Blocking: fetch and dedupe all tracks for a single artist via per-album fetching."""
         aid = self._resolve_artist_id_via_track(artist, artist.id)
         if aid:
-            _albums, tracks = self._fetch_artist_catalog_by_artist_id(aid)
-        if not tracks:
-            payload2 = self.client.search_tracks(artist.name, limit=300)
-            a0 = artist.name.strip().lower()
-            tracks = [t for t in self._extract_tracks_from_search(payload2)
-                      if t.artist.strip().lower() == a0]
-        return self._dedupe_tracks(tracks)
+            albums, top_tracks = self._fetch_artist_catalog_by_artist_id(aid)
+            if not albums and not top_tracks:
+                albums = self._dedupe_albums(
+                    self._extract_artist_albums_from_payload(self.client.artist(int(aid)))
+                )
+            if albums:
+                seen: set = set()
+                all_tracks: List[Track] = []
+                for alb in albums:
+                    if not alb.id:
+                        continue
+                    try:
+                        for t in self._fetch_album_tracks_by_album_id(alb.id):
+                            if t.id not in seen:
+                                seen.add(t.id)
+                                all_tracks.append(t)
+                    except Exception:
+                        pass
+                if all_tracks:
+                    return self._dedupe_tracks(all_tracks)
+            if top_tracks:
+                return self._dedupe_tracks(top_tracks)
+        payload2 = self.client.search_tracks(artist.name, limit=300)
+        a0 = artist.name.strip().lower()
+        return self._dedupe_tracks([t for t in self._extract_tracks_from_search(payload2)
+                                    if t.artist.strip().lower() == a0])
 
     def _with_artist_tracks_async(self, artist: Artist, on_tracks, init_toast: str = "", sort: bool = True) -> None:
         """Fetch all artist tracks in background, then call on_tracks(tracks)."""
@@ -2201,6 +2203,17 @@ class App:
 
     def _download_artist_async(self, artist: Artist) -> None:
         self._with_artist_tracks_async(artist, self.start_download_tracks, "Artist DL…", sort=False)
+
+    def _download_liked_current(self) -> None:
+        it = self._selected_left_item()
+        if isinstance(it, Track):
+            self.start_download_tracks([it])
+        elif isinstance(it, Album):
+            self._bg_download_album(it)
+        elif isinstance(it, Artist):
+            self._download_artist_async(it)
+        elif isinstance(it, str):
+            self._download_playlist_async(it, flat=False)
 
     def save_mix_as_playlist_async(self, name: str, seed: Any) -> None:
         """Create a playlist from a mix seed (Track/Album/Artist), save to tab 8 and liked."""
@@ -2646,6 +2659,17 @@ class App:
             elif ch == ord("D"): self._download_playlist_async(name, flat=True); return
             elif ch in (27, ord("q")): return
 
+    def _log_download_failure(self, t: Track, error: str, url: Optional[str] = None) -> None:
+        try:
+            ts = time.strftime("%Y-%m-%d %H:%M:%S")
+            tidal_url = f"https://tidal.com/browse/track/{t.id}"
+            stream_url = f"  stream: {url}" if url else "  stream: unavailable"
+            line = f"[{ts}] FAIL id={t.id} | {t.artist} - {t.title} ({t.album})\n  error: {error}\n  tidal: {tidal_url}\n{stream_url}\n"
+            with open(DOWNLOAD_LOG_FILE, "a", encoding="utf-8") as f:
+                f.write(line)
+        except Exception:
+            pass
+
     def _download_worker_impl(self, t: Track, remaining: int, current: int, total: int, set_progress, root: str, flat: bool) -> None:
         label = f"{t.artist[:16]} - {t.title[:16]}"
         count_s = f"[{current}/{total}]"
@@ -2676,6 +2700,7 @@ class App:
             sp(f"DL FAIL {count_s} {label}")
             self.toast(f"DL Error: {err_msg[:50]}")
             debug_log(f"_download_worker: {err_msg}")
+            self._log_download_failure(t, err_msg)
             return
 
         ext = self._guess_ext(url)
@@ -2725,6 +2750,7 @@ class App:
             sp(f"DL FAIL {count_s} {label}")
             self.toast(f"DL Error: {str(e)[:50]}")
             debug_log(f"_download_worker: http error: {e}")
+            self._log_download_failure(t, f"http error: {e}", url)
             return
         sp(f"DL {count_s} done {label}")
 
@@ -5564,6 +5590,8 @@ class App:
             " 5/6       show artist/album content relative to selected",
             " s         find similar artists",
             " D         download (selected, marked, album, all tracks of a playlist)",
+            " %         pause /resume download queue",
+            " $         cancel pending downloads after current track",
             " Space     (un)mark selected and advance",
             " u/U       (un)mark all",
             " l         (un)like selected or marked: track, album, artist,  playlist",
@@ -6254,7 +6282,9 @@ class App:
             ord(";"): lambda: self.switch_tab(self._prev_tab, refresh=False) if self._prev_tab != self.tab else None,
             ord("N"): lambda: self.playlists_create() if self.tab == TAB_PLAYLISTS else _tog("show_line_numbers", "Line numbers: on", "Line numbers: off"),
             ord("t"): lambda: _tog("show_album_track_count", "Album track count: on", "Album track count: off"),
-            ord("d"): lambda: self.playlists_delete_current() if self.tab == TAB_PLAYLISTS else _tog("show_track_duration", "Duration field: on", "Duration field: off"),
+            ord("d"): lambda: self.playlists_delete_current() if self.tab == TAB_PLAYLISTS else self._download_liked_current() if self.tab == TAB_LIKED and not self._queue_context() else _tog("show_track_duration", "Duration field: on", "Duration field: off"),
+            ord("%"): lambda: self.toast("Download paused" if self.dl.toggle_pause() else "Download resumed"),
+            ord("$"): lambda: (self.dl.cancel(), self.toast("Download queue cancelled")),
         }
 
         while True:
@@ -6584,23 +6614,23 @@ class App:
             if ch == ord("o"):
                 it = self._selected_left_item()
                 if isinstance(it, Artist) and it.id:
-                    self.open_url(f"{self.web_base()}/artist/{it.id}")
+                    self.open_url(f"https://tidal.com/browse/artist/{it.id}")
                 elif isinstance(it, tuple) and it[0] == "artist_header":
-                    self.open_url(f"{self.web_base()}/artist/{it[1][0]}")
+                    self.open_url(f"https://tidal.com/browse/artist/{it[1][0]}")
                 elif isinstance(it, Album) and it.id:
-                    self.open_url(f"{self.web_base()}/album/{it.id}")
+                    self.open_url(f"https://tidal.com/browse/album/{it.id}")
                 else:
                     t = self._current_selection_track()
                     if t:
-                        self.open_url(f"{self.web_base()}/track/{t.id}")
+                        self.open_url(f"https://tidal.com/browse/track/{t.id}")
                 continue
             if ch == ord("O"):
                 if self.tab == TAB_ARTIST and self.artist_ctx:
-                    self.open_url(f"{self.web_base()}/artist/{self.artist_ctx[0]}")
+                    self.open_url(f"https://tidal.com/browse/artist/{self.artist_ctx[0]}")
                 elif self.tab == TAB_ALBUM and self.album_header and self.album_header.id:
-                    self.open_url(f"{self.web_base()}/album/{self.album_header.id}")
+                    self.open_url(f"https://tidal.com/browse/album/{self.album_header.id}")
                 elif self.current_track:
-                    self.open_url(f"{self.web_base()}/track/{self.current_track.id}")
+                    self.open_url(f"https://tidal.com/browse/track/{self.current_track.id}")
                 continue
 
             if ch == ord("q"):
@@ -6992,6 +7022,17 @@ class App:
                 continue
 
             if ch == ord("D"):
+                if self._queue_context():
+                    marked = self._marked_tracks_from_queue()
+                    if marked:
+                        self.start_download_tracks(marked)
+                    else:
+                        t = self._queue_selected_track()
+                        if t and t.album_id:
+                            self._bg_download_album(Album(id=t.album_id, title=t.album, artist=t.artist, year=t.year, cover=t.cover))
+                        elif t:
+                            self.start_download_tracks([t])
+                    continue
                 if self.tab == TAB_PLAYLISTS and self.playlist_view_name is None:
                     self.playlists_download_prompt()
                     continue
@@ -7022,6 +7063,9 @@ class App:
                         continue
                 if self.tab == TAB_PLAYLISTS and self.playlist_view_name is not None:
                     self.start_download_tracks(list(self.playlist_view_tracks))
+                    continue
+                if not self._queue_context() and self.tab == TAB_LIKED:
+                    self._download_liked_current()
                     continue
                 self.start_download_tracks(self._target_tracks())
                 continue

@@ -1,7 +1,7 @@
 # tuifi
 
 > [!WARNING]
-> TIDAL has begun blocking HiFi API accounts en masse starting from around now. Until a solution is found, you may have trouble using =tuifi=, with a public or private instance. There is nothing =tuifi= can do about it and issues you may encounter related to this do not come from =tuifi= itself, but developers are working on the HiFi side to work around the situation.
+> TIDAL has been blocking HiFi API accounts en masse starting from around now. Accounts (and therefore tokens) are not meant to be shared, as per TIDAL's terms of service for individual accounts. Sharing an instance is very likely to raise red flags and get the associated account blocked.
 
 1.  [Features](#features)
 2.  [Usage](#usage)
@@ -16,9 +16,9 @@
 8.  [License](#license)
 9.  [Mirrors](#mirrors)
 
-A feature-rich-ish TUI music player built on top of [TIDAL HiFi API](https://github.com/binimum/hifi-api): browse, search, stream, download, organize and manage lossless music from your comfy terminal.
+A feature-rich-ish TUI music player built on top of [TIDAL HiFi API](https://github.com/binimum/hifi-api): browse, search, stream, batch download, organize and manage lossless music from your comfy terminal.
 
-While [HiFi API instances with unrestricted access](https://github.com/monochrome-music/monochrome/blob/main/INSTANCES.md#official--community-apis) exist, this may be considered as music piracy in many countries and does not give artists the love they deserve. This project is intended for TIDAL subscribers who also self host their own HiFi instance for convenience, and favor a keyboard-driven terminal workflow over a web player.
+While [HiFi API instances with unrestricted access](https://github.com/monochrome-music/monochrome/blob/main/INSTANCES.md#official--community-apis) used to exist, this may be considered as music piracy in many countries and does not give artists the love they deserve. This project is intended for TIDAL subscribers who also self-host their own [HiFi](https://github.com/binimum/hifi-api) instance for convenience, and favor a keyboard-driven terminal workflow over a web player.
 
 [![Click to play the demo](demo/ss20260312-191917.png)](https://github.com/Kabouik/tuifi/raw/refs/heads/main/demo/tuifi-demo.mp4)
 [![Click to play the demo](demo/ss20260312-191954.png)](https://github.com/Kabouik/tuifi/raw/refs/heads/main/demo/tuifi-demo.mp4)
@@ -104,7 +104,7 @@ Then make a shortcut that uses Python 3.13 specifically, or the following comman
 
 # Configuration
 
-While `tuifi` should be compatible with any HiFi API instance, some popular ones are made public and may therefore violate TIDAL's TOS. Consequently, the program is delivered with no default instance set, and users should set their preferred instance either using the `--api` runtime flag or by editing `settings.jsonc`. Users choosing to use a public HiFi instance with no legitimate TIDAL subscription do so at their own risk.
+While `tuifi` should be compatible with any HiFi API instance, those that are made public violate TIDAL's terms of service and may therefore be very shortlived, for a reason. Consequently, the program is delivered with no default instance set, and users should set their preferred instance either using the `--api` runtime flag or by editing `settings.jsonc`. Users choosing to use a HiFi instance shared by someone with no legitimate TIDAL subscription do so at their own risk. TIDAL does offer a one-month trial if you want to give it a go before deciding on your subscription, though.
 
 Settings are stored in `settings.jsonc` and automatically updated upon using toggles within the TUI. On first run, `tuifi` will prompt before creating the config directory.
 
@@ -168,7 +168,7 @@ Any content accessed by this project is hosted by external non-affiliated source
 
 This project is to be used at the user's own risk, based on their government and laws. No audio files or direct links to audio files are stored in this repository, the script merely interfaces with sources and API that exist independently and are publicly available. This project has no control over the content it finds at any point in time, and no control over the content served by the source services, it just uses a documented API provided by other tools to fetch targeted information and content otherwise available with a web browser.
 
-Hence, any copyright infringements or DMCA claims in this project's regards are to be forwarded to the associated content provider or API by the associated notifier of any such claims. This script does not infringe copyright, just like a web browser or a search engine, users are responsible with how they use the tool, and thus is not a valid reason to send a DMCA notice to Codeberg or the maintainers of this repository. If any source accessed using the script infringes on your rights as a copyright holder, they may be removed by contacting the web host service that published them online and is actually hosting them (not Codeberg, nor the maintainers of this repository).
+Hence, any copyright infringements or DMCA claims in this project's regards are to be forwarded to the associated content provider or API by the associated notifier of any such claims. This script does not infringe copyright, just like a web browser or a search engine, users are responsible with how they use the tool, and thus is not a valid reason to send a DMCA notice to Codeberg or the maintainers of this repository. If any source accessed using the script infringes on your rights as a copyright holder, they may be removed by contacting the service that published them online and is actually hosting them (not this repository, nor its maintainers).
 
 # License
 

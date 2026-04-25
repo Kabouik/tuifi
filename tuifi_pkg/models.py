@@ -71,6 +71,7 @@ PLAYLISTS_FILE = os.path.join(STATE_DIR, "playlists.json")
 HISTORY_FILE   = os.path.join(STATE_DIR, "history.json")
 SETTINGS_FILE  = os.path.join(STATE_DIR, "settings.jsonc")
 DOWNLOADS_DIR  = _default_downloads_dir()
+DOWNLOAD_LOG_FILE = os.path.join(STATE_DIR, "download.log")
 
 
 # ---------------------------------------------------------------------------

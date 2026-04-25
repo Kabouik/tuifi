@@ -29,3 +29,4 @@
 ** In tab 0, clicking on the main cover cycles view types, and when going back to miniqueue + minicover, it forgets about preview mode being enabled and just selects the current track
 ** We may be able to fetch all metadata to TIDAL directly (without sending origin or referer) and just use HiFi for audio; check Discord recommendation
 ** Cycle through known apis in case of issues? Remember past ones and try them?
+** When preview_next is enabled, add the text "Next in queue:" above the cover (same line as the tab names)

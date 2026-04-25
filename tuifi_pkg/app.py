@@ -251,6 +251,7 @@ class App:
         self._album_cover_visible_x: int = 0
         self._album_cover_visible_rows: int = 0
         self._album_cover_visible_cols: int = 0
+        self._album_cover_pane_write_key: str = ""  # last rendered (path:x:top:w:h); skip write if unchanged
         self._album_cover_rows_offset: int = 0       # rows reserved for minicover above miniqueue (used by mouse handler)
 
         self._q_overlay_scroll: int = 0
@@ -3840,20 +3841,23 @@ class App:
         except Exception as e:
             debug_log(f"_prerender_album_cover error: {e}")
 
-    def _render_album_cover_pane(self, top_h: int, x: int, pane_w: int, pane_h: int) -> None:
-        """Write artist cover image to terminal. Called after stdscr.refresh()."""
+    def _render_album_cover_pane(self, top_h: int, x: int, pane_w: int, pane_h: int) -> bool:
+        """Write artist cover image to terminal. Returns True if a write occurred."""
         if not self._album_cover_path or not os.path.exists(self._album_cover_path):
-            return
+            return False
         backend = self._cover_backend()
         if backend == "none":
-            return
+            return False
 
         img_rows = pane_h
         img_cols = pane_w
 
         if backend == "ueberzugpp":
+            write_key_ub = f"{self._album_cover_path}:{x}:{top_h}:{img_cols}:{img_rows}"
+            if write_key_ub == self._album_cover_pane_write_key and self._album_cover_visible:
+                return False
             if not self._ueberzug_start():
-                return
+                return False
             try:
                 subprocess.run(
                     ["ueberzugpp", "cmd", "-s", self._cover_ub_socket,
@@ -3870,7 +3874,8 @@ class App:
             self._album_cover_visible_x = x
             self._album_cover_visible_rows = img_rows
             self._album_cover_visible_cols = img_cols
-            return
+            self._album_cover_pane_write_key = write_key_ub
+            return True
 
         is_kitty = backend == "chafa-kitty"
         is_symbols = backend == "chafa-symbols"
@@ -3897,10 +3902,17 @@ class App:
                     self._album_cover_render_key = render_key
                     buf = result.stdout
                 else:
-                    return
+                    return False
             except Exception as e:
                 debug_log(f"_render_album_cover_pane chafa error: {e}")
-                return
+                return False
+
+        # Skip the write if this exact cover at this exact position/size is already
+        # on screen — avoids re-sending potentially large sixel/kitty data every frame
+        # when nothing has changed (e.g. scrolling within the same album/artist).
+        write_key = f"{self._album_cover_path}:{x}:{top_h}:{img_cols}:{img_rows}"
+        if write_key == self._album_cover_pane_write_key and self._album_cover_visible:
+            return False
 
         # Write directly (not via _write_image_to_terminal) to avoid touching
         # _cover_sixel_visible/_cover_sixel_* which belong to the playback tab.
@@ -3925,6 +3937,8 @@ class App:
         self._album_cover_visible_x = x
         self._album_cover_visible_rows = img_rows
         self._album_cover_visible_cols = img_cols
+        self._album_cover_pane_write_key = write_key
+        return True
 
     def _erase_album_cover_terminal(self) -> None:
         """Remove artist cover image from the terminal."""
@@ -3958,6 +3972,7 @@ class App:
                 sys.stdout.buffer.write(buf)
                 sys.stdout.buffer.flush()
         self._album_cover_visible = False
+        self._album_cover_pane_write_key = ""
 
     def _album_cover_clear(self) -> None:
         """Full artist cover cleanup: erase from terminal and reset state."""
@@ -6062,7 +6077,13 @@ class App:
             # until the new one overwrites it. Erasing explicitly causes a one-frame
             # flash of empty space before the replacement arrives.
             if self._album_cover_visible and self._cover_backend() != "chafa-kitty":
-                self._erase_album_cover_terminal()
+                # Only erase when the cover path has actually changed (new artist/album).
+                # Skipping the erase avoids the costly clear+rewrite cycle every frame
+                # while the user is just scrolling within the same context.
+                cur_path = self._album_cover_path or ""
+                if not self._album_cover_pane_write_key or \
+                        not self._album_cover_pane_write_key.startswith(cur_path + ":"):
+                    self._erase_album_cover_terminal()
             # Full redraw: stdscr.erase()+refresh() will overwrite the sixel area with
             # spaces, so mark it as no longer visible.  This ensures _render_cover_image
             # re-writes it even if the render key is unchanged.
@@ -6196,8 +6217,8 @@ class App:
                 artist_x = w - artist_pane_w
                 _render_h = artist_cover_rows if queue_panel else (usable_h - 1)
                 if _render_h > 0:
-                    self._render_album_cover_pane(top_h, artist_x, artist_pane_w, _render_h)
-                    if self._album_cover_visible:
+                    _pane_wrote = self._render_album_cover_pane(top_h, artist_x, artist_pane_w, _render_h)
+                    if _pane_wrote:
                         self.stdscr.redrawln(0, top_h)
                         self.stdscr.redrawln(h - status_h - 1, status_h + 1)
                         self.stdscr.refresh()

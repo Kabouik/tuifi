@@ -2208,7 +2208,10 @@ class App:
     def _download_liked_current(self) -> None:
         it = self._selected_left_item()
         if isinstance(it, Track):
-            self.start_download_tracks([it])
+            if it.album_id:
+                self._bg_download_album(Album(id=it.album_id, title=it.album, artist=it.artist, year=it.year, cover=it.cover))
+            else:
+                self.start_download_tracks([it])
         elif isinstance(it, Album):
             self._bg_download_album(it)
         elif isinstance(it, Artist):
@@ -7197,7 +7200,20 @@ class App:
                     self.start_download_tracks(list(self.playlist_view_tracks))
                     continue
                 if not self._queue_context() and self.tab == TAB_LIKED:
-                    self._download_liked_current()
+                    marked_tracks = self._marked_tracks_from_left()
+                    if marked_tracks:
+                        seen_albums: set = set()
+                        solo: List[Track] = []
+                        for _mt in marked_tracks:
+                            if _mt.album_id and _mt.album_id not in seen_albums:
+                                seen_albums.add(_mt.album_id)
+                                self._bg_download_album(Album(id=_mt.album_id, title=_mt.album, artist=_mt.artist, year=_mt.year, cover=_mt.cover))
+                            elif not _mt.album_id:
+                                solo.append(_mt)
+                        if solo:
+                            self.start_download_tracks(solo)
+                    else:
+                        self._download_liked_current()
                     continue
                 self.start_download_tracks(self._target_tracks())
                 continue

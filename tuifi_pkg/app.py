@@ -105,6 +105,7 @@ class App:
         self.mp = MPV()
         self.mp_poller = MPVPoller(self.mp, self._on_mpv_tick)
         self.dl = DownloadManager()
+        self._download_dialog_open = False
 
         mkdirp(STATE_DIR)
 
@@ -2359,7 +2360,7 @@ class App:
                     else:
                         filt_disp = "Type / to filter"
                         filt_attr = self.C(10)
-                        hint = " j/k ^n/^p: navigate   /: filter   Esc/q: close "
+                        hint = " j/k ^n/^p: navigate   /: filter   q/Esc: close "
                     win.addstr(1, 2, filt_disp[:box_w - 4], filt_attr)
 
                 item_row = 1 if simple else 2
@@ -2373,7 +2374,7 @@ class App:
                     win.addstr(item_row + row, 2, visible[fi][1][:box_w - 4].ljust(box_w - 4), attr)
 
                 if simple:
-                    win.addstr(box_h - 1, 2, " j/k ^n/^p: navigate   Esc/q: close "[:box_w - 4], self.C(10))
+                    win.addstr(box_h - 1, 2, " j/k ^n/^p: navigate   q/Esc: close "[:box_w - 4], self.C(10))
                 else:
                     win.addstr(box_h - 1, 2, hint[:box_w - 4], self.C(10))
                 win.touchwin()
@@ -2636,28 +2637,158 @@ class App:
             ("Download with subfolders [d]", False),
             ("Download flat [D]",            True),
         ]
-        hint = " j/k: navigate   Enter: confirm   Esc/q: cancel "
+        hint = " j/k ^n/^p: navigate   Enter: confirm   q/Esc: cancel "
         _, w = self.stdscr.getmaxyx()
         box_w = clamp(max(len(name), max(len(s) for s, _ in items), len(hint)) + 6, 40, w - 6)
         box_h = len(items) + 3   # title row + items + hint row
         _, _, win = self._popup_win(box_h, box_w)
         idx = 0
         self.stdscr.nodelay(False)
-        while True:
-            win.erase(); win.box()
-            win.addstr(0, 2, f" {name} "[:box_w - 2], self.C(4))
-            for i, (label, _) in enumerate(items):
-                attr = curses.A_REVERSE if i == idx else 0
-                win.addstr(1 + i, 2, label[:box_w - 4].ljust(box_w - 4), attr)
-            win.addstr(box_h - 1, 2, hint[:box_w - 4], self.C(10))
-            win.touchwin(); win.refresh()
-            ch = self.stdscr.getch()
-            if ch in (curses.KEY_DOWN, ord("j"), 14): idx = (idx + 1) % len(items)
-            elif ch in (curses.KEY_UP, ord("k"), 16): idx = (idx - 1) % len(items)
-            elif ch in (10, 13): self._download_playlist_async(name, flat=items[idx][1]); return
-            elif ch == ord("d"): self._download_playlist_async(name, flat=False); return
-            elif ch == ord("D"): self._download_playlist_async(name, flat=True); return
-            elif ch in (27, ord("q")): return
+        try:
+            while True:
+                win.erase(); win.box()
+                win.addstr(0, 2, f" {name} "[:box_w - 2], self.C(4))
+                for i, (label, _) in enumerate(items):
+                    attr = curses.A_REVERSE if i == idx else 0
+                    win.addstr(1 + i, 2, label[:box_w - 4].ljust(box_w - 4), attr)
+                win.addstr(box_h - 1, 2, hint[:box_w - 4], self.C(10))
+                win.touchwin(); win.refresh()
+                ch = self.stdscr.getch()
+                if ch in (curses.KEY_DOWN, ord("j"), 14): idx = (idx + 1) % len(items)
+                elif ch in (curses.KEY_UP, ord("k"), 16): idx = (idx - 1) % len(items)
+                elif ch in (10, 13): self._download_playlist_async(name, flat=items[idx][1]); return
+                elif ch == ord("d"): self._download_playlist_async(name, flat=False); return
+                elif ch == ord("D"): self._download_playlist_async(name, flat=True); return
+                elif ch in (27, ord("q")): return
+        finally:
+            self.stdscr.nodelay(True)
+            self._full_redraw()
+
+    def show_download_queue_dialog(self) -> None:
+        h, w = self.stdscr.getmaxyx()
+        box_w = min(w - 4, 73)
+        box_h = min(h - 4, 26)
+        inner_rows = box_h - 5  # title + status + progress + separator + hint
+        _, _, win = self._popup_win(box_h, box_w)
+        win.timeout(200)
+        scroll = 0
+        manual_scroll = False
+        filt_q = ""
+        filt_hits: List[int] = []
+        filt_pos = -1
+        self._download_dialog_open = True
+        try:
+            while True:
+                all_tracks, track_status, completed, total, failed = self.dl.queue_snapshot()
+                if self.dl.paused:
+                    status = "PAUSED"
+                elif self.dl.active:
+                    status = "Downloading"
+                else:
+                    status = "Idle"
+                # Determine status for each track in original order
+                rows = [(trk, track_status.get(trk.id, "PEND")) for trk in all_tracks]
+                # Recompute filter hits against current rows
+                if filt_q:
+                    filt_hits = [i for i, (trk, _) in enumerate(rows)
+                                 if filt_q in f"{trk.artist} {trk.title} {trk.album}".lower()]
+                    if filt_hits:
+                        filt_pos = clamp(filt_pos, 0, len(filt_hits) - 1)
+                    else:
+                        filt_pos = -1
+                max_scroll = max(0, len(rows) - inner_rows)
+                # Auto-scroll: active filter hit > active track > manual
+                if filt_hits and filt_pos >= 0:
+                    scroll = clamp(filt_hits[filt_pos] - inner_rows // 2, 0, max_scroll)
+                elif not manual_scroll and rows:
+                    active_idx = next((i for i, (_, st) in enumerate(rows) if st == "PEND"), len(rows) - 1)
+                    scroll = clamp(active_idx - inner_rows // 2, 0, max_scroll)
+                else:
+                    scroll = clamp(scroll, 0, max_scroll)
+                win.erase()
+                win.box()
+                win.addstr(0, 2, " Download queue ", self.C(4))
+                summary = f"{status}  {completed}/{total} done  {len(rows) - completed} pending"
+                if failed:
+                    summary += f"  {failed} failed"
+                summary += "  ep/s: " + ("on" if self._show_singles_eps else "off")
+                win.addstr(1, 2, summary[:box_w - 4])
+                if filt_q:
+                    filt_info = f"/{filt_q}  {filt_pos+1}/{len(filt_hits)}" if filt_hits else f"/{filt_q}  no match"
+                    win.addstr(2, 2, filt_info[:box_w - 4].ljust(box_w - 4), self.C(4))
+                else:
+                    prog = (self.dl.progress_line or "")[:box_w - 4]
+                    win.addstr(2, 2, prog.ljust(box_w - 4))
+                win.hline(3, 1, curses.ACS_HLINE, box_w - 2)
+                hit_set = set(filt_hits) if filt_q else set()
+                if not rows:
+                    win.addstr(4, 2, "(queue empty)", self.C(10))
+                else:
+                    for i in range(inner_rows):
+                        idx = scroll + i
+                        if idx >= len(rows):
+                            break
+                        trk, st = rows[idx]
+                        prefix_col = self.C(2) if st == "DONE" else self.C(1) if st == "FAIL" else self.C(10)
+                        prefix = f"{st} "
+                        track_str = f"{trk.artist} - {trk.title}"
+                        hi = curses.A_BOLD if idx in hit_set else 0
+                        try:
+                            win.addstr(4 + i, 2, prefix, prefix_col)
+                            win.addstr(track_str[: box_w - 4 - len(prefix)], hi)
+                        except curses.error:
+                            pass
+                hint = " j/k ^n/^p: navigate   % pause   $ cancel   f filter   q/Esc/& close "
+                win.addstr(box_h - 1, 2, hint[:box_w - 4], self.C(10))
+                # Also refresh the status bar so playback progress stays live
+                h_scr, w_scr = self.stdscr.getmaxyx()
+                self._draw_status(h_scr - 2, 0, w_scr)
+                self.stdscr.noutrefresh()
+                win.touchwin()
+                curses.doupdate()
+                ch = win.getch()
+                if ch == -1:
+                    continue
+                elif ch == curses.KEY_MOUSE:
+                    try:
+                        _, _mx, _my, _, bstate = curses.getmouse()
+                        _btn5 = getattr(curses, "BUTTON5_PRESSED", 0x200000)
+                        if bstate & curses.BUTTON4_PRESSED:
+                            manual_scroll = True
+                            scroll = max(0, scroll - 1)
+                        elif bstate & _btn5:
+                            manual_scroll = True
+                            scroll = min(scroll + 1, max_scroll)
+                    except curses.error:
+                        pass
+                elif ch in (curses.KEY_DOWN, ord("j"), 14):
+                    manual_scroll = True
+                    scroll = min(scroll + 1, max_scroll)
+                elif ch in (curses.KEY_UP, ord("k"), 16):
+                    manual_scroll = True
+                    scroll = max(0, scroll - 1)
+                elif ch == ord("n") and filt_hits:
+                    filt_pos = (filt_pos + 1) % len(filt_hits)
+                    manual_scroll = False
+                elif ch == ord("N") and filt_hits:
+                    filt_pos = (filt_pos - 1) % len(filt_hits)
+                    manual_scroll = False
+                elif ch == ord("f"):
+                    q = self.prompt_text("Filter:", filt_q)
+                    if q is not None:
+                        filt_q = q.strip().lower()
+                        filt_hits = []
+                        filt_pos = -1
+                        manual_scroll = False
+                elif ch == ord("%"):
+                    self.dl.toggle_pause()
+                elif ch == ord("$"):
+                    self.dl.cancel()
+                elif ch in (27, ord("q"), ord("&")):
+                    break
+        finally:
+            self._download_dialog_open = False
+        self._full_redraw()
 
     def _log_download_failure(self, t: Track, error: str, url: Optional[str] = None) -> None:
         try:
@@ -2671,7 +2802,6 @@ class App:
             pass
 
     def _download_worker_impl(self, t: Track, remaining: int, current: int, total: int, set_progress, root: str, flat: bool) -> None:
-        label = f"{t.artist[:16]} - {t.title[:16]}"
         count_s = f"[{current}/{total}]"
 
         def sp(msg: str) -> None:
@@ -2697,7 +2827,9 @@ class App:
 
         if url is None:
             err_msg = f"all qualities failed: {last_err}"
-            sp(f"DL FAIL {count_s} {label}")
+            sp(f"DL FAIL {count_s} {t.artist} - {t.title}")
+            self.dl.failed += 1
+            self.dl.mark_result(t, "FAIL")
             self.toast(f"DL Error: {err_msg[:50]}")
             debug_log(f"_download_worker: {err_msg}")
             self._log_download_failure(t, err_msg)
@@ -2716,60 +2848,54 @@ class App:
             )
             out_dir = os.path.join(root, rel_path)
         mkdirp(out_dir)
-        # filename pattern is configurable via settings["download_filename"]
         filename_pat = str(self.settings.get("download_filename") or "{track:02d}. {artist} - {title}")
-
-        # Use safe values; keep "00" for unknown track number
         track_n = t.track_no if (isinstance(t.track_no, int) and t.track_no > 0) else 0
         year_s = yv if yv != "????" else "unknown"
-
         try:
             base_name_raw = filename_pat.format(
-                artist=t.artist or "",
-                album=t.album or "",
-                title=t.title or "",
-                year=year_s,
-                track=track_n,
+                artist=t.artist or "", album=t.album or "",
+                title=t.title or "", year=year_s, track=track_n,
             )
         except Exception:
-            # fallback if user pattern is invalid
             base_name_raw = f"{track_n:02d}. {t.artist} - {t.title}"
-
-        base_name = safe_filename(base_name_raw)
-        out_path = os.path.join(out_dir, f"{base_name}.{ext}")
+        fname = safe_filename(base_name_raw) + f".{ext}"
+        out_path = os.path.join(out_dir, fname)
 
         def cb(done: int, tot: Optional[int]) -> None:
             mb = done / (1024 * 1024)
             pct = f" {int(done*100/tot)}%" if tot and tot > 0 else ""
-            sp(f"DL {count_s}{pct} {mb:.1f}MB {label}")
+            sp(f"DL {count_s}{pct} {mb:.1f}MB {fname}")
 
-        sp(f"DL {count_s} resolving {label}")
+        sp(f"DL {count_s} {fname}")
         try:
             http_stream_download(url, out_path, cb, timeout=120.0)
         except Exception as e:
-            sp(f"DL FAIL {count_s} {label}")
+            sp(f"DL FAIL {count_s} {fname}")
+            self.dl.failed += 1
+            self.dl.mark_result(t, "FAIL")
             self.toast(f"DL Error: {str(e)[:50]}")
             debug_log(f"_download_worker: http error: {e}")
             self._log_download_failure(t, f"http error: {e}", url)
             return
-        sp(f"DL {count_s} done {label}")
+        sp(f"DL {count_s} done {fname}")
 
         cover_path = os.path.join(out_dir, "cover.jpg")
         if not os.path.exists(cover_path):
             try:
                 cover_url = self._fetch_cover_url_for_track(t)
                 if cover_url:
-                    sp(f"DL {count_s} cover {label}")
+                    sp(f"DL {count_s} cover {fname}")
                     cover_data = http_get_bytes(cover_url, timeout=20.0)
                     with open(cover_path, "wb") as f:
                         f.write(cover_data)
             except Exception:
                 pass
 
+        base_name = safe_filename(base_name_raw)
         lrc_path = os.path.join(out_dir, f"{base_name}.lrc")
         if not os.path.exists(lrc_path):
             try:
-                sp(f"DL {count_s} lyrics {label}")
+                sp(f"DL {count_s} lyrics {fname}")
                 lyr_lines = self._fetch_lyrics_lines(t.id, strip_lrc=False)
                 if lyr_lines:
                     with open(lrc_path, "w", encoding="utf-8") as f:
@@ -2781,6 +2907,7 @@ class App:
         # Use full (non-truncated) artist/title here, and include the extension.
         full_label = f"{t.artist} - {t.title}.{ext}"
         sp(f"DL complete {count_s} {full_label}")
+        self.dl.mark_result(t, "DONE")
 
 
     def _fetch_cover_url_for_track(self, t: Track) -> Optional[str]:
@@ -4202,7 +4329,7 @@ class App:
                 win.addstr(0, 2, f" {title} "[:box_w - 2], self.C(4))
                 self._render_popup_lines(win, lines, start, inner_h, box_w)
                 try:
-                    win.addstr(box_h - 1, 2, " j/k: cursor   PgUp/Dn: scroll info   g/G: top/bottom   q/i/ESC: close "[:box_w - 4], self.C(10))
+                    win.addstr(box_h - 1, 2, " j/k: scroll artist   PgUp/Dn: scroll info   g/G: top/bottom   q/i/ESC: close "[:box_w - 4], self.C(10))
                 except curses.error:
                     pass
                 win.touchwin()
@@ -4413,7 +4540,7 @@ class App:
         y0, x0, win = self._popup_win(box_h, box_w)
         idx = 0
         _last_click: tuple = (0.0, -1)
-        hint = " j/k ^n/^p: navigate  Enter/5: go to  Esc/q: close "
+        hint = " j/k ^n/^p: navigate  Enter/5: go to  q/Esc: close "
         hint2 = " a: add to playlist   e/E: enqueue    l: like "
         try:
             while True:
@@ -5502,7 +5629,7 @@ class App:
             if self.priority_queue:
                 parts.append(f"pq: {len(self.priority_queue)}")
             if self._show_singles_eps:
-                parts.append("singles/EPs: on")
+                parts.append("ep/s: on")
             if self._preview_next:
                 parts.append("preview: yes")
             line1 = " ? help  |  " + "   ".join(parts)
@@ -5533,13 +5660,16 @@ class App:
             right = self.toast_msg
         elif self._artist_status:
             right = self._artist_status
+        right_pos = None
         if right:
             right = _truncate_to_display_width(right, max(0, w - 2))
-            tpos = max(0, col_limit - _str_display_width(right))
-            line2 = line2[:tpos] + right + line2[tpos + len(right):]
+            right_pos = max(0, col_limit - _str_display_width(right))
+            line2 = line2[:right_pos] + " " * _str_display_width(right) + line2[right_pos + _str_display_width(right):]
 
         try:
             self.stdscr.addstr(y + 1, x, line2, self._status_color_pair(pa, alive))
+            if right and right_pos is not None:
+                self.stdscr.addstr(y + 1, x + right_pos, right, self.C(4))
         except curses.error:
             pass
 
@@ -5590,8 +5720,9 @@ class App:
             " 5/6       show artist/album content relative to selected",
             " s         find similar artists",
             " D         download (selected, marked, album, all tracks of a playlist)",
-            " %         pause /resume download queue",
-            " $         cancel pending downloads after current track",
+            " %         pause / resume download queue",
+            " $         cancel pending downloads (current track finishes)",
+            " &         show download queue dialog",
             " Space     (un)mark selected and advance",
             " u/U       (un)mark all",
             " l         (un)like selected or marked: track, album, artist,  playlist",
@@ -6285,6 +6416,7 @@ class App:
             ord("d"): lambda: self.playlists_delete_current() if self.tab == TAB_PLAYLISTS else self._download_liked_current() if self.tab == TAB_LIKED and not self._queue_context() else _tog("show_track_duration", "Duration field: on", "Duration field: off"),
             ord("%"): lambda: self.toast("Download paused" if self.dl.toggle_pause() else "Download resumed"),
             ord("$"): lambda: (self.dl.cancel(), self.toast("Download queue cancelled")),
+            ord("&"): self.show_download_queue_dialog,
         }
 
         while True:

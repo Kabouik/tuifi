@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 import time
 from queue import Queue, Empty
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from tuifi_pkg.models import Track, album_year_from_obj, debug_log
 from tuifi_pkg.client import HiFiClient
@@ -86,6 +86,9 @@ class DownloadManager:
         self.error: Optional[str] = None
         self._total = 0
         self._completed = 0
+        self.failed = 0
+        self._all_tracks: List[Track] = []           # full ordered list since last fresh batch
+        self._track_status: Dict[int, str] = {}      # track.id → "DONE"|"FAIL"
 
     def toggle_pause(self) -> bool:
         """Toggle pause state. Returns True if now paused."""
@@ -106,10 +109,15 @@ class DownloadManager:
         self.paused = False
         self._resume_event.set()
 
-    def queue_snapshot(self) -> tuple:
-        """Return (pending_tracks, completed, total) as a safe copy."""
+    def mark_result(self, t: Track, status: str) -> None:
+        """Record a track result ('DONE' or 'FAIL') for display in the dialog."""
         with self._lock:
-            return list(self._queue), self._completed, self._total
+            self._track_status[t.id] = status
+
+    def queue_snapshot(self) -> tuple:
+        """Return (all_tracks, track_status, completed, total, failed) as a safe copy."""
+        with self._lock:
+            return list(self._all_tracks), dict(self._track_status), self._completed, self._total, self.failed
 
     def enqueue(self, tracks: List[Track], worker_fn) -> None:
         if not tracks:
@@ -118,8 +126,12 @@ class DownloadManager:
             if not self._queue and not self.active:
                 self._total = len(tracks)
                 self._completed = 0
+                self.failed = 0
+                self._all_tracks = list(tracks)
+                self._track_status = {}
             else:
                 self._total += len(tracks)
+                self._all_tracks.extend(tracks)
             self._queue.extend(tracks)
             if self._thread is None or not self._thread.is_alive():
                 self._thread = threading.Thread(target=self._run, args=(worker_fn,), daemon=True)

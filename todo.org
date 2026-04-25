@@ -24,8 +24,10 @@
    :DONE: auto-advance now guarded by _play_serial == _current_track_serial; any play_track call bumps _play_serial, suppressing the auto-advance for the entire bg-thread lifetime until the new track is confirmed (app.py ~5929)
 ** DONE [#A] RMB in queue tab does not visually select the track before showing the context menu
    :DONE: RMB handler now checks tab == TAB_QUEUE and updates queue_cursor/focus="queue" instead of left_idx (app.py ~6063)
-** When preview is enabled and we go to tab 2, the next song is selected instead of the current
+** DONE When preview is enabled and we go to tab 2, the next song is selected instead of the current
+   :DONE: switch_tab to TAB_QUEUE resets queue_cursor to queue_play_idx (app.py ~6334)
 ** In tab 0, the lyrics paen should not reduce the main cover size
-** In tab 0, clicking on the main cover cycles view types, and when going back to miniqueue + minicover, it forgets about preview mode being enabled and just selects the current track
+** DONE In tab 0, clicking on the main cover cycles view types, and when going back to miniqueue + minicover, it forgets about preview mode being enabled and just selects the current track
+   :DONE: cover-click cycle to queue_overlay=True now re-applies preview_next cursor offset when _album_cover_pane is active (app.py ~6739)
 ** DONE When preview_next is enabled, add the text "Next in queue:" above the cover (same line as the tab names)
    :DONE: "Next in queue:" drawn at row 0 in the pane area when preview_next=True on TAB_PLAYBACK+queue+pane (draw() ~6184)

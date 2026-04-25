@@ -5638,7 +5638,11 @@ class App:
         if not self.queue_items:
             return " Queue 0/0"
         pq_info = f" [+{len(self.priority_queue)}]" if self.priority_queue else ""
-        return f" Queue {clamp(self.queue_play_idx + 1, 1, len(self.queue_items))}/{len(self.queue_items)}{pq_info}"
+        n = clamp(self.queue_play_idx + 1, 1, len(self.queue_items))
+        m = len(self.queue_items)
+        if self._preview_next and self._album_cover_pane and self.queue_overlay and self.tab == TAB_PLAYBACK:
+            return f" {n}/{m}{pq_info}"
+        return f" Queue {n}/{m}{pq_info}"
 
     def _draw_queue(self, y: int, x: int, h: int, w: int) -> None:
         if h <= 1 or w <= 0: return
@@ -6199,8 +6203,9 @@ class App:
         if _pane_active and self._preview_next and self.tab == TAB_PLAYBACK \
                 and queue_panel and artist_pane_w >= 15:
             try:
-                self.stdscr.addstr(0, w - artist_pane_w,
-                                   "Next in queue:"[:artist_pane_w - 1], self.C(5))
+                self.stdscr.addch(0, w - artist_pane_w, "│", self.C(4))
+                self.stdscr.addstr(0, w - artist_pane_w + 1,
+                                   "Next in queue:"[:max(0, artist_pane_w - 2)], self.C(4))
             except curses.error:
                 pass
         if self.tab == TAB_LIKED:
@@ -6276,6 +6281,10 @@ class App:
                     if _pane_wrote:
                         self.stdscr.redrawln(0, top_h)
                         self.stdscr.redrawln(h - status_h - 1, status_h + 1)
+                        if queue_panel:
+                            # The sixel overflow blank row lands on the queue title row;
+                            # force ncurses to redraw it so the title is not blanked.
+                            self.stdscr.redrawln(top_h + artist_cover_rows, 1)
                         self.stdscr.refresh()
         finally:
             sys.stdout.buffer.write(b"\033[?2026l")
@@ -6333,6 +6342,7 @@ class App:
 
         if self.tab == TAB_QUEUE:
             self.focus = "queue"
+            self.queue_cursor = clamp(self.queue_play_idx, 0, len(self.queue_items) - 1)
         elif self.focus == "queue":
             self.focus = "left"
 
@@ -6739,6 +6749,15 @@ class App:
                                         self.queue_overlay = True
                                         self.focus = "queue"
                                         self.queue_cursor = clamp(self.queue_play_idx, 0, len(self.queue_items) - 1)
+                                        if self._album_cover_pane and self._preview_next and self.queue_items:
+                                            if self.priority_queue:
+                                                _nxt = self.priority_queue[0]
+                                            else:
+                                                _nxt = self.queue_play_idx + 1
+                                                if _nxt >= len(self.queue_items) and self.repeat_mode == 1:
+                                                    _nxt = 0
+                                            if 0 <= _nxt < len(self.queue_items):
+                                                self.queue_cursor = _nxt
                                     elif self.queue_overlay:
                                         self.queue_overlay = False
                                         self.focus = "left"

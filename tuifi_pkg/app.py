@@ -1209,7 +1209,7 @@ class App:
             if self.artist_ctx:
                 items.append(("artist_header", self.artist_ctx))
             if self.artist_albums:
-                _sep_hint = "), incl. singles/EPs (#: toggle)" if self._show_singles_eps else "), excl. singles/EPs (#: toggle)"
+                _sep_hint = "), incl. singles/EPs (&: toggle)" if self._show_singles_eps else "), excl. singles/EPs (&: toggle)"
                 alb_label = f"Albums ({len(self.artist_albums)}" + ("…" if self._loading else "") + _sep_hint
                 items.append(("sep", alb_label))
                 items.extend(self.artist_albums)
@@ -3940,6 +3940,21 @@ class App:
                    + buf
                    + b"\0338")
         sys.stdout.buffer.write(raw)
+        # Blank the row immediately below the cover to erase any sixel-band overflow.
+        # Sixel data is rounded to 6-pixel bands; depending on terminal cell height
+        # the image can bleed into the row after img_rows, leaving residual pixels
+        # that are never erased by the next render.  Not needed for kitty (its
+        # graphics layer is cell-exact).
+        if not is_kitty:
+            h_scr, _ = self.stdscr.getmaxyx()
+            _ovf = top_h + img_rows + 1   # 1-indexed row just below the cover
+            if _ovf <= h_scr - 2:         # don't clobber the status bar
+                sys.stdout.buffer.write(
+                    b"\0337"
+                    + f"\033[{_ovf};{x + 1}H".encode()
+                    + b" " * img_cols
+                    + b"\0338"
+                )
         sys.stdout.buffer.flush()
         self._album_cover_visible = True
         self._album_cover_visible_top = top_h
@@ -6181,6 +6196,13 @@ class App:
                 left_w = max(10, left_w - artist_pane_w)
 
         self._draw_tabs(0, 0, w)
+        if _pane_active and self._preview_next and self.tab == TAB_PLAYBACK \
+                and queue_panel and artist_pane_w >= 15:
+            try:
+                self.stdscr.addstr(0, w - artist_pane_w,
+                                   "Next in queue:"[:artist_pane_w - 1], self.C(5))
+            except curses.error:
+                pass
         if self.tab == TAB_LIKED:
             self._draw_liked_filter_bar(2, 0, w)
         self._draw_left(top_h, 0, usable_h, left_w)

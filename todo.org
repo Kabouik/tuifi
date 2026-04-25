@@ -27,6 +27,5 @@
 ** When preview is enabled and we go to tab 2, the next song is selected instead of the current
 ** In tab 0, the lyrics paen should not reduce the main cover size
 ** In tab 0, clicking on the main cover cycles view types, and when going back to miniqueue + minicover, it forgets about preview mode being enabled and just selects the current track
-** We may be able to fetch all metadata to TIDAL directly (without sending origin or referer) and just use HiFi for audio; check Discord recommendation
-** Cycle through known apis in case of issues? Remember past ones and try them?
-** When preview_next is enabled, add the text "Next in queue:" above the cover (same line as the tab names)
+** DONE When preview_next is enabled, add the text "Next in queue:" above the cover (same line as the tab names)
+   :DONE: "Next in queue:" drawn at row 0 in the pane area when preview_next=True on TAB_PLAYBACK+queue+pane (draw() ~6184)

@@ -103,11 +103,22 @@ class DownloadManager:
     def cancel(self) -> None:
         """Clear pending queue. Current download finishes normally."""
         with self._lock:
+            for t in self._queue:
+                self._track_status[t.id] = "CANC"
             n = len(self._queue)
             self._queue.clear()
             self._total -= n
         self.paused = False
         self._resume_event.set()
+
+    def remove(self, track_id: int) -> None:
+        """Remove a track from the queue and display list by id."""
+        with self._lock:
+            before = len(self._queue)
+            self._queue = [t for t in self._queue if t.id != track_id]
+            self._total -= before - len(self._queue)
+            self._all_tracks = [t for t in self._all_tracks if t.id != track_id]
+            self._track_status.pop(track_id, None)
 
     def mark_result(self, t: Track, status: str) -> None:
         """Record a track result ('DONE' or 'FAIL') for display in the dialog."""

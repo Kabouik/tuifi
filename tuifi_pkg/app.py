@@ -2064,8 +2064,7 @@ class App:
 
     def _process_marked_artists_async(self, artists: List[Artist], on_tracks) -> None:
         def _f(a):
-            aid = self._resolve_artist_id_via_track(a, a.id)
-            return self._fetch_artist_catalog_by_artist_id(aid)[1] if aid else []
+            return self._fetch_artist_tracks(a)
         self._process_marked_batch_async(artists, "artists", _f, on_tracks, dedupe=True)
 
     def _download_marked_artists_async(self, artists: List[Artist]) -> None:
@@ -2339,7 +2338,7 @@ class App:
         idx = 0
         filt = ""
         filt_active = False
-        self.stdscr.nodelay(False)
+        self.stdscr.timeout(200)
         try:
             while True:
                 if not simple and filt_active and filt:
@@ -2380,10 +2379,16 @@ class App:
                     win.addstr(box_h - 1, 2, " j/k ^n/^p: navigate   q/Esc: close "[:box_w - 4], self.C(10))
                 else:
                     win.addstr(box_h - 1, 2, hint[:box_w - 4], self.C(10))
+                h_scr, w_scr = self.stdscr.getmaxyx()
+                self._draw_status(h_scr - 2, 0, w_scr)
+                self.stdscr.noutrefresh()
                 win.touchwin()
-                win.refresh()
+                curses.doupdate()
 
-                ch = self.stdscr.get_wch()
+                try:
+                    ch = self.stdscr.get_wch()
+                except curses.error:
+                    continue
                 if isinstance(ch, str) and not ch.isprintable():
                     try:
                         ch = ord(ch)
@@ -2670,11 +2675,12 @@ class App:
     def show_download_queue_dialog(self) -> None:
         h, w = self.stdscr.getmaxyx()
         box_w = min(w - 4, 73)
-        box_h = min(h - 4, 26)
-        inner_rows = box_h - 5  # title + status + progress + separator + hint
-        _, _, win = self._popup_win(box_h, box_w)
+        box_h = min(h - 4, 27)
+        inner_rows = box_h - 6  # title + status + progress + separator + hint1 + hint2
+        y0, x0, win = self._popup_win(box_h, box_w)
         win.timeout(200)
         scroll = 0
+        cursor = 0
         manual_scroll = False
         filt_q = ""
         filt_hits: List[int] = []
@@ -2700,13 +2706,20 @@ class App:
                     else:
                         filt_pos = -1
                 max_scroll = max(0, len(rows) - inner_rows)
-                # Auto-scroll: active filter hit > active track > manual
+                # Auto-cursor: when not scrolling manually, follow first PEND track
                 if filt_hits and filt_pos >= 0:
-                    scroll = clamp(filt_hits[filt_pos] - inner_rows // 2, 0, max_scroll)
+                    cursor = filt_hits[filt_pos]
                 elif not manual_scroll and rows:
-                    active_idx = next((i for i, (_, st) in enumerate(rows) if st == "PEND"), len(rows) - 1)
-                    scroll = clamp(active_idx - inner_rows // 2, 0, max_scroll)
+                    cursor = next((i for i, (_, st) in enumerate(rows) if st == "PEND"), len(rows) - 1)
+                cursor = clamp(cursor, 0, max(0, len(rows) - 1))
+                # Scroll: center on cursor when auto-tracking, otherwise just keep it in view
+                if not manual_scroll and not (filt_hits and filt_pos >= 0):
+                    scroll = clamp(cursor - inner_rows // 2, 0, max_scroll)
                 else:
+                    if cursor < scroll:
+                        scroll = cursor
+                    elif cursor >= scroll + inner_rows:
+                        scroll = cursor - inner_rows + 1
                     scroll = clamp(scroll, 0, max_scroll)
                 win.erase()
                 win.box()
@@ -2732,17 +2745,21 @@ class App:
                         if idx >= len(rows):
                             break
                         trk, st = rows[idx]
-                        prefix_col = self.C(2) if st == "DONE" else self.C(1) if st == "FAIL" else self.C(10)
+                        is_cur = (idx == cursor)
+                        prefix_col = self.C(2) if st == "DONE" else self.C(1) if st == "FAIL" else self.C(2) if st == "CANC" else self.C(10)
                         prefix = f"{st} "
                         track_str = f"{trk.artist} - {trk.title}"
-                        hi = curses.A_BOLD if idx in hit_set else 0
+                        rev = curses.A_REVERSE if is_cur else 0
+                        hi = rev | (curses.A_BOLD if idx in hit_set else 0)
                         try:
-                            win.addstr(4 + i, 2, prefix, prefix_col)
+                            win.addstr(4 + i, 2, prefix, prefix_col | rev)
                             win.addstr(track_str[: box_w - 4 - len(prefix)], hi)
                         except curses.error:
                             pass
-                hint = " j/k ^n/^p: navigate   % pause   $ cancel   f filter   q/&/Esc close "
-                win.addstr(box_h - 1, 2, hint[:box_w - 4], self.C(10))
+                hint  = " j/k ^n/^p: navigate   g/G: top/bottom   x: remove   % pause   $ cancel "
+                hint2 = " f: filter   q/&/Esc: close "
+                win.addstr(box_h - 2, 2, hint[:box_w - 4], self.C(10))
+                win.addstr(box_h - 1, 2, hint2[:box_w - 4], self.C(10))
                 # Also refresh the status bar so playback progress stays live
                 h_scr, w_scr = self.stdscr.getmaxyx()
                 self._draw_status(h_scr - 2, 0, w_scr)
@@ -2758,24 +2775,35 @@ class App:
                         _btn5 = getattr(curses, "BUTTON5_PRESSED", 0x200000)
                         if bstate & curses.BUTTON4_PRESSED:
                             manual_scroll = True
-                            scroll = max(0, scroll - 1)
+                            cursor = max(0, cursor - 1)
                         elif bstate & _btn5:
                             manual_scroll = True
-                            scroll = min(scroll + 1, max_scroll)
+                            cursor = min(max(0, len(rows) - 1), cursor + 1)
+                        elif bstate & curses.BUTTON1_PRESSED:
+                            row_in_box = _my - y0 - 4  # 4 = title+summary+progress+separator
+                            if 0 <= row_in_box < inner_rows:
+                                clicked = scroll + row_in_box
+                                if 0 <= clicked < len(rows):
+                                    manual_scroll = True
+                                    cursor = clicked
                     except curses.error:
                         pass
                 elif ch in (curses.KEY_DOWN, ord("j"), 14):
                     manual_scroll = True
-                    scroll = min(scroll + 1, max_scroll)
+                    cursor = min(max(0, len(rows) - 1), cursor + 1)
                 elif ch in (curses.KEY_UP, ord("k"), 16):
                     manual_scroll = True
-                    scroll = max(0, scroll - 1)
-                elif ch == ord("n") and filt_hits:
-                    filt_pos = (filt_pos + 1) % len(filt_hits)
-                    manual_scroll = False
-                elif ch == ord("N") and filt_hits:
-                    filt_pos = (filt_pos - 1) % len(filt_hits)
-                    manual_scroll = False
+                    cursor = max(0, cursor - 1)
+                elif ch == ord("g"):
+                    manual_scroll = True
+                    cursor = 0
+                elif ch == ord("G"):
+                    manual_scroll = True
+                    cursor = max(0, len(rows) - 1)
+                elif ch == ord("x") and rows:
+                    trk_to_remove = rows[cursor][0]
+                    self.dl.remove(trk_to_remove.id)
+                    cursor = min(cursor, max(0, len(rows) - 2))
                 elif ch == ord("f"):
                     q = self.prompt_text("Filter:", filt_q)
                     if q is not None:
@@ -4335,8 +4363,11 @@ class App:
                     win.addstr(box_h - 1, 2, " j/k: scroll artist   PgUp/Dn: scroll info   g/G: top/bottom   q/i/ESC: close "[:box_w - 4], self.C(10))
                 except curses.error:
                     pass
+                h_scr, w_scr = self.stdscr.getmaxyx()
+                self._draw_status(h_scr - 2, 0, w_scr)
+                self.stdscr.noutrefresh()
                 win.touchwin()
-                win.refresh()
+                curses.doupdate()
 
                 ch = self._get_wch_int()
                 if ch == -1:
@@ -4564,8 +4595,11 @@ class App:
                     win.addstr(1 + row, 2, artists[fi].name[:box_w - 4].ljust(box_w - 4), attr)
                 win.addstr(box_h - 2, 2, hint[:box_w - 4], self.C(10))
                 win.addstr(box_h - 1, 2, hint2[:box_w - 4], self.C(10))
+                h_scr, w_scr = self.stdscr.getmaxyx()
+                self._draw_status(h_scr - 2, 0, w_scr)
+                self.stdscr.noutrefresh()
                 win.touchwin()  # force full resend so popup stays visible over sixel
-                win.refresh()
+                curses.doupdate()
 
                 self.stdscr.timeout(100)
                 ch = self._get_wch_int()
@@ -4802,8 +4836,11 @@ class App:
                     win.addstr(box_h - 1, 2, " j/k: scroll   g/G: top/bottom   q/v/Esc: close "[:box_w - 4], self.C(10))
                 except curses.error:
                     pass
+                h_scr, w_scr = self.stdscr.getmaxyx()
+                self._draw_status(h_scr - 2, 0, w_scr)
+                self.stdscr.noutrefresh()
                 win.touchwin()
-                win.refresh()
+                curses.doupdate()
 
                 ch = self._get_wch_int()
                 if ch == -1:
@@ -5853,8 +5890,11 @@ class App:
                                self.C(10))
                 except curses.error:
                     pass
+                h_scr, w_scr = self.stdscr.getmaxyx()
+                self._draw_status(h_scr - 2, 0, w_scr)
+                self.stdscr.noutrefresh()
                 win.touchwin()
-                win.refresh()
+                curses.doupdate()
 
                 ch = self._get_wch_int()
                 if ch == -1:

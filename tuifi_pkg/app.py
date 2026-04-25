@@ -4590,14 +4590,15 @@ class App:
         self.draw()
 
         h, w = self.stdscr.getmaxyx()
-        box_w = min(w - 6, max(56, max(len(a.name) for a in artists) + 8))
+        _hint2_str = " a: add to playlist   e/E: enqueue   l: like   f: filter   q/Esc: close"
+        box_w = min(w - 6, max(len(_hint2_str) + 5, max(len(a.name) for a in artists) + 8))
         box_h = min(h - 6, max(8, len(artists) + 4))
         y0, x0, win = self._popup_win(box_h, box_w)
         idx = 0
         filt_q = ""
         _last_click: tuple = (0.0, -1)
-        hint = " j/k ^n/^p: navigate  Enter/5: go to  q/Esc: close "
-        hint2 = " a: add to playlist   e/E: enqueue    l: like   f/!/:: filter "
+        hint = " j/k ^n/^p: navigate  Enter/5: go to"
+        hint2 = _hint2_str
         try:
             while True:
                 if self._need_redraw:
@@ -5832,13 +5833,13 @@ class App:
             " ^\u2193/^\u2191     jump to next/prev section (sep-based in tabs 5 and 7)",
             " Alt+\u2193/\u2191  jump to next/prev album group within a track list",
             " C         color/bw",
-            " W/Y/R/T/N show/hide fields for album, year, duration, album track count, line number",
+            " W/Y/R/T/N show/hide fields for album, year, duration, album track count, line numbers",
             " t         status bar",
             " \\         toggle TSV mode",
             "",
             "\x01 TOGGLES",
             " A         autoextend mode (off, mix, recommended)",
-            " R         repeat mode (off, all, one)",
+            " r         repeat mode (off, all, one)",
             " S         shuffle (off, on)",
             " F         file quality",
             " &         show/hide singles and EPs in artist tab",
@@ -5923,8 +5924,8 @@ class App:
                 win.addstr(0, 2, title[:box_w - 2], self.C(4))
                 self._render_popup_lines(win, lines, scroll, inner_h, box_w,
                                          hit_lines=frozenset(filt_hits))
-                hint_str = " j/k ^n/^p: scroll   (/)  prev/next hit   g/G: top/bottom   h/?/q/Esc: close" if filt_q else \
-                           " j/k ^n/^p: scroll   PgUp/PgDn: pages   g/G: top/bottom   h/?/q/Esc: close"
+                hint_str = " j/k ^n/^p: scroll   (/) prev/next hit   g/G: top/bottom   f: filter   h/?/q/Esc: close" if filt_q else \
+                           " j/k ^n/^p: scroll   PgUp/PgDn: pages   g/G: top/bottom   f: filter   h/?/q/Esc: close"
                 try:
                     win.addstr(box_h - 1, 2, hint_str[:box_w - 4], self.C(10))
                 except curses.error:
@@ -6084,10 +6085,14 @@ class App:
                 if not self._album_cover_pane_write_key or \
                         not self._album_cover_pane_write_key.startswith(cur_path + ":"):
                     self._erase_album_cover_terminal()
-            # Full redraw: stdscr.erase()+refresh() will overwrite the sixel area with
-            # spaces, so mark it as no longer visible.  This ensures _render_cover_image
-            # re-writes it even if the render key is unchanged.
+            # Full redraw: stdscr.erase()+refresh() will overwrite the sixel/chafa area
+            # with spaces, so mark it as no longer visible.  This ensures _render_cover_image
+            # and _render_album_cover_pane re-write on the next pass even when the path/
+            # geometry are unchanged.  Kitty images live in a separate graphics layer and
+            # survive curses erases, so their write_key remains valid.
             self._cover_sixel_visible = False
+            if self._cover_backend() != "chafa-kitty":
+                self._album_cover_pane_write_key = ""
             self.stdscr.erase()
 
         # When TAB_QUEUE is active the queue fills the full left panel; don't also
@@ -6508,8 +6513,9 @@ class App:
             ord("0"): lambda: self.switch_tab(TAB_PLAYBACK),
             ord("e"): lambda: self.enqueue_key(insert_after_playing=False),
             ord("E"): lambda: self.enqueue_key(insert_after_playing=True),
-            ord("R"): lambda: (setattr(self, "repeat_mode", (self.repeat_mode + 1) % 3),
+            ord("r"): lambda: (setattr(self, "repeat_mode", (self.repeat_mode + 1) % 3),
                                self.toast(["Repeat: off", "Repeat: all", "Repeat: one"][self.repeat_mode])),
+            ord("R"): lambda: _tog("show_track_duration", "Duration field: on", "Duration field: off"),
             ord("S"): lambda: _tog("shuffle_on", "Shuffle: on", "Shuffle: off"),
             ord("F"): lambda: (setattr(self, "quality_idx", (self.quality_idx + 1) % len(QUALITY_ORDER)),
                                self.toast(f"Quality: {QUALITY_ORDER[self.quality_idx]}")),

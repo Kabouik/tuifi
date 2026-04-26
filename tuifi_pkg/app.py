@@ -240,12 +240,12 @@ class App:
         self._cover_sixel_visible: bool = False; self._cover_sixel_cols: int = 0; self._cover_sixel_rows: int = 0; self._cover_sixel_x: int = 0
         self._cover_ub_socket: Optional[str] = None; self._cover_ub_pid: Optional[int] = None
 
-        # Side pane state — persisted as sideview: "cover" | "spectrum" | "off"
+        # Side pane state — persisted as sideview: "cover" | "both" | "spectrum" | "off"
         # (falls back to legacy cover_pane / cava_pane keys for backward compat)
         _sv = str(self.settings.get("sideview", "") or "")
-        if _sv in ("cover", "spectrum", "off"):
-            self._album_cover_pane: bool = (_sv == "cover")
-            self._cava_pane: bool = (_sv == "spectrum")
+        if _sv in ("cover", "both", "spectrum", "off"):
+            self._album_cover_pane: bool = (_sv in ("cover", "both"))
+            self._cava_pane: bool = (_sv in ("spectrum", "both"))
         else:
             self._album_cover_pane = bool(self.settings.get("cover_pane", True))
             self._cava_pane = bool(self.settings.get("cava_pane", False))
@@ -777,7 +777,10 @@ class App:
             "tab_align": self.tab_align,
             "include_singles_and_eps_in_artist_tab": self._show_singles_eps,
             "playback_tab_preview_next": self._preview_next,
-            "sideview": "spectrum" if self._cava_pane else ("cover" if self._album_cover_pane else "off"),
+            "sideview": ("both" if (self._cava_pane and self._album_cover_pane)
+                         else "spectrum" if self._cava_pane
+                         else "cover" if self._album_cover_pane
+                         else "off"),
             "remember_last_input": bool(self.settings.get("remember_last_input", False)),
             "tsv_max_col_width": int(self.settings.get("tsv_max_col_width", 32) or 32),
             "autoextend_n": self.autoplay_n,
@@ -6155,7 +6158,9 @@ class App:
                 parts.append(f"pq: {len(self.priority_queue)}")
             if self._show_singles_eps:
                 parts.append("ep/s: on")
-            if self._cava_pane:
+            if self._cava_pane and self._album_cover_pane:
+                parts.append("sideview: both")
+            elif self._cava_pane:
                 parts.append("sideview: spectrum")
             elif self._album_cover_pane:
                 parts.append("sideview: next" if self._preview_next else "sideview: cover")
@@ -6278,7 +6283,7 @@ class App:
             "",
             "\x01 VIEW",
             " q         miniqueue overlay",
-            " c         cycle side pane: cover → spectrum → off  (playback tab without kitty: cover → off)",
+            " c         cycle side pane: cover → both → spectrum → off  (playback tab without kitty: cover → off)",
             " n         sideview toggle: show next track cover in side pane (requires miniqueue + minicover)",
             " Tab       move cursor between main view and miniqueue overlay",
             " z         zap to playing track in the miniqueue",
@@ -6329,7 +6334,7 @@ class App:
             " max_all_tracks_number: max total tracks in All tracks section (default: 0 = unlimited)",
             "",
             " Playback tab:",
-            " sideview: side pane mode on startup: cover (default), spectrum, off  (toggle with c)",
+            " sideview: side pane mode on startup: cover (default), both, spectrum, off  (toggle with c)",
             " playback_tab_layout: default layout when entering tab 0",
             "   values: \"lyrics\" (default), \"miniqueue\", \"miniqueue_cover\"",
             " playback_tab_preview_next: sideview shows next track cover on tab 0 (toggle with n)",
@@ -6655,9 +6660,17 @@ class App:
                             if sel_trk:
                                 self._fetch_track_cover_async(sel_trk)
 
+            _both_pane_active = _cover_pane_active and _cava_pane_active
+            _cover_rows_base = 0
+            _spec_rows_stacked = 0
             if queue_panel:
                 artist_pane_w = w - left_w  # share the queue column
-                artist_cover_rows = min(artist_pane_w // 2, max(6, usable_h - 8))
+                _cover_rows_base = min(artist_pane_w // 2, max(6, usable_h - 8))
+                if _both_pane_active:
+                    _spec_rows_stacked = max(3, _cover_rows_base // 3)
+                    artist_cover_rows = _cover_rows_base + _spec_rows_stacked + 1  # +1 gap row
+                else:
+                    artist_cover_rows = _cover_rows_base
             else:
                 artist_pane_w = self._album_cover_pane_w(w)
                 left_w = max(10, left_w - artist_pane_w)
@@ -6745,14 +6758,33 @@ class App:
                     self.stdscr.redrawln(h - status_h - 1, status_h + 1)
                     self.stdscr.refresh()
 
-            # Side pane: render cover or cava in the right pane after curses refresh.
+            # Side pane: render cover or cava (or both stacked) after curses refresh.
             if _pane_active and artist_pane_w > 0:
                 artist_x = w - artist_pane_w
                 _render_h = artist_cover_rows if queue_panel else (usable_h - 1)
-                # Leave one blank row between the spectrum pane and the miniqueue below it.
-                _cava_render_h = max(1, _render_h - 1) if (queue_panel and _cava_pane_active) else _render_h
                 if _render_h > 0:
-                    if _cava_pane_active:
+                    if _both_pane_active:
+                        # Stacked layout: cover on top, spectrum below, separated by a blank row.
+                        if queue_panel:
+                            _c_h = _cover_rows_base
+                            _s_h = max(1, _spec_rows_stacked - 1)
+                        else:
+                            _c_h = max(3, (_render_h - 1) * 2 // 3)
+                            _s_h = max(1, _render_h - _c_h - 1)
+                        _s_y = top_h + _c_h + 1
+                        if _c_h > 0 and self._album_cover_path:
+                            _pane_wrote = self._render_album_cover_pane(top_h, artist_x, artist_pane_w, _c_h, skip_overflow_blank=True)
+                            if _pane_wrote:
+                                self.stdscr.redrawln(0, top_h)
+                                self.stdscr.redrawln(h - status_h - 1, status_h + 1)
+                                self.stdscr.refresh()
+                        if _s_h > 0:
+                            self._cava_pane_geom = (_s_y, artist_x, _s_h, artist_pane_w)
+                            self._draw_cava_pane(_s_y, artist_x, _s_h, artist_pane_w)
+                            self.stdscr.refresh()
+                    elif _cava_pane_active:
+                        # Leave one blank row between the spectrum pane and the miniqueue below it.
+                        _cava_render_h = max(1, _render_h - 1) if queue_panel else _render_h
                         self._cava_pane_geom = (top_h, artist_x, _cava_render_h, artist_pane_w)
                         self._draw_cava_pane(top_h, artist_x, _cava_render_h, artist_pane_w)
                         self.stdscr.refresh()
@@ -7629,25 +7661,28 @@ class App:
                     self._autoplay_trigger_prefetch()
                 continue
             if ch == ord("c"):
-                # Cycle side pane: cover → spectrum → off → cover …
-                # On playback tab without kitty graphics, skip spectrum (sixel/ub conflict).
+                # Cycle side pane: cover → both → spectrum → off → cover …
+                # On playback tab without kitty graphics, skip spectrum/both (sixel/ub conflict).
                 _skip_spectrum = self.tab == TAB_PLAYBACK and self._cover_backend() != "chafa-kitty"
-                if self._album_cover_pane:
-                    # cover → spectrum (or skip to off when spectrum unavailable)
+                _cava_ok = CavaReader.available()
+                if self._album_cover_pane and self._cava_pane:
+                    # both → spectrum only
                     self._album_cover_pane = False
                     self._erase_album_cover_terminal()
-                    if _skip_spectrum:
-                        self._cava_pane = False
-                    elif not CavaReader.available():
-                        # skip eq state if cava not installed
-                        self.toast("cava not found — skipping spectrum mode")
-                        self._cava_pane = False
-                    else:
+                elif self._album_cover_pane:
+                    # cover → both (or off when spectrum unavailable/conflict)
+                    if not _skip_spectrum and _cava_ok:
                         self._cava_pane = True
                         if self._cava is None:
                             self._cava = CavaReader(self.settings)
+                    else:
+                        if not _skip_spectrum and not _cava_ok:
+                            self.toast("cava not found — skipping spectrum mode")
+                        self._album_cover_pane = False
+                        self._erase_album_cover_terminal()
+                        self._cava_pane = False
                 elif self._cava_pane:
-                    # eq → off
+                    # spectrum → off
                     self._cava_pane = False
                     if self._cava:
                         self._cava.stop()
@@ -7656,7 +7691,10 @@ class App:
                     # off → cover
                     self._album_cover_pane = True
                     self._album_cover_item_key = ""  # force re-fetch/re-render
-                self.settings["sideview"] = "spectrum" if self._cava_pane else ("cover" if self._album_cover_pane else "off")
+                self.settings["sideview"] = ("both" if (self._cava_pane and self._album_cover_pane)
+                                              else "spectrum" if self._cava_pane
+                                              else "cover" if self._album_cover_pane
+                                              else "off")
                 self._full_redraw()
                 continue
             if ch == ord("n"):

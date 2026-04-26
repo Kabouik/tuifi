@@ -31,3 +31,8 @@
    :DONE: cover-click cycle to queue_overlay=True now re-applies preview_next cursor offset when _album_cover_pane is active (app.py ~6739)
 ** DONE When preview_next is enabled, add the text "Next in queue:" above the cover (same line as the tab names)
    :DONE: "Next in queue:" drawn at row 0 in the pane area when preview_next=True on TAB_PLAYBACK+queue+pane (draw() ~6184)
+** Lyrics (see git.sr.ht #1)
+** When showing the help, the miniqueue jumps over the minocover (and/or spectrum), there's no need for that, it should stay where it is since we decided dialogs no longer freeze or hide status/info/side/cursor moving with queue next tracks.
+** When the geometry is small and the sideview: both mode collapses to hide the spectrum, the miniqueue should shift up to use that space instead of staying where it is; there are 4 extra rows to use I believe
+** In the help dialog, there should be an empty row between the content (the help text) and the bottom line of the frame where the keybinds for the dialog are listed.
+** The 8s timer for hi_res_lossless is probably too long, makes dl very long when they have to fallback to lower quality, I think we know before 8 seconds if we found the first part for max quality

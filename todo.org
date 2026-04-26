@@ -3,13 +3,13 @@
    :DONE: set left_idx + focus before calling context_actions_popup() (app.py ~5982)
 ** DONE [#A] RMB in tab 0 is partly broken
    :DONE: RMB now checks queue_panel+mx>=left_w (miniqueue) and selects queue_cursor before popup, mirroring LMB logic (app.py ~5984)
-** [#C] fix o/O without hardcoding monochrome.tf
+** DONE [#C] fix o/O without hardcoding monochrome.tf
    :NOTE: subdomain-stripping approach commented out in web_base(); hardcoded to monochrome.tf for now with explanation (app.py ~821)
-** [#A] Error: urlopen error (errno -3) Temporary failure on name resolution: happened when scrolling songs; Samidy confirmed there is no rate limits on their APIs so the issue is probably just tuifi freaking out all by itself when too many actions are executed in a short time
-** [#C] artist page: consider an artist pic when hovering artist name
+** DONE [#A] Error: urlopen error (errno -3) Temporary failure on name resolution: happened when scrolling songs; Samidy confirmed there is no rate limits on their APIs so the issue is probably just tuifi freaking out all by itself when too many actions are executed in a short time
+** DONE [#C] artist page: consider an artist pic when hovering artist name
 ** DONE [#A] when changing the artist, the previous cover shows until a new album is hovered: we probably need to force an erase in that situation
    :DONE: erase + reset cover state at start of fetch_artist_async() when loading a new artist (app.py ~3698)
-** switching minicovers flickers in kitty; ueberzug to be tested with litekin user; I also observed some flicker on foot+chafa on one machine, not the other, despite similar configs.
+** DONE switching minic overs flickers in kitty; ueberzug to be tested with litekin user; I also observed some flicker on foot+chafa on one machine, not the other, despite similar configs.
 ** DONE [#A] clear filter and search prompts by default, add a setting to keep last input
    :DONE: all three prompts (search, filter, lyrics filter) start empty by default; set remember_last_input=true in settings.json to prefill with last query within a session (values never persisted across restarts)
 ** DONE [#B] when no song is in queue but one is played with Return, currently seeking backwards after the song ends does not play it again until p is pressed. Expected behaviour: song ends, seek backwards, play automatically from there
@@ -26,7 +26,7 @@
    :DONE: RMB handler now checks tab == TAB_QUEUE and updates queue_cursor/focus="queue" instead of left_idx (app.py ~6063)
 ** DONE When preview is enabled and we go to tab 2, the next song is selected instead of the current
    :DONE: switch_tab to TAB_QUEUE resets queue_cursor to queue_play_idx (app.py ~6334)
-** In tab 0, the lyrics paen should not reduce the main cover size
+** DONE In tab 0, the lyrics paen should not reduce the main cover size
 ** DONE In tab 0, clicking on the main cover cycles view types, and when going back to miniqueue + minicover, it forgets about preview mode being enabled and just selects the current track
    :DONE: cover-click cycle to queue_overlay=True now re-applies preview_next cursor offset when _album_cover_pane is active (app.py ~6739)
 ** DONE When preview_next is enabled, add the text "Next in queue:" above the cover (same line as the tab names)

@@ -200,7 +200,7 @@ class Artist:
 
 
 # ---------------------------------------------------------------------------
-# Track serialisation helpers (Monochrome API format)
+# Track serialisation helpers (HiFi API format)
 # ---------------------------------------------------------------------------
 
 def track_to_mono(t: "Track", added_at: Optional[int] = None) -> Dict[str, Any]:

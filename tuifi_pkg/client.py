@@ -73,6 +73,14 @@ class HiFiClient:
     def track(self, track_id: int, quality: str) -> Dict[str, Any]:
         return http_get_json(self._u("/track/", {"id": int(track_id), "quality": quality}))
 
+    def track_manifests(self, track_id: int, formats: list, usage: str = "PLAYBACK") -> Dict[str, Any]:
+        from urllib.parse import urlencode
+        params = [("id", str(track_id)), ("usage", usage), ("manifestType", "MPEG_DASH"),
+                  ("uriScheme", "HTTPS"), ("adaptive", "false")]
+        for fmt in formats:
+            params.append(("formats", fmt))
+        return http_get_json(f"{self.base}/trackManifests/?{urlencode(params)}")
+
     def lyrics(self, track_id: int) -> Dict[str, Any]:
         return http_get_json(self._u("/lyrics/", {"id": int(track_id)}))
 

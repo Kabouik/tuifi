@@ -273,6 +273,10 @@ class App:
         self._queue_redraw_only = False; self._loading = False; self._loading_key = ""; self._liked_refresh_due: float = 0.0
 
         self._last_mpd_path: Optional[str] = None
+        self._last_stream_quality: Optional[str] = None   # audioQuality granted by API for current track
+        self._last_play_start_quality: Optional[str] = None  # quality tier requested when current track started
+        self._last_resolved_quality: Optional[str] = None  # set by _resolve_stream_url_for_quality
+        self._last_url_is_manifest: bool = False  # True when URL came from /trackManifests/ (DASH)
         self._play_serial: int = 0          # bumped on every play_track call; stale threads bail
         self._play_lock = threading.Lock()  # serializes mp.start() so only one runs at a time
         self._current_track_serial: int = 0 # serial of the play_track call that set current_track
@@ -1429,8 +1433,13 @@ class App:
     def _extract_url_from_dash_mpd(self, mpd_xml: str) -> Optional[str]:
         try:
             import xml.etree.ElementTree as ET
-            xml_clean = re.sub(r'\s+xmlns[^"]*"[^"]*"', '', mpd_xml)
-            xml_clean = re.sub(r'\s+xmlns[^\']*\'[^\']*\'', '', xml_clean)
+            # Strip xmlns declarations (xmlns="..." and xmlns:prefix="...")
+            xml_clean = re.sub(r'\s+xmlns(?::\w+)?=["\'][^"\']*["\']', '', mpd_xml)
+            # Strip namespace-qualified attributes (xsi:schemaLocation="..." etc.)
+            # that become invalid after their xmlns declaration is removed.
+            xml_clean = re.sub(r'\s+\w+:\w+=["\'][^"\']*["\']', '', xml_clean)
+            # Strip namespace prefixes from element tags (<cenc:pssh> → <pssh>)
+            xml_clean = re.sub(r'(</?)\w+:', r'\1', xml_clean)
             root = ET.fromstring(xml_clean)
 
             def strip_ns(tag: str) -> str:
@@ -1482,10 +1491,54 @@ class App:
 
         except Exception as e:
             debug_log(f"  DASH MPD parse error: {e}")
+            # Regex fallback: try to extract any https BaseURL directly
+            m = re.search(r'<(?:\w+:)?BaseURL[^>]*>\s*(https?://[^\s<]+)\s*</(?:\w+:)?BaseURL>',
+                          mpd_xml)
+            if m:
+                url = m.group(1).strip()
+                debug_log(f"  DASH: regex fallback found BaseURL: {url[:80]}")
+                return url
         return None
+
+    _MANIFESTS_FORMATS = {
+        "HI_RES_LOSSLESS": ["FLAC_HIRES", "FLAC"],
+        "LOSSLESS":        ["FLAC"],
+    }
 
     def _resolve_stream_url_for_quality(self, track_id: int, quality: str) -> str:
         debug_log(f"_resolve_stream_url_for_quality: track_id={track_id} quality={quality}")
+
+        # For lossless tiers, try /trackManifests/ first (TIDAL killed /track for lossless).
+        self._last_url_is_manifest = False
+        manifests_formats = self._MANIFESTS_FORMATS.get(quality)
+        if manifests_formats:
+            try:
+                resp = self.client.track_manifests(track_id, manifests_formats)
+                debug_log(f"  /trackManifests response keys: {list(resp.keys()) if isinstance(resp, dict) else type(resp)}")
+                # HiFi backend wraps TIDAL's JSON:API response.
+                # Try up to 3 levels of "data" nesting before looking for "attributes".
+                inner = resp
+                for _ in range(3):
+                    if not isinstance(inner, dict):
+                        break
+                    if "attributes" in inner:
+                        break
+                    inner = inner.get("data")
+                attrs = inner.get("attributes") if isinstance(inner, dict) else None
+                if isinstance(attrs, dict):
+                    uri = attrs.get("uri") or attrs.get("url") or attrs.get("manifestUrl")
+                    granted_q = str(attrs.get("audioQuality") or "")
+                    debug_log(f"  trackManifests: uri={str(uri)[:80]!r} audioQuality={granted_q!r}")
+                    if uri and isinstance(uri, str) and uri.startswith("http"):
+                        self._last_resolved_quality = granted_q or None
+                        self._last_url_is_manifest = True
+                        return uri
+                    debug_log(f"  trackManifests: no usable uri in attrs, falling through to /track/")
+                else:
+                    debug_log(f"  trackManifests: unexpected response structure, falling through to /track/")
+            except Exception as e:
+                debug_log(f"  trackManifests: failed ({e}), falling through to /track/")
+
         tr = self.client.track(track_id, quality)
         debug_log(f"  /track response keys: {list(tr.keys()) if isinstance(tr, dict) else type(tr)}")
         data = tr.get("data") if isinstance(tr, dict) else None
@@ -1494,7 +1547,11 @@ class App:
             raise RuntimeError("invalid /track response")
         manifest = data.get("manifest")
         mime = str(data.get("manifestMimeType") or "")
-        debug_log(f"  manifestMimeType={mime!r} manifest_head={str(manifest)[:80] if manifest else None!r}")
+        granted_q = str(data.get("audioQuality") or "")
+        self._last_resolved_quality = granted_q or None
+        debug_log(f"  audioQuality={granted_q!r} manifestMimeType={mime!r} manifest_head={str(manifest)[:80] if manifest else None!r}")
+        if granted_q and granted_q != quality:
+            debug_log(f"  WARNING: requested {quality!r} but API granted {granted_q!r}")
         if not isinstance(manifest, str) or not manifest:
             debug_log(f"  ERROR: missing manifest")
             raise RuntimeError("missing manifest")
@@ -1521,7 +1578,7 @@ class App:
 
         if "dash" in mime.lower() or raw_text.lstrip().startswith("<?xml") or raw_text.lstrip().startswith("<MPD"):
             debug_log(f"  DASH manifest — parsing MPD XML")
-            debug_log(f"  MPD content (first 800 chars): {raw_text[:800]!r}")
+            debug_log(f"  MPD content (first 2000 chars): {raw_text[:2000]!r}")
 
             direct_url = self._extract_url_from_dash_mpd(raw_text)
             if direct_url:
@@ -1586,18 +1643,28 @@ class App:
                 # Bail if a newer play was requested while we were fetching the URL
                 if _my_serial != self._play_serial:
                     return
-                is_mpd = url.endswith(".mpd") and os.path.isfile(url)
-                mpd_path = url if is_mpd else None
+                is_local_mpd = url.endswith(".mpd") and os.path.isfile(url)
+                is_dash = url.endswith(".mpd") or self._last_url_is_manifest
+                mpd_path = url if is_local_mpd else None
                 with self._play_lock:
                     # Bail if superseded while waiting for the lock
                     if _my_serial != self._play_serial:
                         return
                     self.mp.start(url, resume=resume, start_pos=start_pos)
                 self._apply_mpv_prefs()
-                if is_mpd:
-                    time.sleep(0.5)
-                    if not self.mp.alive():
-                        debug_log(f"play_track: mpv died on DASH for {quality} — trying lower quality")
+                if is_dash:
+                    # Give mpv time to parse the MPD, hit the CDN, and buffer.
+                    # SegmentTemplate DASH needs noticeably more than a direct URL.
+                    # Poll up to 8 s; break early once time_pos is reported (playback running).
+                    for _i in range(16):
+                        time.sleep(0.5)
+                        if not self.mp.alive():
+                            debug_log(f"play_track: mpv died on DASH for {quality} after {(_i+1)*0.5:.1f}s — trying lower quality")
+                            raise RuntimeError("dash playback failed")
+                        if self.mp.snapshot()[0] is not None:
+                            break
+                    else:
+                        debug_log(f"play_track: DASH timed out (8s) for {quality} — trying lower quality")
                         raise RuntimeError("dash playback failed")
                 # Bail if superseded after start; the newer thread's mp.start() will
                 # have already called stop() on our proc via its own start sequence
@@ -1608,6 +1675,8 @@ class App:
                     debug_log(f"  Quality fallback: {QUALITY_ORDER[start_qi]} → {quality}")
                     self.toast(f"Quality fallback: {quality}", sec=3.0)
                 self._last_mpd_path = mpd_path
+                self._last_stream_quality = self._last_resolved_quality
+                self._last_play_start_quality = QUALITY_ORDER[start_qi]
                 self.current_track = t
                 self._current_track_serial = _my_serial
                 self._last_played_track = t
@@ -2623,6 +2692,67 @@ class App:
             return "mp3"
         return "bin"
 
+    def _assemble_dash_segments(self, mpd_xml: str, out_path: str, sp, label: str) -> str:
+        """Download and concatenate SegmentTemplate DASH segments into out_path.
+        Returns the final path (extension may differ from out_path). Raises on error."""
+        import xml.etree.ElementTree as ET
+
+        # Reuse the same namespace stripping as _extract_url_from_dash_mpd
+        xml_clean = re.sub(r'\s+xmlns(?::\w+)?=["\'][^"\']*["\']', '', mpd_xml)
+        xml_clean = re.sub(r'\s+\w+:\w+=["\'][^"\']*["\']', '', xml_clean)
+        xml_clean = re.sub(r'(</?)\w+:', r'\1', xml_clean)
+        root = ET.fromstring(xml_clean)
+
+        def strip_ns(tag: str) -> str:
+            return tag.split("}")[-1] if "}" in tag else tag
+
+        init_url = media_tmpl = None
+        start_number = 1
+        seg_count = 0
+        codec = ""
+
+        for rep in root.iter():
+            if strip_ns(rep.tag) != "Representation":
+                continue
+            codec = rep.get("codecs", "")
+            for st in rep.iter():
+                if strip_ns(st.tag) != "SegmentTemplate":
+                    continue
+                init_url   = st.get("initialization", "")
+                media_tmpl = st.get("media", "")
+                start_number = int(st.get("startNumber", "1"))
+                for s in st:
+                    if strip_ns(s.tag) == "SegmentTimeline":
+                        for seg in s:
+                            if strip_ns(seg.tag) == "S":
+                                r = int(seg.get("r", "0"))
+                                seg_count += r + 1
+                break
+            if init_url:
+                break
+
+        if not init_url or not media_tmpl or seg_count == 0:
+            raise RuntimeError("could not parse SegmentTemplate from MPD")
+
+        ext = "flac" if codec.lower().startswith("flac") else "m4a"
+        base, _ = os.path.splitext(out_path)
+        final_path = base + "." + ext
+        tmp_path = final_path + ".part"
+
+        total_segs = seg_count + 1  # +1 for init
+        with open(tmp_path, "wb") as out_f:
+            # Init segment
+            sp(f"DL {label} [init] {os.path.basename(final_path)}")
+            out_f.write(http_get_bytes(init_url, timeout=30.0))
+            # Media segments
+            for i, n in enumerate(range(start_number, start_number + seg_count)):
+                seg_url = media_tmpl.replace("$Number$", str(n))
+                sp(f"DL {label} [{i+1}/{seg_count}] {os.path.basename(final_path)}")
+                out_f.write(http_get_bytes(seg_url, timeout=30.0))
+
+        os.replace(tmp_path, final_path)
+        return final_path
+
     def _download_worker(self, t: Track, remaining: int, current: int, total: int, set_progress) -> None:
         self._download_worker_impl(t, remaining, current, total, set_progress, DOWNLOADS_DIR, flat=False)
 
@@ -2849,14 +2979,27 @@ class App:
             self._redraw_status_only = True
 
         url = None
+        dash_mpd_xml: Optional[str] = None
         last_err = ""
         for qi in range(self.quality_idx, len(QUALITY_ORDER)):
             q = QUALITY_ORDER[qi]
             try:
                 candidate = self._resolve_stream_url_for_quality(t.id, q)
                 if candidate.endswith(".mpd") and os.path.isfile(candidate):
-                    debug_log(f"_download_worker: DASH at {q}, trying lower quality")
-                    last_err = f"DASH at {q}"
+                    debug_log(f"_download_worker: local DASH at {q}, reading for segment assembly")
+                    with open(candidate, "r", encoding="utf-8") as _f:
+                        dash_mpd_xml = _f.read()
+                    break
+                if self._last_url_is_manifest or (candidate.startswith("https://") and candidate.endswith(".mpd")):
+                    debug_log(f"_download_worker: remote DASH at {q}, fetching MPD for segment assembly: {candidate[:80]}")
+                    raw_bytes = http_get_bytes(candidate, timeout=30.0)
+                    dash_mpd_xml = raw_bytes.decode("utf-8", "replace")
+                    break
+                # If the API silently downgraded our quality request, skip this tier
+                # and try the next so we don't silently save a lower-quality file.
+                if self._last_resolved_quality and self._last_resolved_quality != q:
+                    debug_log(f"_download_worker: requested {q!r} but got {self._last_resolved_quality!r}, skipping")
+                    last_err = f"quality downgraded to {self._last_resolved_quality}"
                     continue
                 url = candidate
                 break
@@ -2864,7 +3007,7 @@ class App:
                 last_err = str(e)
                 continue
 
-        if url is None:
+        if url is None and dash_mpd_xml is None:
             err_msg = f"all qualities failed: {last_err}"
             sp(f"DL FAIL {count_s} {t.artist} - {t.title}")
             self.dl.failed += 1
@@ -2874,7 +3017,7 @@ class App:
             self._log_download_failure(t, err_msg)
             return
 
-        ext = self._guess_ext(url)
+        ext = self._guess_ext(url) if url else ("flac" if dash_mpd_xml else "m4a")
         yv = self._track_year(t)
         if flat:
             out_dir = root
@@ -2907,14 +3050,18 @@ class App:
 
         sp(f"DL {count_s} {fname}")
         try:
-            http_stream_download(url, out_path, cb, timeout=120.0)
+            if dash_mpd_xml:
+                out_path = self._assemble_dash_segments(dash_mpd_xml, out_path, sp, count_s)
+                fname = os.path.basename(out_path)
+            else:
+                http_stream_download(url, out_path, cb, timeout=120.0)
         except Exception as e:
             sp(f"DL FAIL {count_s} {fname}")
             self.dl.failed += 1
             self.dl.mark_result(t, "FAIL")
             self.toast(f"DL Error: {str(e)[:50]}")
-            debug_log(f"_download_worker: http error: {e}")
-            self._log_download_failure(t, f"http error: {e}", url)
+            debug_log(f"_download_worker: error: {e}")
+            self._log_download_failure(t, f"error: {e}", url or "")
             return
         sp(f"DL {count_s} done {fname}")
 
@@ -4649,7 +4796,7 @@ class App:
         self.draw()
 
         h, w = self.stdscr.getmaxyx()
-        _hint2_str = " a: add to playlist   e/E: enqueue   l: like   f: filter   q/Esc: close"
+        _hint2_str = " a: add to playlist   e/E: enqueue   l: like   f: filter   q/s/Esc: close "
         box_w = min(w - 6, max(len(_hint2_str) + 5, max(len(a.name) for a in artists) + 8))
         box_h = min(h - 6, max(8, len(artists) + 4))
         y0, x0, win = self._popup_win(box_h, box_w)
@@ -5768,7 +5915,13 @@ class App:
                     fetching = self._autoplay_prefetch_running
                 _buf_s = "…" if fetching else str(buf_n)
                 parts.append(f"autoextend: {AUTOPLAY_NAMES[self.autoplay]}+{_buf_s}")
-            parts.append(f"qual: {QUALITY_ORDER[self.quality_idx].lower()}")
+            _req_q = QUALITY_ORDER[self.quality_idx]
+            _disp_q = _req_q.lower()
+            if (self._last_stream_quality
+                    and self._last_play_start_quality == _req_q
+                    and self._last_stream_quality != _req_q):
+                _disp_q += f" ({self._last_stream_quality.lower()})"
+            parts.append(f"qual: {_disp_q}")
             cur_vol = int(vo) if vo is not None else self.desired_volume
             parts.append(f"vol: {cur_vol}")
             if mu if mu is not None else self.desired_mute:
@@ -6674,6 +6827,7 @@ class App:
                 tp, du, pa, vo, mu = self.mp.snapshot()
                 if tp is None and du is None:
                     self.current_track = None
+                    self._last_stream_quality = None
                     self.next_track()
                     if self._preview_next and self.tab == TAB_PLAYBACK and self.queue_overlay and self._album_cover_pane:
                         if self.priority_queue:

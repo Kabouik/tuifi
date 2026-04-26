@@ -5,9 +5,9 @@ title: tuifi
 *WARNING:* TIDAL has been blocking HiFi API accounts en masse starting from around now. Accounts (and therefore tokens) are not meant to be shared, as per TIDAL's terms of service for individual accounts. Sharing an instance is very likely to raise red flags and get the associated account blocked.
 #+END_QUOTE
 
-A feature-rich-ish TUI music player built on top of [[https://github.com/binimum/hifi-api][TIDAL HiFi API]]: browse, search, stream, mix, batch download, find artists, organize and manage lossless music from your comfy terminal.
+A feature-rich TUI music player built on top of TIDAL API and [[https://github.com/binimum/hifi-api][HiFi API]]: browse, search, stream, mix, fetch locally, find artists, organize and manage lossless music from your comfy terminal.
 
-While [[https://github.com/monochrome-music/monochrome/blob/main/INSTANCES.md#official--community-apis][HiFi API instances with unrestricted access]] used to exist, this may be considered as music piracy in many countries and does not give artists the love they deserve. This project is intended for TIDAL subscribers who also self-host their own [[https://github.com/binimum/hifi-api][HiFi]] instance for convenience, and favor a keyboard-driven terminal workflow over a web player. TIDAL offers a free trial on their main plan if you want to give it a go for free.
+While [[https://github.com/monochrome-music/monochrome/blob/main/INSTANCES.md#official--community-apis][HiFi API instances with unrestricted access]] used to exist, this may be considered as music piracy in many countries and does not give artists the love they deserve. This project is intended for TIDAL subscribers who also self-host their own [[https://github.com/binimum/hifi-api][HiFi]] instance for convenience, and favor a keyboard-driven terminal workflfow over a web player. TIDAL offers a free trial on their main plan if you want to give it a go for free.
 
 #+BEGIN_EXPORT html
 <a href="https://github.com/Kabouik/tuifi/raw/refs/heads/main/demo/tuifi-demo.mp4">
@@ -31,7 +31,7 @@ While [[https://github.com/monochrome-music/monochrome/blob/main/INSTANCES.md#of
 ** Playback & queue
 
 - Playback control (play, pause, (auto)resume, seek, volume, repeat, shuffle)
-- Autoplay mix or recommendations (infinite queue)
+- Autoextend queue with mix or recommendations (infinite queue)
 - Queue management with reordering and priority flags
 - Playback history
 - Lyrics display
@@ -42,18 +42,22 @@ While [[https://github.com/monochrome-music/monochrome/blob/main/INSTANCES.md#of
 - Search, browse artists/albums, recommendations, mixes
 - Find similar artists
 - Playlists (create, delete, add/remove tracks)
-- Like tracks, albums, artists, and playlists
-- Accountless: playlists, liked songs and queue are kept in standard json files that some popular TIDAL HiFi web players can import
+- Like tracks, albums, artists, mixes and playlists
+- Accountless library: playlists, history, liked songs and queue are kept in standard json files that some web services can import
   
 ** Downloads
 
-- Download individual or multiple tracks (/e.g./, marked, albums, playlists), or full artist discographies for offline playback in other music players; depending on the laws in your country, owning a physical copy of the media you download may be required even with a valid TIDAL subscription
+- If you are choosing a TUI, then there likely is no official TIDAL application packaged for your platform or distribution, and you have no way to use the service offline (/e.g./, during flights), so =tuifi= can prefetch individual or multiple tracks (/e.g./, marked, albums, playlists, artists) for offline playback in other music players
+
+#+BEGIN_QUOTE
+*WARNING:* beware that offline fetching is intended for ephemeral listening since your TIDAL subscription does not grant you permanent access to the catalog, only to their service while you are a subscriber, and owning a physical copy of the media is likely required even with a valid TIDAL subscription to legitimately keep a local file. Consequently, =tuifi= defaults to the =/tmp= folder due to its ephemeral nature to discourage permanent copies, by lack of a proper method to date to play TIDAL DRM material directly from the CLI and in a multiplatform way (where ephemeral storage would otherwise no longer be advised).
+#+END_QUOTE
 
 ** Interface & interaction
 
 - Contextual menus on tracks, albums & artists
 - Keyboard-oriented control
-- Customizable (colors, optional TSV mode, show/hide metadata fields, file hierarchy for downloads, autoextend buffer, autoresume playback on launch, /etc./)
+- Customizable (colors, optional TSV mode, show/hide metadata fields, file hierarchy for local files, autoextend buffer, autoresume playback on launch, /etc./)
 
 * Usage
 
@@ -77,6 +81,7 @@ Press ? in tuifi for keybindings
 - Python 3.7+ (3.13 on Windows)
 - [[https://mpv.io][mpv]]
 - (Optional for cover art rendering) [[https://github.com/hpjansson/chafa/][chafa]] and/or [[https://github.com/jstkdng/ueberzugpp][ueberzugpp]] and a terminal emulator [[https://www.arewesixelyet.com/][compatible]] with Sixel or Kitty graphics
+- (Optional for the audio spectrum visualiser) [[https://github.com/karlstav/cava][cava]]
 
 * Installation
 
@@ -113,7 +118,7 @@ python3.13.exe /path/to/tuifi
 
 * Configuration
 
-While =tuifi= should be compatible with any HiFi API instance, those that are made public violate TIDAL's terms of service and may therefore be very shortlived, for a reason. Consequently, the program is delivered with no default instance set, and users should set their preferred instance either using the =--api= runtime flag or by editing =settings.jsonc=. Users choosing to use a HiFi instance shared by someone with no legitimate TIDAL subscription do so at their own risk. TIDAL does offer a one-month trial if you want to give it a go before deciding on your subscription, though.
+While =tuifi= should be compatible with any HiFi API instance, those that are made public violate TIDAL's terms of service and may therefore be very shortlived, for a reason. Consequently, the program is delivered with no default instance set, and users should set their preferred instance either using the =--api= runtime flag or by editing =settings.jsonc=. Users choosing to use a HiFi instance shared by someone with no legitimate TIDAL subscription do so at their own risk. TIDAL does offer a one-month trial if you want to give it a go before deciding on your subscription.
 
 Settings are stored in =settings.jsonc= and automatically updated upon using toggles within the TUI. On first run, =tuifi= will prompt before creating the config directory.
 
@@ -126,7 +131,7 @@ Configuration file directory per platform:
 | macOS    | =~/Library/Application Support/tuifi=           |
 | Windows  | =%APPDATA%\tuifi=                               |
 
-=settings.jsonc= can be edited to change UI options, colours, metadata field widths, autoextend buffer size, download destinations and naming conventions, TIDAL HiFi API URL, /etc/. Check the file for options not documented in this README.
+=settings.jsonc= can be edited to change UI options, colours, metadata field widths, autoextend buffer size, file structure conventions, TIDAL HiFi API URL/IP, /etc/. Check the file for options not documented in this README.
 
 Other state files stored in the same directory:
 - =queue.json= keeps your current play queue and persists among =tuifi= executions,
@@ -149,19 +154,19 @@ Use =--clear-covers= to delete the cache, optionally preserving covers for speci
 
 * Development note
 
-This program was developed with significant AI assistance. I take no particular pride in that, or the resulting code, but it is fair to be honest about it. It was a week-end project and I wanted something usable quickly rather than something to be proud of architecturally.
+This program was developed with significant AI assistance. I take no particular pride in that, or the resulting code, but it is fair to be honest about it. It was a week-end project and I wanted something usable quickly to enjoy TIDAL on my distribution (which has no official native TIDAL package because they did not deem it relevant) rather than something to be proud of architecturally.
 
 * Disclaimer
 
 ** Content extraction
 
-Any content accessed by this project is hosted by external non-affiliated sources, and everything served through =tuifi= is publicly accessible via the TIDAL Hi-Fi API. A web browser makes hundreds of requests to get everything made available by a site, this project goes on to make more targeted requests associated with only getting the content relevant to its purpose. If this project accesses your content, or content provided by your service, the code is public and may help you taking the necessary measures to counter the means to access it in the first place.
+Any content accessed by this project is hosted by TIDAL only, and everything served through =tuifi= is accessible /via/ the TIDAL official API and Hi-Fi API, which both require a valid subscription to TIDAL. A web browser makes hundreds of requests to get everything made available by a site, this project goes on to make more targeted requests associated with only getting the content relevant to its purpose without the associated web UI clutter. If this project accesses your content, or content provided by your service in a way that is considered unintended, the code is public and may help taking the necessary measures to counter the means to access it in the first place.
 
 ** DMCA and copyright infringements
 
-This project is to be used at the user's own risk, based on their government and laws. No audio files or direct links to audio files are stored in this repository, the script merely interfaces with sources and API that exist independently and are publicly available. This project has no control over the content it finds at any point in time, and no control over the content served by the source services, it just uses a documented API provided by other tools to fetch targeted information and content otherwise available with a web browser.
+This project is to be used at the user's own risk, based on their government and laws. No audio files or direct links to audio files are stored in this repository. The TUI merely interfaces with sources and APIs that exist independently and are available on the open Internet to anyone with a valid TIDAL account. This project has no control over the content it finds at any point in time, and no control over the content served by the source service, it just uses documented exernal APIs, official or third-party, to fetch targeted information and content otherwise available with a web browser, to make it work in a more performant and minimal terminal interface.
 
-Hence, any copyright infringements or DMCA claims in this project's regards are to be forwarded to the associated content provider or API by the associated notifier of any such claims. This script does not infringe copyright, just like a web browser or a search engine, users are responsible with how they use the tool, and thus is not a valid reason to send a DMCA notice to Codeberg or the maintainers of this repository. If any source accessed using the script infringes on your rights as a copyright holder, they may be removed by contacting the service that published them online and is actually hosting them (not this repository, nor its maintainers).
+Hence, any copyright infringements or DMCA claims in this project's regards are to be forwarded to the associated content provider or APIs by the associated notifier of any such claims. Just like a web browser or search engine, this console program is not made to infringe copyrights and is designed to discourage such wrongdoings (by /e.g./ defaulting to ephemeral offline storage for copyrighted material, as opposed to permanent cache for covers), and users are responsible with how they use the tool. The content that can be queried to TIDAL using the third-party API is not a valid reason to send a DMCA notice to this git server holders or the maintainers of this repository, and is to be routed to the the API repository directly. If any source accessed using the present program infringes on your rights as a copyright holder, they may be removed by contacting the service that published them online, is actually hosting them, or is routing them (not this repository, nor its maintainers).
 
 * License
 

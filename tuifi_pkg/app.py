@@ -52,6 +52,7 @@ from tuifi_pkg.persistence import (
 from tuifi_pkg.client import HiFiClient, http_get_bytes, http_get_json, http_stream_download
 from tuifi_pkg.audio import MPV, MPVPoller
 from tuifi_pkg.workers import MetaFetcher, DownloadManager
+from tuifi_pkg.cava import CavaReader
 
 # Populated by _probe_sixel_support() in main() before curses starts.
 _SIXEL_SUPPORTED: bool = False
@@ -215,6 +216,7 @@ class App:
         self.priority_queue: List[int] = []
         self._queue_resume_idx: Optional[int] = None  # queue_play_idx to return to after priorities
         self.repeat_mode = 0; self.shuffle_on = False
+        self._next_shuffle_idx: Optional[int] = None  # pre-picked next track index when shuffle is on
         self.current_track: Optional[Track] = None; self.last_error: Optional[str] = None
         self._last_played_track: Optional[Track] = None   # survives end-of-track; used for post-end seek
         self._last_played_duration: Optional[float] = None  # last known duration while mpv was alive
@@ -238,8 +240,20 @@ class App:
         self._cover_sixel_visible: bool = False; self._cover_sixel_cols: int = 0; self._cover_sixel_rows: int = 0; self._cover_sixel_x: int = 0
         self._cover_ub_socket: Optional[str] = None; self._cover_ub_pid: Optional[int] = None
 
-        # Side cover preview pane (toggled with C, persists across sessions)
-        self._album_cover_pane: bool = bool(self.settings.get("cover_pane", True))
+        # Side pane state — persisted as sideview: "cover" | "spectrum" | "off"
+        # (falls back to legacy cover_pane / cava_pane keys for backward compat)
+        _sv = str(self.settings.get("sideview", "") or "")
+        if _sv in ("cover", "spectrum", "off"):
+            self._album_cover_pane: bool = (_sv == "cover")
+            self._cava_pane: bool = (_sv == "spectrum")
+        else:
+            self._album_cover_pane = bool(self.settings.get("cover_pane", True))
+            self._cava_pane = bool(self.settings.get("cava_pane", False))
+        self._cava: Optional[CavaReader] = None
+        self._cava_bars: int = 0   # bar count last passed to cava.start(); restart if it changes
+        self._last_cava_draw: float = 0.0  # throttle: time of last cava pane draw
+        self._cava_only_redraw: bool = False  # fast path: redraw cava bars only
+        self._cava_pane_geom: Optional[tuple] = None  # (y,x,h,w) cached from last full draw
         self._preview_next: bool = bool(self.settings.get("playback_tab_preview_next", False))
         self._album_cover_item_key: str = ""   # "a:{album_id}" or "t:{track_id}"
         self._album_cover_path: Optional[str] = None
@@ -266,6 +280,10 @@ class App:
         self._liked_album_ntracks_populated: bool = False
 
         self._skip_delta: int = 0; self._skip_at: float = 0.0
+        # Each entry: (queue_play_idx, _next_shuffle_idx at that position)
+        # Storing the original next lets prev restore deterministic preview-next.
+        self._shuffle_back_stack: List[Tuple[int, Optional[int]]] = []
+        self._shuffle_restore_next: Optional[int] = None  # if set, success cb uses this instead of random
         self.filter_q = ""; self.filter_hits: List[int] = []; self.filter_pos = -1  # not persisted
         self._lyrics_filter_q = ""; self._lyrics_filter_hits: List[int] = []; self._lyrics_filter_pos = -1
 
@@ -723,6 +741,7 @@ class App:
                 _lyric_color_raw = "default"
                 s["cover_lyrics_color_pair"] = "default"
             curses.init_pair(18, self._name_to_curses_color(_lyric_color_raw), -1)
+            curses.init_pair(19, _cp("color_spectrum", s.get("color_chrome", "black")), -1)
 
     def C(self, pair: int) -> int:
         if self.color_mode and curses.has_colors():
@@ -758,6 +777,7 @@ class App:
             "tab_align": self.tab_align,
             "include_singles_and_eps_in_artist_tab": self._show_singles_eps,
             "playback_tab_preview_next": self._preview_next,
+            "sideview": "spectrum" if self._cava_pane else ("cover" if self._album_cover_pane else "off"),
             "remember_last_input": bool(self.settings.get("remember_last_input", False)),
             "tsv_max_col_width": int(self.settings.get("tsv_max_col_width", 32) or 32),
             "autoextend_n": self.autoplay_n,
@@ -1677,6 +1697,23 @@ class App:
                 self._last_mpd_path = mpd_path
                 self._last_stream_quality = self._last_resolved_quality
                 self._last_play_start_quality = QUALITY_ORDER[start_qi]
+                # Pre-pick next shuffle index so preview_next can show it immediately.
+                # When going back via prev, _shuffle_restore_next holds the original next
+                # for this position — use it to keep shuffle deterministic in back-history.
+                if self.shuffle_on and len(self.queue_items) > 1:
+                    if self._shuffle_restore_next is not None:
+                        self._next_shuffle_idx = self._shuffle_restore_next
+                        self._shuffle_restore_next = None
+                    else:
+                        _candidates = [i for i in range(len(self.queue_items)) if i != self.queue_play_idx]
+                        self._next_shuffle_idx = random.choice(_candidates) if _candidates else None
+                else:
+                    self._next_shuffle_idx = None
+                    self._shuffle_restore_next = None
+                # Update preview_next cursor now that shuffle index is known
+                if (self._preview_next and self._next_shuffle_idx is not None
+                        and self.tab == TAB_PLAYBACK and self.queue_overlay and self._album_cover_pane):
+                    self.queue_cursor = self._next_shuffle_idx
                 self.current_track = t
                 self._current_track_serial = _my_serial
                 self._last_played_track = t
@@ -1817,6 +1854,21 @@ class App:
         self._bg(_worker, on_error="")
         self._full_redraw()
 
+    def _preview_next_idx(self) -> int:
+        """Return the queue index of the next track for preview/cursor purposes.
+        Accounts for priority queue, shuffle (using pre-picked index), and repeat."""
+        if self.priority_queue:
+            return self.priority_queue[0]
+        if self.shuffle_on and self._next_shuffle_idx is not None:
+            return self._next_shuffle_idx
+        n = len(self.queue_items)
+        if n == 0:
+            return 0
+        nxt = self.queue_play_idx + 1
+        if nxt >= n:
+            nxt = 0 if self.repeat_mode == 1 else n - 1
+        return nxt
+
     def next_track(self) -> None:
         if not self.queue_items: return
         if self.priority_queue:
@@ -1831,7 +1883,14 @@ class App:
             self.play_queue_index(self.queue_play_idx)
             return
         if self.shuffle_on and len(self.queue_items) > 1:
-            self.queue_play_idx = random.randrange(0, len(self.queue_items))
+            # Determine next before advancing so we can store it in the back stack
+            if self._next_shuffle_idx is not None:
+                _next = self._next_shuffle_idx
+                self._next_shuffle_idx = None
+            else:
+                _next = random.randrange(0, len(self.queue_items))
+            self._shuffle_back_stack.append((self.queue_play_idx, _next))
+            self.queue_play_idx = _next
         else:
             self.queue_play_idx += 1
             if self.queue_play_idx >= len(self.queue_items):
@@ -2421,6 +2480,9 @@ class App:
                     visible = list(enumerate(options))
                 idx = clamp(idx, 0, max(0, len(visible) - 1))
 
+                if self._need_redraw:
+                    self._popup_refresh(y0, x0, box_h, box_w)
+
                 win.erase()
                 win.box()
                 win.addstr(0, 2, f" {title} "[:box_w - 2], self.C(4))
@@ -2452,6 +2514,7 @@ class App:
                 else:
                     win.addstr(box_h - 1, 2, hint[:box_w - 4], self.C(10))
                 h_scr, w_scr = self.stdscr.getmaxyx()
+                self._popup_draw_cava()
                 self._draw_status(h_scr - 2, 0, w_scr)
                 self.stdscr.noutrefresh()
                 win.touchwin()
@@ -2615,7 +2678,7 @@ class App:
                 ("Download [d]",              lambda: self.start_download_tracks([it])),
                 ("Download album [D]",        lambda: self._bg_download_album(album_obj)),
                 ("Download artist",           lambda: self._download_artist_async(artist_obj)),
-                ("Similar artists [s]",       lambda: self.show_similar_artists_dialog(artist_obj)),
+                ("Similar artists [S]",       lambda: self.show_similar_artists_dialog(artist_obj)),
                 ("Like & save corresponding mix…", lambda: (
                     self.save_mix_as_playlist_async(n, it)
                     if (n := self.prompt_text("Mix name:", f"(Mix) {it.artist} - {it.title}")) else None)),
@@ -2637,7 +2700,7 @@ class App:
                 (f"{'Unlike' if liked_al else 'Like'} album [l]", lambda: self.toggle_like_album(it)),
                 ("Add to playlist [a]",  lambda: self._add_album_to_playlist_async(it)),
                 ("Download album [d]",   lambda: self._bg_download_album(it)),
-                ("Similar artists [s]",  lambda: self.show_similar_artists_dialog(ar_obj, album_id=it.id)),
+                ("Similar artists [S]",  lambda: self.show_similar_artists_dialog(ar_obj, album_id=it.id)),
                 ("Like & save corresponding mix…", lambda: (
                     self.save_mix_as_playlist_async(n, it)
                     if (n := self.prompt_text("Mix name:", f"(Mix) {it.artist} - {it.title}")) else None)),
@@ -2656,7 +2719,7 @@ class App:
                 (f"{'Unlike' if liked_ar else 'Like'} artist [l]", lambda: self.toggle_like_artist(it.id, it.name, it.picture)),
                 ("Add to playlist [a]",              lambda: self._add_artist_to_playlist_async(it)),
                 ("Download artist [d]",              lambda: self._download_artist_async(it)),
-                ("Similar artists [s]",              lambda: self.show_similar_artists_dialog(it)),
+                ("Similar artists [S]",              lambda: self.show_similar_artists_dialog(it)),
                 ("Show lyrics [v]",                  lambda: curses.ungetch(ord("v"))),
             ] + ([] if self.tab == TAB_ARTIST else [("Show info [i]", lambda: curses.ungetch(ord("i")))])
             self._run_actions(it.name, actions)
@@ -2856,6 +2919,9 @@ class App:
                     elif cursor >= scroll + inner_rows:
                         scroll = cursor - inner_rows + 1
                     scroll = clamp(scroll, 0, max_scroll)
+                if self._need_redraw:
+                    self._popup_refresh(y0, x0, box_h, box_w)
+
                 win.erase()
                 win.box()
                 win.addstr(0, 2, " Download queue ", self.C(4))
@@ -2897,6 +2963,7 @@ class App:
                 win.addstr(box_h - 1, 2, hint2[:box_w - 4], self.C(10))
                 # Also refresh the status bar so playback progress stays live
                 h_scr, w_scr = self.stdscr.getmaxyx()
+                self._popup_draw_cava()
                 self._draw_status(h_scr - 2, 0, w_scr)
                 self.stdscr.noutrefresh()
                 win.touchwin()
@@ -3064,6 +3131,8 @@ class App:
             self._log_download_failure(t, f"error: {e}", url or "")
             return
         sp(f"DL {count_s} done {fname}")
+        out_path = self._tag_with_ffmpeg(out_path, t, sp, count_s)
+        fname = os.path.basename(out_path)
 
         cover_path = os.path.join(out_dir, "cover.jpg")
         if not os.path.exists(cover_path):
@@ -3095,6 +3164,53 @@ class App:
         sp(f"DL complete {count_s} {full_label}")
         self.dl.mark_result(t, "DONE")
 
+
+    def _tag_with_ffmpeg(self, path: str, t: Track, set_progress=None, label: str = "") -> str:
+        """Remux and tag an audio file using ffmpeg.
+
+        For DASH FLAC files the assembled container is ISOBMFF (MP4 atoms), not a
+        native FLAC file.  ffmpeg transparently demuxes the ISOBMFF wrapper and
+        rewrites the audio as a proper native FLAC file, which is what standard tools
+        (flac, metaflac, foobar2000, …) expect.  The same pass embeds track metadata.
+
+        Returns the final path (unchanged if ffmpeg is absent or the call fails).
+        """
+        if not shutil.which("ffmpeg"):
+            return path
+        ext = os.path.splitext(path)[1].lower().lstrip(".")
+        tmp = path + ".tagged." + ext
+        if set_progress:
+            set_progress(f"DL {label} tags {os.path.basename(path)}")
+            self._need_redraw = True
+            self._redraw_status_only = True
+        cmd = [
+            "ffmpeg", "-y", "-i", path,
+            "-c", "copy",
+            "-metadata", f"title={t.title or ''}",
+            "-metadata", f"artist={t.artist or ''}",
+            "-metadata", f"album={t.album or ''}",
+            "-metadata", f"tracknumber={t.track_no if isinstance(t.track_no, int) and t.track_no > 0 else ''}",
+        ]
+        if t.year and t.year != "????":
+            cmd += ["-metadata", f"date={t.year}"]
+        cmd.append(tmp)
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, timeout=120,
+            )
+            if result.returncode == 0 and os.path.exists(tmp) and os.path.getsize(tmp) > 0:
+                os.replace(tmp, path)
+            else:
+                debug_log(f"_tag_with_ffmpeg: ffmpeg failed rc={result.returncode}: {result.stderr[-200:] if result.stderr else ''}")
+        except Exception as e:
+            debug_log(f"_tag_with_ffmpeg: error: {e}")
+        finally:
+            try:
+                if os.path.exists(tmp):
+                    os.unlink(tmp)
+            except Exception:
+                pass
+        return path
 
     def _fetch_cover_url_for_track(self, t: Track) -> Optional[str]:
         try:
@@ -3360,7 +3476,7 @@ class App:
             right_w = 0
         # When the standalone album cover pane is visible (no miniqueue), reserve its
         # width + 1-col gap — consistent with the miniqueue case above.
-        if self._album_cover_pane and not (self.queue_overlay and self.tab != TAB_QUEUE):
+        if (self._album_cover_pane or self._cava_pane) and not (self.queue_overlay and self.tab != TAB_QUEUE):
             right_w = max(right_w, self._album_cover_pane_w(w) + 1)
         return w - right_w
 
@@ -3614,6 +3730,25 @@ class App:
             self._popup_clear_bg(y0, x0, box_h, box_w)
             # Now clear it — popup will redraw content below in the same pass.
             self._need_redraw = False
+
+    def _popup_draw_cava(self) -> None:
+        """Draw cava bars into stdscr (no flush) during a popup loop.
+
+        Call this before stdscr.noutrefresh() in dialog loops so the bars stay
+        live; the dialog window layered on top via win.noutrefresh()+doupdate()
+        will correctly overlay the bars if the popup happens to overlap the pane.
+        """
+        if self._need_redraw:
+            return
+        if not (self._cava_pane and self._cava and self._cava.running):
+            return
+        if not self._cava_pane_geom:
+            return
+        if time.time() - self._last_cava_draw < 1.0 / 30:
+            return
+        self._cava_only_redraw = False
+        _cy, _cx, _ch, _cw = self._cava_pane_geom
+        self._draw_cava_pane(_cy, _cx, _ch, _cw)
 
     def _popup_clear_bg(self, y0: int, x0: int, box_h: int, box_w: int, _erase_bg: bool = True) -> None:
         """Erase popup background (sixel + spaces)."""
@@ -4148,6 +4283,93 @@ class App:
         self._album_cover_visible = False
         self._album_cover_pane_write_key = ""
 
+    # ---------------------------------------------------------------------------
+    # Cava spectrum pane
+    # ---------------------------------------------------------------------------
+
+    _CAVA_BLOCKS = " ▁▂▃▄▅▆▇█"  # index 0=empty … 8=full
+
+    def _cava_ensure_running(self, bars: int) -> None:
+        """Start or restart cava if not running or bar count changed."""
+        if self._cava is None:
+            self._cava = CavaReader(self.settings)
+        if not self._cava.running or self._cava_bars != bars:
+            if self._cava.start(bars):
+                self._cava_bars = bars
+            else:
+                self.toast("cava not found — install cava for the eq view")
+                self._cava_pane = False
+                self.settings["cava_pane"] = False
+
+    def _draw_cava_pane(self, y: int, x: int, h: int, w: int) -> None:
+        """Render the cava spectrum visualiser into the region (y,x,h,w) using ncurses."""
+        if w < 3 or h < 1:
+            return
+        # Each bar takes 1 col; bars are separated by 1 col gap.
+        # bars = (w + 1) // 2  (e.g. w=20 → 10 bars, w=21 → 11 bars)
+        bars = max(1, (w + 1) // 2)
+        self._cava_ensure_running(bars)
+        if not self._cava or not self._cava.running:
+            return
+        self._last_cava_draw = time.time()
+        vals = self._cava.get_values()
+        if not vals:
+            return
+
+        # Draw bars bottom-up using block characters.
+        # Each bar column is drawn as a stack of full cells plus a fractional top cell.
+        for bi, v in enumerate(vals[:bars]):
+            col = x + bi * 2
+            if col >= x + w:
+                break
+            # Height in sub-rows: v * h * 8 sub-units
+            sub = v * h * 8
+            full_rows = int(sub) // 8          # fully filled rows
+            frac_idx  = int(sub) % 8           # fractional block index (0=empty,1–7=partial)
+
+            for row_offset in range(h):
+                row_from_bottom = row_offset          # 0 = bottom row
+                draw_row = y + h - 1 - row_offset
+                if draw_row < y or draw_row >= y + h:
+                    continue
+                if row_from_bottom < full_rows:
+                    ch_str = "█"
+                elif row_from_bottom == full_rows and frac_idx > 0:
+                    ch_str = self._CAVA_BLOCKS[frac_idx]
+                else:
+                    ch_str = " "
+                try:
+                    self.stdscr.addstr(draw_row, col, ch_str, self.C(19))
+                except curses.error:
+                    pass
+
+        # Clear gap columns to avoid stale characters on resize
+        for bi in range(bars):
+            gap_col = x + bi * 2 + 1
+            if gap_col >= x + w:
+                break
+            for row in range(h):
+                try:
+                    self.stdscr.addch(y + row, gap_col, " ")
+                except curses.error:
+                    pass
+
+    _SPECTRUM_COLORS = ["black", "blue", "magenta", "cyan", "green", "yellow", "red", "white"]
+
+    def _cycle_spectrum_color(self) -> None:
+        """Cycle color_spectrum to the next preset and reinitialise pair 19."""
+        cur = str(self.settings.get("color_spectrum", "black"))
+        try:
+            idx = self._SPECTRUM_COLORS.index(cur)
+            nxt = self._SPECTRUM_COLORS[(idx + 1) % len(self._SPECTRUM_COLORS)]
+        except ValueError:
+            nxt = self._SPECTRUM_COLORS[0]
+        self.settings["color_spectrum"] = nxt
+        if curses.has_colors():
+            curses.init_pair(19, self._name_to_curses_color(nxt), -1)
+        self.toast(f"Spectrum color: {nxt}")
+        self._full_redraw()
+
     def _album_cover_clear(self) -> None:
         """Full artist cover cleanup: erase from terminal and reset state."""
         self._erase_album_cover_terminal()
@@ -4523,7 +4745,7 @@ class App:
                     ("popularity", "numberOfAlbums", "numberOfTracks", "artistTypes", "url"),
                     fallback_to_root=True))
                 if (self.info_payload or {}).get("_similar"):
-                    lines.append(f"  [s] browse {len(self.info_payload['_similar'])} similar artists")
+                    lines.append(f"  [S] browse {len(self.info_payload['_similar'])} similar artists")
             return "Artist info", [l for l in lines if l is not None]
         if self.info_album and not self.info_track:
             a = self.info_album
@@ -4590,6 +4812,7 @@ class App:
                 except curses.error:
                     pass
                 h_scr, w_scr = self.stdscr.getmaxyx()
+                self._popup_draw_cava()
                 self._draw_status(h_scr - 2, 0, w_scr)
                 self.stdscr.noutrefresh()
                 win.touchwin()
@@ -4639,7 +4862,7 @@ class App:
                            0 if ch in (curses.KEY_HOME, ord("g")) else
                            max_scroll if ch in (curses.KEY_END, ord("G")) else None)
                     if _nv is not None: info_scroll = _nv
-                if ch == ord("s") and self.info_artist:
+                if ch == ord("S") and self.info_artist:
                     break  # fall through to show similar artists after dialog
         finally:
             self.stdscr.nodelay(True)
@@ -4827,6 +5050,7 @@ class App:
                 win.addstr(box_h - 2, 2, hint[:box_w - 4], self.C(10))
                 win.addstr(box_h - 1, 2, hint2[:box_w - 4], self.C(10))
                 h_scr, w_scr = self.stdscr.getmaxyx()
+                self._popup_draw_cava()
                 self._draw_status(h_scr - 2, 0, w_scr)
                 self.stdscr.noutrefresh()
                 win.touchwin()  # force full resend so popup stays visible over sixel
@@ -4884,7 +5108,7 @@ class App:
                     if q is not None:
                         filt_q = q.strip().lower()
                         idx = 0
-                elif ch in (27, ord("q"), ord("s"), ord("i"), ord("c")):
+                elif ch in (27, ord("q"), ord("S"), ord("i"), ord("c")):
                     break
         finally:
             self.stdscr.nodelay(True)
@@ -5074,6 +5298,7 @@ class App:
                 except curses.error:
                     pass
                 h_scr, w_scr = self.stdscr.getmaxyx()
+                self._popup_draw_cava()
                 self._draw_status(h_scr - 2, 0, w_scr)
                 self.stdscr.noutrefresh()
                 win.touchwin()
@@ -5930,8 +6155,10 @@ class App:
                 parts.append(f"pq: {len(self.priority_queue)}")
             if self._show_singles_eps:
                 parts.append("ep/s: on")
-            if self._preview_next:
-                parts.append("preview next: on")
+            if self._cava_pane:
+                parts.append("sideview: spectrum")
+            elif self._album_cover_pane:
+                parts.append("sideview: next" if self._preview_next else "sideview: cover")
             line1 = " ? help  |  " + "   ".join(parts)
             self.stdscr.addstr(y, x, line1[:max(0, w - 1)].ljust(max(0, w - 1)), curses.A_DIM if self.color_mode else 0)
         else:
@@ -6023,7 +6250,7 @@ class App:
             " 4         show mix based on selected track, album, or artist",
             " 0         show album cover art (requires chafa, ueberzugpp, or kitty)",
             " 5/6       show artist/album content relative to selected",
-            " s         find similar artists",
+            " S         find similar artists",
             " d         download selected track(s), album(s) or artist(s)",
             " D         download full album(s) for selected track(s)",
             " #         show download queue dialog",
@@ -6051,10 +6278,10 @@ class App:
             "",
             "\x01 VIEW",
             " q         miniqueue overlay",
-            " C         side minicover overlay",
-            " N         preview next track cover when entering playback tab",
+            " c         cycle side pane: cover → spectrum → off  (playback tab without kitty: cover → off)",
+            " n         sideview toggle: show next track cover in side pane (requires miniqueue + minicover)",
             " Tab       move cursor between main view and miniqueue overlay",
-            " z         jump to playing track in the miniqueue",
+            " z         zap to playing track in the miniqueue",
             " ^\u2190/^\u2192/1-9 Navigate main tabs and sub-tabs",
             " 7/[/]     jump to Liked tab then cycle its sub-tabs",
             " Alt+1-5   jump directly to Liked sub-tabs (Allᴹ⁻¹ Tracksᴹ⁻² Artistsᴹ⁻³ Albumsᴹ⁻⁴ Playlistsᴹ⁻⁵)",
@@ -6069,12 +6296,12 @@ class App:
             " \\         toggle TSV mode",
             "",
             "\x01 TOGGLES",
-            " A         autoextend mode (off, mix, recommended)",
             " r         repeat mode (off, all, one)",
-            " S         shuffle (off, on)",
+            " s         shuffle",
+            " A         autoextend mode (off, mix, recommended)",
             " F         file quality",
             " &         show/hide singles and EPs in artist tab",
-            " n         preview next track cover in playback tab (requires miniqueue + minicover)",
+            " n         sideview: show next track cover (requires miniqueue + minicover side pane)",
             "",
             "\x01 AUTOEXTEND MODES",
             " off:         no automatic queue extension",
@@ -6102,10 +6329,10 @@ class App:
             " max_all_tracks_number: max total tracks in All tracks section (default: 0 = unlimited)",
             "",
             " Playback tab:",
-            " cover_pane: show side minicover pane on startup (default: true, toggle with C)",
+            " sideview: side pane mode on startup: cover (default), spectrum, off  (toggle with c)",
             " playback_tab_layout: default layout when entering tab 0",
             "   values: \"lyrics\" (default), \"miniqueue\", \"miniqueue_cover\"",
-            " playback_tab_preview_next: move queue cursor to next track on entering tab 0 (toggle with N)",
+            " playback_tab_preview_next: sideview shows next track cover on tab 0 (toggle with n)",
             "   (requires miniqueue + minicover pane; default: false)",
             "",
             " Download file structure:",
@@ -6118,6 +6345,7 @@ class App:
             " color_playing  color_paused  color_error  color_chrome  color_accent",
             " color_artist   color_title   color_album  color_year    color_separator",
             " color_duration color_line_numbers color_album_track_count color_liked  color_mark",
+            " color_spectrum: spectrum/eq bar color (default: color_accent; click spectrum to cycle)",
             " cover_lyrics_color_pair: lyrics panel text color (e.g. white, cyan; default: terminal default)",
             " values: black red green yellow blue magenta cyan white (or 0-255)",
             "",
@@ -6127,6 +6355,7 @@ class App:
             " tsv_max_year_width         tsv_max_duration_width",
             "",
             f"\x01 tuifi v{VERSION}",
+            "",
         ]
         h, w = self.stdscr.getmaxyx()
         box_w = min(w - 4, 109)
@@ -6155,13 +6384,14 @@ class App:
                 win.addstr(0, 2, title[:box_w - 2], self.C(4))
                 self._render_popup_lines(win, lines, scroll, inner_h, box_w,
                                          hit_lines=frozenset(filt_hits))
-                hint_str = " j/k ^n/^p: scroll   (/) prev/next hit   g/G: top/bottom   f: filter   h/?/q/Esc: close" if filt_q else \
-                           " j/k ^n/^p: scroll   PgUp/PgDn: pages   g/G: top/bottom   f: filter   h/?/q/Esc: close"
+                hint_str = " j/k ^n/^p: scroll   (/) prev/next hit   g/G: top/bottom   f: filter   h/?/q/Esc: close " if filt_q else \
+                           " j/k ^n/^p: scroll   g/G: top/bottom   f: filter   h/?/q/Esc: close "
                 try:
                     win.addstr(box_h - 1, 2, hint_str[:box_w - 4], self.C(10))
                 except curses.error:
                     pass
                 h_scr, w_scr = self.stdscr.getmaxyx()
+                self._popup_draw_cava()
                 self._draw_status(h_scr - 2, 0, w_scr)
                 self.stdscr.noutrefresh()
                 win.touchwin()
@@ -6254,6 +6484,23 @@ class App:
                 cx += 2
 
     def draw(self) -> None:
+        # Cava-only fast path: update bars without erasing/repainting the whole screen.
+        # Triggered by the 30fps timer when no other redraw is pending.
+        if self._cava_only_redraw and not self._need_redraw:
+            self._cava_only_redraw = False
+            if (self._cava_pane_geom and self._cava_pane
+                    and self._cava and self._cava.running):
+                _cy, _cx, _ch, _cw = self._cava_pane_geom
+                self._draw_cava_pane(_cy, _cx, _ch, _cw)
+                sys.stdout.buffer.write(b"\033[?2026h")
+                sys.stdout.buffer.flush()
+                try:
+                    self.stdscr.refresh()
+                finally:
+                    sys.stdout.buffer.write(b"\033[?2026l")
+                    sys.stdout.buffer.flush()
+            return
+
         if not self._need_redraw: return
 
         h, w = self.stdscr.getmaxyx()
@@ -6276,6 +6523,7 @@ class App:
 
         self._queue_redraw_only = False
         self._redraw_status_only = False
+        self._cava_only_redraw = False
         self._need_redraw = False
 
         # Throttle: when the sixel cover is already visible and more input is queued
@@ -6314,6 +6562,13 @@ class App:
                 and _backend != "chafa-kitty")
         )
 
+        # Early definition needed before the erase block below.
+        _kitty = self._cover_backend() == "chafa-kitty"
+        # On the playback tab in lyrics mode (no queue overlay), suppress spectrum:
+        # the screen is lyrics + main cover only.
+        _lyrics_mode = self.tab == TAB_PLAYBACK and self._cover_lyrics and not self.queue_overlay
+        _cava_pane_active_early = self._cava_pane and not hide_cover and (self.tab != TAB_PLAYBACK or _kitty) and not _lyrics_mode
+
         if not _throttle_cover:
             # On the playback tab with a valid cover, keep the existing sixel in place
             # while curses repaints the UI chrome — the new cover is written after
@@ -6327,9 +6582,9 @@ class App:
             # until the new one overwrites it. Erasing explicitly causes a one-frame
             # flash of empty space before the replacement arrives.
             if self._album_cover_visible and _backend != "chafa-kitty":
-                # Only erase when the cover path has actually changed (new artist/album).
+                # Erase if cava pane is now active (cover replaced by bars) or path changed.
                 cur_path = self._album_cover_path or ""
-                if not self._album_cover_pane_write_key or \
+                if _cava_pane_active_early or not self._album_cover_pane_write_key or \
                         not self._album_cover_pane_write_key.startswith(cur_path + ":"):
                     self._erase_album_cover_terminal()
             # Full redraw: stdscr.erase()+refresh() will overwrite the sixel/chafa area
@@ -6347,16 +6602,21 @@ class App:
         queue_panel = self.queue_overlay and self.tab != TAB_QUEUE
         left_w = w if not queue_panel else max(20, w - 44)
 
-        # Side cover pane (C toggle): works on all tabs.
-        # When the miniqueue is also shown, share its right column (cover on top, queue below).
+        # Side cover/cava pane: works on all tabs.
+        # When the miniqueue is also shown, share its right column (cover/cava on top, queue below).
         # Hidden when on Playback tab in lyrics mode (main cover already fills the screen).
         artist_pane_w = 0
         artist_cover_rows = 0   # non-zero only when stacked with miniqueue
-        # Minicover is suppressed on Playback tab unless the miniqueue is also open
-        # (there's no cursor on the bare Playback tab to drive cover selection).
-        _pane_active = self._album_cover_pane and not hide_cover and not (
-            self.tab == TAB_PLAYBACK and not queue_panel
-        )
+        # Pane suppressed on Playback tab unless the miniqueue is also open.
+        _pane_suppressed = hide_cover or (self.tab == TAB_PLAYBACK and not queue_panel)
+        _cover_pane_active = self._album_cover_pane and not _pane_suppressed
+        # Cava pane allowed everywhere; only suppressed on playback tab with sixel/ueberzugpp
+        # (conflict with full-screen cover) or when lyrics mode is active (lyrics+maincover only).
+        # With kitty graphics the image lives in a separate compositor layer — no conflict.
+        _cava_pane_active  = self._cava_pane and not hide_cover and (self.tab != TAB_PLAYBACK or _kitty) and not _lyrics_mode
+        if not _cava_pane_active:
+            self._cava_pane_geom = None
+        _pane_active = _cover_pane_active or _cava_pane_active
         if _pane_active:
             # Determine what's focused and trigger fetch if needed.
             _sel_item_key = ""
@@ -6406,9 +6666,11 @@ class App:
         _short_tabs_w = len("  ".join(TAB_SHORT_NAMES[i] for i in _order))
         _label_w = artist_pane_w + 1   # separator + pane width
         _next_label = (
-            _pane_active and self._preview_next and self.tab == TAB_PLAYBACK
+            _cover_pane_active and self._preview_next and self.tab == TAB_PLAYBACK
             and queue_panel and artist_pane_w >= 15
             and _short_tabs_w < w - _label_w
+            and self.queue_items
+            and self.queue_cursor == self._preview_next_idx()
         )
         self._draw_tabs(0, 0, w - _label_w if _next_label else w)
         if _next_label:
@@ -6455,10 +6717,11 @@ class App:
         # Prevent ncurses scroll-region optimisation for the pane rows (same reason
         # as the TAB_PLAYBACK block above).  Skip during throttle/debounce: those rows
         # must NOT be repainted with spaces when the cover write is also being skipped.
-        if _pane_active and self._album_cover_path and artist_pane_w > 0 and not _throttle_cover:
-            _ar_rows = artist_cover_rows if queue_panel else usable_h
-            if _ar_rows > 0:
-                self.stdscr.redrawln(top_h, _ar_rows)
+        if _pane_active and artist_pane_w > 0 and not _throttle_cover:
+            if _cover_pane_active and self._album_cover_path:
+                _ar_rows = artist_cover_rows if queue_panel else usable_h
+                if _ar_rows > 0:
+                    self.stdscr.redrawln(top_h, _ar_rows)
 
         # Synchronized output (DEC mode 2026): tells the terminal to buffer all
         # output until the ESU marker, presenting the entire frame atomically.
@@ -6482,16 +6745,23 @@ class App:
                     self.stdscr.redrawln(h - status_h - 1, status_h + 1)
                     self.stdscr.refresh()
 
-            # Side cover pane: render cover in the right pane after curses refresh.
-            if _pane_active and self._album_cover_path and artist_pane_w > 0:
+            # Side pane: render cover or cava in the right pane after curses refresh.
+            if _pane_active and artist_pane_w > 0:
                 artist_x = w - artist_pane_w
                 _render_h = artist_cover_rows if queue_panel else (usable_h - 1)
+                # Leave one blank row between the spectrum pane and the miniqueue below it.
+                _cava_render_h = max(1, _render_h - 1) if (queue_panel and _cava_pane_active) else _render_h
                 if _render_h > 0:
-                    _pane_wrote = self._render_album_cover_pane(top_h, artist_x, artist_pane_w, _render_h, skip_overflow_blank=queue_panel)
-                    if _pane_wrote:
-                        self.stdscr.redrawln(0, top_h)
-                        self.stdscr.redrawln(h - status_h - 1, status_h + 1)
+                    if _cava_pane_active:
+                        self._cava_pane_geom = (top_h, artist_x, _cava_render_h, artist_pane_w)
+                        self._draw_cava_pane(top_h, artist_x, _cava_render_h, artist_pane_w)
                         self.stdscr.refresh()
+                    elif _cover_pane_active and self._album_cover_path:
+                        _pane_wrote = self._render_album_cover_pane(top_h, artist_x, artist_pane_w, _render_h, skip_overflow_blank=queue_panel)
+                        if _pane_wrote:
+                            self.stdscr.redrawln(0, top_h)
+                            self.stdscr.redrawln(h - status_h - 1, status_h + 1)
+                            self.stdscr.refresh()
         finally:
             sys.stdout.buffer.write(b"\033[?2026l")
             sys.stdout.buffer.flush()
@@ -6582,17 +6852,12 @@ class App:
                 self._cover_lyrics = False
                 self.queue_overlay = True
                 self._album_cover_pane = True
-                self.settings["cover_pane"] = True
+                self.settings["sideview"] = "cover"
             self.fetch_cover_async(self.current_track)
             if self.queue_overlay:
                 self.jump_to_playing_in_queue()
                 if self._album_cover_pane and self._preview_next:
-                    if self.priority_queue:
-                        _nxt = self.priority_queue[0]
-                    else:
-                        _nxt = self.queue_play_idx + 1
-                        if _nxt >= len(self.queue_items) and self.repeat_mode == 1:
-                            _nxt = 0
+                    _nxt = self._preview_next_idx()
                     if 0 <= _nxt < len(self.queue_items):
                         self.queue_cursor = _nxt
 
@@ -6663,12 +6928,7 @@ class App:
         # If starting on the Playback tab with preview-next enabled, move the
         # queue cursor to the next track (after any auto-resume has reset it).
         if self.tab == TAB_PLAYBACK and self._preview_next and self.queue_overlay and self._album_cover_pane:
-            if self.priority_queue:
-                _nxt = self.priority_queue[0]
-            else:
-                _nxt = self.queue_play_idx + 1
-                if _nxt >= len(self.queue_items) and self.repeat_mode == 1:
-                    _nxt = 0
+            _nxt = self._preview_next_idx()
             if 0 <= _nxt < len(self.queue_items):
                 self.queue_cursor = _nxt
 
@@ -6788,7 +7048,7 @@ class App:
             ord("r"): lambda: (setattr(self, "repeat_mode", (self.repeat_mode + 1) % 3),
                                self.toast(["Repeat: off", "Repeat: all", "Repeat: one"][self.repeat_mode])),
             ord("R"): lambda: _tog("show_track_duration", "Duration field: on", "Duration field: off"),
-            ord("S"): lambda: _tog("shuffle_on", "Shuffle: on", "Shuffle: off"),
+            ord("s"): lambda: _tog("shuffle_on", "Shuffle: on", "Shuffle: off"),
             ord("F"): lambda: (setattr(self, "quality_idx", (self.quality_idx + 1) % len(QUALITY_ORDER)),
                                self.toast(f"Quality: {QUALITY_ORDER[self.quality_idx]}")),
             ord("t"): lambda: _tog("show_toggles", "Toggles: on", "Toggles: off"),
@@ -6830,12 +7090,7 @@ class App:
                     self._last_stream_quality = None
                     self.next_track()
                     if self._preview_next and self.tab == TAB_PLAYBACK and self.queue_overlay and self._album_cover_pane:
-                        if self.priority_queue:
-                            _nxt = self.priority_queue[0]
-                        else:
-                            _nxt = self.queue_play_idx + 1
-                            if _nxt >= len(self.queue_items) and self.repeat_mode == 1:
-                                _nxt = 0
+                        _nxt = self._preview_next_idx()
                         if 0 <= _nxt < len(self.queue_items):
                             self.queue_cursor = _nxt
                     self._full_redraw()
@@ -6846,26 +7101,45 @@ class App:
 
             # Debounced prev/next skip: accumulate rapid keypresses and jump
             # directly to the final target track after a 150 ms pause.
+            # Drive cava redraws at ~30fps when the spectrum pane is visible.
+            if self._cava_pane and self._cava and self._cava.running:
+                if now - self._last_cava_draw >= 1 / 30:
+                    self._cava_only_redraw = True
+
             if self._skip_delta != 0 and now - self._skip_at >= 0.15:
                 n_q = len(self.queue_items)
-                if n_q > 0:
-                    target = self.queue_play_idx + self._skip_delta
-                    if self.repeat_mode == 1:
-                        target = target % n_q
-                    else:
-                        target = clamp(target, 0, n_q - 1)
+                delta = self._skip_delta
                 self._skip_delta = 0
                 if n_q > 0:
-                    self.play_queue_index(target)
-                    if self._preview_next and self.tab == TAB_PLAYBACK and self.queue_overlay and self._album_cover_pane:
-                        if self.priority_queue:
-                            _nxt = self.priority_queue[0]
+                    if self.shuffle_on and delta > 0:
+                        self.next_track()
+                    elif self.shuffle_on and delta < 0:
+                        # Pop from back stack to return to the track played before this one.
+                        # Each entry is (prev_idx, orig_next) so we can restore the original
+                        # preview-next (deterministic shuffle when navigating back in history).
+                        steps = abs(delta)
+                        target_idx = self.queue_play_idx
+                        orig_next: Optional[int] = None
+                        for _ in range(steps):
+                            if self._shuffle_back_stack:
+                                target_idx, orig_next = self._shuffle_back_stack.pop()
+                            else:
+                                orig_next = None
+                                break
+                        self._shuffle_restore_next = orig_next
+                        self.play_queue_index(target_idx)
+                    else:
+                        target = self.queue_play_idx + delta
+                        if self.repeat_mode == 1:
+                            target = target % n_q
                         else:
-                            _nxt = self.queue_play_idx + 1
-                            if _nxt >= n_q and self.repeat_mode == 1:
-                                _nxt = 0
-                        if 0 <= _nxt < n_q:
-                            self.queue_cursor = _nxt
+                            target = clamp(target, 0, n_q - 1)
+                        self.play_queue_index(target)
+                    # Immediately point cursor at the new playing track so the minicover
+                    # refreshes without waiting for the async success callback.
+                    if self.tab == TAB_PLAYBACK and self.queue_overlay and self._album_cover_pane:
+                        self.queue_cursor = clamp(self.queue_play_idx, 0, n_q - 1)
+                        # success callback will move cursor to _next_shuffle_idx if preview_next
 
             self.draw()
 
@@ -6925,7 +7199,11 @@ class App:
                         is_dbl = now - t0 < 0.35 and ly == my and lx == mx
                         self._mouse_last_press = (now, my, mx)
                         self._mouse_long_press_pending = not is_dbl
-                        if queue_panel and mx >= left_w:                      # queue overlay
+                        if (self._cava_pane_geom and self._cava_pane    # click on spectrum → cycle color
+                                and self._cava_pane_geom[0] <= my < self._cava_pane_geom[0] + self._cava_pane_geom[2]
+                                and self._cava_pane_geom[1] <= mx < self._cava_pane_geom[1] + self._cava_pane_geom[3]):
+                            self._cycle_spectrum_color()
+                        elif queue_panel and mx >= left_w:                    # queue overlay
                             _q_top = top_h + self._album_cover_rows_offset + 1
                             clicked = self._q_overlay_scroll + (my - _q_top)
                             if my >= _q_top and 0 <= clicked < len(self.queue_items):
@@ -6957,12 +7235,7 @@ class App:
                                         self.focus = "queue"
                                         self.queue_cursor = clamp(self.queue_play_idx, 0, len(self.queue_items) - 1)
                                         if self._album_cover_pane and self._preview_next and self.queue_items:
-                                            if self.priority_queue:
-                                                _nxt = self.priority_queue[0]
-                                            else:
-                                                _nxt = self.queue_play_idx + 1
-                                                if _nxt >= len(self.queue_items) and self.repeat_mode == 1:
-                                                    _nxt = 0
+                                            _nxt = self._preview_next_idx()
                                             if 0 <= _nxt < len(self.queue_items):
                                                 self.queue_cursor = _nxt
                                     elif self.queue_overlay:
@@ -7116,7 +7389,7 @@ class App:
                     self.show_lyrics_dialog(_vt)
                 continue
 
-            if ch == ord("s"):
+            if ch == ord("S"):
                 _sit = self._selected_left_item() if not self._queue_context() else None
                 _sar: Optional[Artist] = None
                 _salbum_id = 0
@@ -7356,11 +7629,34 @@ class App:
                     self._autoplay_trigger_prefetch()
                 continue
             if ch == ord("c"):
-                self._album_cover_pane = not self._album_cover_pane
-                self.settings["cover_pane"] = self._album_cover_pane
-                if not self._album_cover_pane:
-                    # Only erase the rendered image; keep cached paths/tmpdir intact.
+                # Cycle side pane: cover → spectrum → off → cover …
+                # On playback tab without kitty graphics, skip spectrum (sixel/ub conflict).
+                _skip_spectrum = self.tab == TAB_PLAYBACK and self._cover_backend() != "chafa-kitty"
+                if self._album_cover_pane:
+                    # cover → spectrum (or skip to off when spectrum unavailable)
+                    self._album_cover_pane = False
                     self._erase_album_cover_terminal()
+                    if _skip_spectrum:
+                        self._cava_pane = False
+                    elif not CavaReader.available():
+                        # skip eq state if cava not installed
+                        self.toast("cava not found — skipping spectrum mode")
+                        self._cava_pane = False
+                    else:
+                        self._cava_pane = True
+                        if self._cava is None:
+                            self._cava = CavaReader(self.settings)
+                elif self._cava_pane:
+                    # eq → off
+                    self._cava_pane = False
+                    if self._cava:
+                        self._cava.stop()
+                    self._cava_bars = 0
+                else:
+                    # off → cover
+                    self._album_cover_pane = True
+                    self._album_cover_item_key = ""  # force re-fetch/re-render
+                self.settings["sideview"] = "spectrum" if self._cava_pane else ("cover" if self._album_cover_pane else "off")
                 self._full_redraw()
                 continue
             if ch == ord("n"):
@@ -7369,12 +7665,7 @@ class App:
                 self.toast(f"Preview next: {'on' if self._preview_next else 'off'}")
                 self._persist_settings()
                 if self._preview_next and self.tab == TAB_PLAYBACK and self.queue_overlay and self._album_cover_pane:
-                    if self.priority_queue:
-                        _nxt = self.priority_queue[0]
-                    else:
-                        _nxt = self.queue_play_idx + 1
-                        if _nxt >= len(self.queue_items) and self.repeat_mode == 1:
-                            _nxt = 0
+                    _nxt = self._preview_next_idx()
                     if 0 <= _nxt < len(self.queue_items):
                         self.queue_cursor = _nxt
                     self._full_redraw()
@@ -7736,7 +8027,14 @@ class App:
                     self.playlists_open_selected()
                     continue
                 if self._queue_context():
+                    if self.shuffle_on and self.queue_items:
+                        self._shuffle_back_stack.append((self.queue_play_idx, self._next_shuffle_idx))
                     self.play_queue_index(self.queue_cursor)
+                    if self._preview_next and self.tab == TAB_PLAYBACK and self.queue_overlay and self._album_cover_pane:
+                        _nq = len(self.queue_items)
+                        _nxt = self._preview_next_idx()
+                        if 0 <= _nxt < _nq:
+                            self.queue_cursor = _nxt
                     continue
                 if self.tab == TAB_LIKED:
                     it_liked = self._selected_left_item()
@@ -7779,6 +8077,8 @@ class App:
         self.meta.stop()
         self.mp_poller.stop()
         self.mp.stop()
+        if self._cava:
+            self._cava.stop()
 
 
 

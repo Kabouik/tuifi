@@ -6661,14 +6661,22 @@ class App:
                                 self._fetch_track_cover_async(sel_trk)
 
             _both_pane_active = _cover_pane_active and _cava_pane_active
+            _both_collapsed = False   # both requested but collapsed to cover due to space
             _cover_rows_base = 0
             _spec_rows_stacked = 0
             if queue_panel:
                 artist_pane_w = w - left_w  # share the queue column
                 _cover_rows_base = min(artist_pane_w // 2, max(6, usable_h - 8))
                 if _both_pane_active:
-                    _spec_rows_stacked = max(3, _cover_rows_base // 3)
-                    artist_cover_rows = _cover_rows_base + _spec_rows_stacked + 1  # +1 gap row
+                    # Ensure at least 3 miniqueue rows remain below the stacked panes.
+                    _avail_spec = usable_h - _cover_rows_base - 4  # cover + gap + 3 queue rows
+                    if _avail_spec >= 3:
+                        _spec_rows_stacked = min(max(3, _cover_rows_base // 3), _avail_spec)
+                        artist_cover_rows = _cover_rows_base + _spec_rows_stacked + 1  # +1 gap row
+                    else:
+                        _both_pane_active = False
+                        _both_collapsed = True
+                        artist_cover_rows = _cover_rows_base
                 else:
                     artist_cover_rows = _cover_rows_base
             else:
@@ -6772,6 +6780,10 @@ class App:
                             _c_h = max(3, (_render_h - 1) * 2 // 3)
                             _s_h = max(1, _render_h - _c_h - 1)
                         _s_y = top_h + _c_h + 1
+                        # Cap spectrum width to the approximate visual width of a square cover
+                        # (terminal cells are ~2:1 tall:wide, so a square image at _c_h rows
+                        # renders at most _c_h*2 cols; beyond that chafa letterboxes).
+                        _spec_w = min(artist_pane_w, max(3, _c_h * 2))
                         if _c_h > 0 and self._album_cover_path:
                             _pane_wrote = self._render_album_cover_pane(top_h, artist_x, artist_pane_w, _c_h, skip_overflow_blank=True)
                             if _pane_wrote:
@@ -6779,10 +6791,10 @@ class App:
                                 self.stdscr.redrawln(h - status_h - 1, status_h + 1)
                                 self.stdscr.refresh()
                         if _s_h > 0:
-                            self._cava_pane_geom = (_s_y, artist_x, _s_h, artist_pane_w)
-                            self._draw_cava_pane(_s_y, artist_x, _s_h, artist_pane_w)
+                            self._cava_pane_geom = (_s_y, artist_x, _s_h, _spec_w)
+                            self._draw_cava_pane(_s_y, artist_x, _s_h, _spec_w)
                             self.stdscr.refresh()
-                    elif _cava_pane_active:
+                    elif _cava_pane_active and not _both_collapsed:
                         # Leave one blank row between the spectrum pane and the miniqueue below it.
                         _cava_render_h = max(1, _render_h - 1) if queue_panel else _render_h
                         self._cava_pane_geom = (top_h, artist_x, _cava_render_h, artist_pane_w)

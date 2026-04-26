@@ -2760,8 +2760,8 @@ class App:
                             win.addstr(track_str[: box_w - 4 - len(prefix)], hi)
                         except curses.error:
                             pass
-                hint  = " j/k ^n/^p: navigate   g/G: top/bottom   x: remove   % pause   $ cancel "
-                hint2 = " f/!/:: filter   q/#/Esc: close "
+                hint  = " j/k ^n/^p: navigate   g/G: top/bottom   x: remove "
+                hint2 = " %: pause  $: cancel  f: filter   q/#/Esc: close "
                 win.addstr(box_h - 2, 2, hint[:box_w - 4], self.C(10))
                 win.addstr(box_h - 1, 2, hint2[:box_w - 4], self.C(10))
                 # Also refresh the status bar so playback progress stays live
@@ -3712,6 +3712,8 @@ class App:
                             self._album_cover_render_key = ""
                             self._need_redraw = True
                         return
+                    if self._album_cover_item_key != item_key:
+                        return
                     os.makedirs(COVER_CACHE_DIR, exist_ok=True)
                     data = http_get_bytes(url, timeout=15.0)
                     with open(dest, "wb") as f:
@@ -4128,6 +4130,7 @@ class App:
             self._last_artist_fetch_track = ctx
             return
         self._last_artist_fetch_track = ctx
+        self._reset_left_cursor()
         self.artist_albums, self.artist_top_tracks, self.artist_tracks = [], [], []
         self.artist_ctx = None
         self.artist_picture = None
@@ -5460,7 +5463,7 @@ class App:
                     line = f"──── {it[1]}" if self.tab_align else f"── {it[1]}"
                     offs = self._draw_line_no(yy, x, i + 1, w) if self.show_line_numbers else 0
                     avail = max(0, w - offs - 1)
-                    _TOGGLE_SUFFIX = "(#: toggle)"
+                    _TOGGLE_SUFFIX = "(&: toggle)"
                     _suf_idx = line.find(_TOGGLE_SUFFIX)
                     if self.tab == TAB_ARTIST and _suf_idx != -1 and _suf_idx < avail:
                         prefix = line[:_suf_idx].ljust(_suf_idx)
@@ -5540,8 +5543,19 @@ class App:
                                            (curses.A_REVERSE if selected else 0) | self.C(14))
                         px += 2; pw -= 2
                     if pw > 0:
-                        self.stdscr.addstr(yy, px,
-                                           f"{a.artist} — {a.title}{ys}"[:pw].ljust(pw)[:pw], base_attr)
+                        _rv = curses.A_REVERSE if selected else 0
+                        _main = f"{a.artist} — {a.title}{ys}"
+                        _cnt = self.show_album_track_count and a.n_tracks is not None
+                        _lo, _lc, _lx = (" [", f"{a.n_tracks} t", "]") if _cnt else ("", "", "")
+                        _p = 0
+                        for _s, _attr in [(_main, _rv | self.C(8)), (_lo, _rv | self.C(8)),
+                                          (_lc, _rv | self.C(17)), (_lx, _rv | self.C(8))]:
+                            if _p >= pw or not _s: continue
+                            _n = min(len(_s), pw - _p)
+                            self.stdscr.addstr(yy, px + _p, _s[:_n], _attr)
+                            _p += _n
+                        if _p < pw:
+                            self.stdscr.addstr(yy, px + _p, " " * (pw - _p), base_attr)
                     continue
 
             if typ == "liked_mixed":
@@ -5728,7 +5742,7 @@ class App:
             if self._show_singles_eps:
                 parts.append("ep/s: on")
             if self._preview_next:
-                parts.append("preview: yes")
+                parts.append("preview next: on")
             line1 = " ? help  |  " + "   ".join(parts)
             self.stdscr.addstr(y, x, line1[:max(0, w - 1)].ljust(max(0, w - 1)), curses.A_DIM if self.color_mode else 0)
         else:
@@ -5829,7 +5843,7 @@ class App:
             " L         (un)like playing track",
             " *         contextual like/unlike menu for selected track: artist/album/playlist",
             " J/K       move track or marked tracks down/up",
-            " x         remove track from queue/playlist",
+            " x         remove track from queue/playlist/history",
             " X         clear queue/playlist",
             " i/I       show selected/playing info",
             " v/V       show lyrics of selected/playing",
@@ -6196,13 +6210,18 @@ class App:
                 artist_pane_w = self._album_cover_pane_w(w)
                 left_w = max(10, left_w - artist_pane_w)
 
-        self._draw_tabs(0, 0, w)
-        if _pane_active and self._preview_next and self.tab == TAB_PLAYBACK \
-                and queue_panel and artist_pane_w >= 15:
+        _next_label = (
+            _pane_active and self._preview_next and self.tab == TAB_PLAYBACK
+            and queue_panel and artist_pane_w >= 15
+        )
+        # When the pane label is shown, constrain tabs to the left portion so they
+        # never spill into the pane area and overwrite (or get overwritten by) the label.
+        self._draw_tabs(0, 0, w - artist_pane_w if _next_label else w)
+        if _next_label:
             try:
                 self.stdscr.addch(0, w - artist_pane_w, "│", self.C(4))
                 self.stdscr.addstr(0, w - artist_pane_w + 1,
-                                   " Next in queue:"[:max(0, artist_pane_w - 2)], self.C(4))
+                                   "Next in queue:"[:max(0, artist_pane_w - 2)], self.C(4))
             except curses.error:
                 pass
         if self.tab == TAB_LIKED:
@@ -6279,9 +6298,18 @@ class App:
                         self.stdscr.redrawln(0, top_h)
                         self.stdscr.redrawln(h - status_h - 1, status_h + 1)
                         if queue_panel:
-                            # The sixel overflow blank row lands on the queue title row;
-                            # force ncurses to redraw it so the title is not blanked.
-                            self.stdscr.redrawln(top_h + artist_cover_rows, 1)
+                            # The sixel overflow blank erases the queue separator+title on the
+                            # row just below the cover.  Restore it with a targeted terminal write
+                            # (pane columns only) so the big cover on the left is not disturbed.
+                            _qrow = top_h + artist_cover_rows + 1   # 1-indexed
+                            _qcol = w - artist_pane_w + 1            # 1-indexed
+                            _qt = ("│" + self._queue_title())[:artist_pane_w]
+                            sys.stdout.buffer.write(
+                                b"\0337"
+                                + f"\033[{_qrow};{_qcol}H".encode()
+                                + _qt.encode("utf-8")
+                                + b"\0338"
+                            )
                         self.stdscr.refresh()
         finally:
             sys.stdout.buffer.write(b"\033[?2026l")
@@ -7289,6 +7317,19 @@ class App:
                     save_playlists(self.playlists, self.playlists_meta)
                     self._toast_redraw("Removed from playlist")
                     continue
+
+            if ch == ord("x") and self.tab == TAB_HISTORY and not self._queue_context():
+                if self.history_tracks:
+                    idxs = sorted([i for i in self.marked_left_idx if 0 <= i < len(self.history_tracks)])
+                    if not idxs:
+                        idxs = [clamp(self.left_idx, 0, len(self.history_tracks) - 1)]
+                    for idx in sorted(idxs, reverse=True):
+                        self.history_tracks.pop(idx)
+                    self.marked_left_idx.clear()
+                    save_history(self.history_tracks)
+                    self.left_idx = clamp(self.left_idx, 0, max(0, len(self.history_tracks) - 1))
+                    self._toast_redraw("Removed from history")
+                continue
 
             if ch == ord("x") and self._queue_context():
                 if self.queue_items:

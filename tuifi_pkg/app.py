@@ -263,6 +263,7 @@ class App:
         self._max_all_tracks: int = int(self.settings.get("max_all_tracks_number", 0) or 0)
         self._last_artist_fetch_track: Optional["Track"] = None
         self._artist_cache: Dict[int, Tuple[List[Any], List[Any], Tuple[int, str]]] = {}
+        self._liked_album_ntracks_populated: bool = False
 
         self._skip_delta: int = 0; self._skip_at: float = 0.0
         self.filter_q = ""; self.filter_hits: List[int] = []; self.filter_pos = -1  # not persisted
@@ -1826,7 +1827,7 @@ class App:
             self.toast("Album unliked")
         else:
             self.liked_album_ids.add(album.id)
-            self.liked_albums.insert(0, {"id": album.id, "title": album.title, "artist": album.artist, "year": album.year, "cover": album.cover})
+            self.liked_albums.insert(0, {"id": album.id, "title": album.title, "artist": album.artist, "year": album.year, "cover": album.cover, "n_tracks": album.n_tracks})
             self.toast("Album liked")
         self._commit_liked()
 
@@ -3852,7 +3853,7 @@ class App:
         except Exception as e:
             debug_log(f"_prerender_album_cover error: {e}")
 
-    def _render_album_cover_pane(self, top_h: int, x: int, pane_w: int, pane_h: int) -> bool:
+    def _render_album_cover_pane(self, top_h: int, x: int, pane_w: int, pane_h: int, skip_overflow_blank: bool = False) -> bool:
         """Write artist cover image to terminal. Returns True if a write occurred."""
         if not self._album_cover_path or not os.path.exists(self._album_cover_path):
             return False
@@ -3947,7 +3948,7 @@ class App:
         # the image can bleed into the row after img_rows, leaving residual pixels
         # that are never erased by the next render.  Not needed for kitty (its
         # graphics layer is cell-exact).
-        if not is_kitty:
+        if not is_kitty and not skip_overflow_blank:
             h_scr, _ = self.stdscr.getmaxyx()
             _ovf = top_h + img_rows + 1   # 1-indexed row just below the cover
             if _ovf <= h_scr - 2:         # don't clobber the status bar
@@ -4069,7 +4070,7 @@ class App:
             aid = self._resolve_album_id_for_album(album)
             if aid:
                 tracks = self._fetch_album_tracks_by_album_id(aid)
-                self.album_header = Album(id=aid, title=album.title, artist=album.artist, year=album.year)
+                self.album_header = Album(id=aid, title=album.title, artist=album.artist, year=album.year, n_tracks=album.n_tracks if album.n_tracks is not None else len(tracks))
             else:
                 payload = self.client.search_tracks(album.title, limit=280)
                 al0 = album.title.strip().lower()
@@ -4112,7 +4113,7 @@ class App:
     def fetch_liked_async(self) -> None:
         self.liked_cache = [t for t in (mono_to_track(d) for d in self.liked_tracks) if t is not None]
         self.liked_album_cache = [
-            Album(id=d["id"], title=d.get("title", ""), artist=d.get("artist", ""), year=d.get("year", ""), cover=d.get("cover"))
+            Album(id=d["id"], title=d.get("title", ""), artist=d.get("artist", ""), year=d.get("year", ""), cover=d.get("cover"), n_tracks=d.get("n_tracks"))
             for d in self.liked_albums
         ]
         self.liked_artist_cache = [
@@ -4121,6 +4122,35 @@ class App:
         ]
         self.liked_playlist_cache = [d["name"] for d in self.liked_playlists]
         self._full_redraw()
+        if not self._liked_album_ntracks_populated:
+            self._liked_album_ntracks_populated = True
+            missing = [a for a in self.liked_album_cache if a.id and a.n_tracks is None]
+            if missing:
+                self._populate_liked_album_ntracks(missing)
+
+    def _populate_liked_album_ntracks(self, albums: List[Album]) -> None:
+        """Fetch n_tracks from the API for liked albums that are missing it, in background."""
+        def worker() -> None:
+            changed = False
+            for a in albums:
+                if a.n_tracks is not None:
+                    continue
+                try:
+                    payload = self.client.album(int(a.id))
+                    data = payload.get("data", payload)
+                    raw = data.get("numberOfTracks")
+                    if raw is not None:
+                        a.n_tracks = int(raw)
+                        for d in self.liked_albums:
+                            if d.get("id") == a.id:
+                                d["n_tracks"] = a.n_tracks
+                        changed = True
+                        self._full_redraw()
+                except Exception:
+                    pass
+            if changed:
+                self._commit_liked()
+        self._bg(worker)
 
     def fetch_artist_async(self, ctx: Optional[Track]) -> None:
         if not ctx: self.toast("No context"); return
@@ -4132,7 +4162,7 @@ class App:
         self._last_artist_fetch_track = ctx
         self._reset_left_cursor()
         self.artist_albums, self.artist_top_tracks, self.artist_tracks = [], [], []
-        self.artist_ctx = None
+        self.artist_ctx = (ctx.artist_id or 0, ctx.artist)
         self.artist_picture = None
         self._artist_status = ""
         self._artist_all_tracks_loading = False
@@ -4229,6 +4259,8 @@ class App:
                     try:
                         fetched = self._fetch_album_tracks_by_album_id(alb.id)
                         debug_log(f"fetch_artist_async album {alb.id}: {len(fetched)} tracks")
+                        if alb.n_tracks is None:
+                            alb.n_tracks = len(fetched)
                         for t in fetched:
                             if t.id not in seen_ids:
                                 seen_ids.add(t.id)
@@ -5786,8 +5818,6 @@ class App:
 
         try:
             self.stdscr.addstr(y + 1, x, line2, self._status_color_pair(pa, alive))
-            if liked_track and heart_col < col_limit:
-                self.stdscr.addstr(y + 1, x + heart_col, "♥", self.C(14))
             if right and right_pos is not None:
                 self.stdscr.addstr(y + 1, x + right_pos, right, self.C(4))
         except curses.error:
@@ -6219,13 +6249,15 @@ class App:
                 artist_pane_w = self._album_cover_pane_w(w)
                 left_w = max(10, left_w - artist_pane_w)
 
+        _order = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
+        _short_tabs_w = len("  ".join(TAB_SHORT_NAMES[i] for i in _order))
+        _label_w = artist_pane_w + 1   # separator + pane width
         _next_label = (
             _pane_active and self._preview_next and self.tab == TAB_PLAYBACK
             and queue_panel and artist_pane_w >= 15
+            and _short_tabs_w < w - _label_w
         )
-        # When the pane label is shown, constrain tabs to the left portion so they
-        # never spill into the pane area and overwrite (or get overwritten by) the label.
-        self._draw_tabs(0, 0, w - artist_pane_w if _next_label else w)
+        self._draw_tabs(0, 0, w - _label_w if _next_label else w)
         if _next_label:
             try:
                 self.stdscr.addch(0, w - artist_pane_w, "│", self.C(4))
@@ -6302,23 +6334,10 @@ class App:
                 artist_x = w - artist_pane_w
                 _render_h = artist_cover_rows if queue_panel else (usable_h - 1)
                 if _render_h > 0:
-                    _pane_wrote = self._render_album_cover_pane(top_h, artist_x, artist_pane_w, _render_h)
+                    _pane_wrote = self._render_album_cover_pane(top_h, artist_x, artist_pane_w, _render_h, skip_overflow_blank=queue_panel)
                     if _pane_wrote:
                         self.stdscr.redrawln(0, top_h)
                         self.stdscr.redrawln(h - status_h - 1, status_h + 1)
-                        if queue_panel:
-                            # The sixel overflow blank erases the queue separator+title on the
-                            # row just below the cover.  Restore it with a targeted terminal write
-                            # (pane columns only) so the big cover on the left is not disturbed.
-                            _qrow = top_h + artist_cover_rows + 1   # 1-indexed
-                            _qcol = w - artist_pane_w + 1            # 1-indexed
-                            _qt = ("│" + self._queue_title())[:artist_pane_w]
-                            sys.stdout.buffer.write(
-                                b"\0337"
-                                + f"\033[{_qrow};{_qcol}H".encode()
-                                + _qt.encode("utf-8")
-                                + b"\0338"
-                            )
                         self.stdscr.refresh()
         finally:
             sys.stdout.buffer.write(b"\033[?2026l")

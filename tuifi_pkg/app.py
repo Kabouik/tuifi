@@ -5629,7 +5629,10 @@ class App:
         cur = names.get(self.tab, "")
         idx = s.find(cur)
         if idx >= 0:
-            self.stdscr.addstr(y + 1, x + idx, "─" * min(len(cur), max(0, w - idx - 1)), self.C(5) or curses.A_BOLD)
+            # In full/short mode the last char is a superscript digit — don't underline it.
+            # In digit-only mode (len==1) we must underline the digit itself.
+            ul_len = len(cur) if len(cur) <= 1 else len(cur) - 1
+            self.stdscr.addstr(y + 1, x + idx, "─" * min(ul_len, max(0, w - idx - 1)), self.C(5) or curses.A_BOLD)
 
     def _draw_line_no(self, y: int, x: int, idx1: int, width: int) -> int:
         if not self.show_line_numbers or width < 5:
@@ -6677,6 +6680,7 @@ class App:
                         _both_pane_active = False
                         _both_collapsed = True
                         artist_cover_rows = _cover_rows_base
+                        self._cava_pane_geom = None  # prevent fast-path from drawing in miniqueue area
                 else:
                     artist_cover_rows = _cover_rows_base
             else:

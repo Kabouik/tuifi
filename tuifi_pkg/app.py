@@ -5668,7 +5668,11 @@ class App:
         x += 1
         w -= 1
         if w <= 0: return
-        self.stdscr.addstr(y, x, self._queue_title()[:max(0, w - 1)].ljust(max(0, w - 1)), self.C(4))
+        try:
+            self.stdscr.addch(y, x - 1, "│", self.C(8))
+        except curses.error:
+            pass
+        self.stdscr.addstr(y, x, self._queue_title()[:max(0, w - 1)].ljust(max(0, w - 1)), self.C(8))
         y += 1
         h -= 1
         if not self.queue_items: return
@@ -5752,11 +5756,14 @@ class App:
         if alive:
             state = "⏸" if pa else "▶"
         left = f" {state} {fmt_time(tp)}/{fmt_time(du)} "
+        liked_track = bool(self.current_track and self.current_track.id in self.liked_ids)
+        heart = "♥ " if liked_track else ""
         song = self.fmt_track_status(self.current_track, 10_000) if self.current_track else ""
         if self.last_error:
             song = f"ERROR: {self.last_error}"
         col_limit = max(0, w - 1)
-        line2 = _truncate_to_display_width(left + song, col_limit).ljust(col_limit)
+        heart_col = len(left)
+        line2 = _truncate_to_display_width(left + heart + song, col_limit).ljust(col_limit)
 
         now = time.time()
         if not self.dl.active and self.dl.progress_clear_at and now > self.dl.progress_clear_at:
@@ -5779,6 +5786,8 @@ class App:
 
         try:
             self.stdscr.addstr(y + 1, x, line2, self._status_color_pair(pa, alive))
+            if liked_track and heart_col < col_limit:
+                self.stdscr.addstr(y + 1, x + heart_col, "♥", self.C(14))
             if right and right_pos is not None:
                 self.stdscr.addstr(y + 1, x + right_pos, right, self.C(4))
         except curses.error:
@@ -6221,7 +6230,7 @@ class App:
             try:
                 self.stdscr.addch(0, w - artist_pane_w, "│", self.C(4))
                 self.stdscr.addstr(0, w - artist_pane_w + 1,
-                                   "Next in queue:"[:max(0, artist_pane_w - 2)], self.C(4))
+                                   " Next in queue:"[:max(0, artist_pane_w - 2)], self.C(4))
             except curses.error:
                 pass
         if self.tab == TAB_LIKED:

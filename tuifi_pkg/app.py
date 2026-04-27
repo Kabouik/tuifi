@@ -5266,7 +5266,7 @@ class App:
 
             threading.Thread(target=_worker, daemon=True).start()
 
-        self._hide_cover_for_popup = self._cover_backend() == "ueberzugpp"
+        self._hide_cover_for_popup = True
         self._need_redraw = True
         self.draw()
         h, w = self.stdscr.getmaxyx()
@@ -6385,7 +6385,7 @@ class App:
         filt_q = ""
         filt_hits: List[int] = []
         filt_pos = -1
-        self._hide_cover_for_popup = self._cover_backend() == "ueberzugpp"
+        self._hide_cover_for_popup = True
         self._need_redraw = True
         self.draw()
         y0, x0, win = self._popup_win(box_h, box_w)
@@ -7425,19 +7425,25 @@ class App:
             #   - If miniqueue is open → close it and show lyrics (one action, no toggle).
             #   - If miniqueue is closed → toggle inline lyrics panel on/off.
             if ch == ord("V") and self.tab == TAB_PLAYBACK:
-                if self.queue_overlay:
-                    # Always: close miniqueue and ensure lyrics are shown.
+                # Cycle: lyrics → miniqueue+sideview → cover-only → lyrics
+                if not self.queue_overlay and self._cover_lyrics:
+                    self._cover_lyrics = False
+                    self.queue_overlay = True
+                    self.focus = "queue"
+                    self.queue_cursor = clamp(self.queue_play_idx, 0, len(self.queue_items) - 1)
+                    if self._album_cover_pane and self._preview_next and self.queue_items:
+                        _nxt = self._preview_next_idx()
+                        if 0 <= _nxt < len(self.queue_items):
+                            self.queue_cursor = _nxt
+                elif self.queue_overlay:
                     self.queue_overlay = False
                     self.focus = "left"
-                    self._cover_lyrics = True
                 else:
-                    self._cover_lyrics = not self._cover_lyrics
-                if self._cover_lyrics:
-                    # Fetch lyrics if not already loaded.
+                    self._cover_lyrics = True
                     if self.current_track and not self.lyrics_lines and not self.lyrics_loading:
                         self.toggle_lyrics(self.current_track)
                         self.lyrics_overlay = False
-                self._cover_render_key = ""   # force re-render at new width
+                self._cover_render_key = ""
                 self._cover_render_buf = None
                 continue
 

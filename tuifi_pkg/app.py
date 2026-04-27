@@ -2487,6 +2487,7 @@ class App:
                 if self._need_redraw:
                     self._popup_refresh(y0, x0, box_h, box_w)
 
+                self._popup_draw_cava()
                 win.erase()
                 win.box()
                 win.addstr(0, 2, f" {title} "[:box_w - 2], self.C(4))
@@ -2518,7 +2519,6 @@ class App:
                 else:
                     win.addstr(box_h - 1, 2, hint[:box_w - 4], self.C(10))
                 h_scr, w_scr = self.stdscr.getmaxyx()
-                self._popup_draw_cava()
                 self._draw_status(h_scr - 2, 0, w_scr)
                 self.stdscr.noutrefresh()
                 win.touchwin()
@@ -2926,6 +2926,7 @@ class App:
                 if self._need_redraw:
                     self._popup_refresh(y0, x0, box_h, box_w)
 
+                self._popup_draw_cava()
                 win.erase()
                 win.box()
                 win.addstr(0, 2, " Download queue ", self.C(4))
@@ -2967,7 +2968,6 @@ class App:
                 win.addstr(box_h - 1, 2, hint2[:box_w - 4], self.C(10))
                 # Also refresh the status bar so playback progress stays live
                 h_scr, w_scr = self.stdscr.getmaxyx()
-                self._popup_draw_cava()
                 self._draw_status(h_scr - 2, 0, w_scr)
                 self.stdscr.noutrefresh()
                 win.touchwin()
@@ -3719,7 +3719,7 @@ class App:
         self._popup_clear_bg(y0, x0, box_h, box_w)
         win = self.stdscr.derwin(box_h, box_w, y0, x0)
         win.keypad(True)
-        win.bkgd(' ', self.C(16))
+        win.bkgd(' ', self.C(0))
         return y0, x0, win
 
     def _popup_refresh(self, y0: int, x0: int, box_h: int, box_w: int) -> None:
@@ -3771,9 +3771,7 @@ class App:
         pad_h = min(h - pad_y, box_h + 2); pad_w = min(w - pad_x, box_w + 4)
         self._erase_popup_bg(pad_y, pad_x, pad_h, pad_w)
         if _erase_bg:
-            # Use pair 16 (white on black) — the only explicitly non-default-bg pair —
-            # so popup background cells are opaque when a kitty z=-1 image is beneath.
-            bg_attr = self.C(16)
+            bg_attr = self.C(0)
             for yy in range(pad_y, pad_y + pad_h):
                 try:
                     self.stdscr.addstr(yy, pad_x, " " * pad_w, bg_attr)
@@ -4817,6 +4815,7 @@ class App:
                 info_scroll = min(info_scroll, max_scroll)
                 start = clamp(info_scroll, 0, max_scroll)
 
+                self._popup_draw_cava()
                 win.erase()
                 win.box()
                 win.addstr(0, 2, f" {title} "[:box_w - 2], self.C(4))
@@ -4826,7 +4825,6 @@ class App:
                 except curses.error:
                     pass
                 h_scr, w_scr = self.stdscr.getmaxyx()
-                self._popup_draw_cava()
                 self._draw_status(h_scr - 2, 0, w_scr)
                 self.stdscr.noutrefresh()
                 win.touchwin()
@@ -5049,6 +5047,7 @@ class App:
 
                 visible = [a for a in artists if not filt_q or filt_q in a.name.lower()] or artists
                 idx = clamp(idx, 0, len(visible) - 1)
+                self._popup_draw_cava()
                 win.erase()
                 win.box()
                 title = f" Similar to {artist.name} [{filt_q}] " if filt_q else f" Similar to {artist.name} "
@@ -5064,7 +5063,6 @@ class App:
                 win.addstr(box_h - 2, 2, hint[:box_w - 4], self.C(10))
                 win.addstr(box_h - 1, 2, hint2[:box_w - 4], self.C(10))
                 h_scr, w_scr = self.stdscr.getmaxyx()
-                self._popup_draw_cava()
                 self._draw_status(h_scr - 2, 0, w_scr)
                 self.stdscr.noutrefresh()
                 win.touchwin()  # force full resend so popup stays visible over sixel
@@ -5296,6 +5294,7 @@ class App:
                 scroll = min(scroll, max_scroll)
                 start = clamp(scroll, 0, max_scroll)
 
+                self._popup_draw_cava()
                 win.erase()
                 win.box()
                 win.addstr(0, 2, title[:box_w - 4], self.C(4))
@@ -5312,7 +5311,6 @@ class App:
                 except curses.error:
                     pass
                 h_scr, w_scr = self.stdscr.getmaxyx()
-                self._popup_draw_cava()
                 self._draw_status(h_scr - 2, 0, w_scr)
                 self.stdscr.noutrefresh()
                 win.touchwin()
@@ -6399,6 +6397,7 @@ class App:
 
                 scroll = clamp(scroll, 0, max_scroll)
                 filt_hits = [i for i, l in enumerate(lines) if filt_q and filt_q in l.lower()]
+                self._popup_draw_cava()
                 win.erase()
                 win.box()
                 title = f" Help [{filt_q}] " if filt_q else " Help "
@@ -6412,7 +6411,6 @@ class App:
                 except curses.error:
                     pass
                 h_scr, w_scr = self.stdscr.getmaxyx()
-                self._popup_draw_cava()
                 self._draw_status(h_scr - 2, 0, w_scr)
                 self.stdscr.noutrefresh()
                 win.touchwin()

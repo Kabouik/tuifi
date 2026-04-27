@@ -1678,8 +1678,8 @@ class App:
                 if is_dash:
                     # Give mpv time to parse the MPD, hit the CDN, and buffer.
                     # SegmentTemplate DASH needs noticeably more than a direct URL.
-                    # Poll up to 8 s; break early once time_pos is reported (playback running).
-                    for _i in range(16):
+                    # Poll up to 3 s; break early once time_pos is reported (playback running).
+                    for _i in range(6):
                         time.sleep(0.5)
                         if not self.mp.alive():
                             debug_log(f"play_track: mpv died on DASH for {quality} after {(_i+1)*0.5:.1f}s — trying lower quality")
@@ -1687,7 +1687,7 @@ class App:
                         if self.mp.snapshot()[0] is not None:
                             break
                     else:
-                        debug_log(f"play_track: DASH timed out (8s) for {quality} — trying lower quality")
+                        debug_log(f"play_track: DASH timed out (3s) for {quality} — trying lower quality")
                         raise RuntimeError("dash playback failed")
                 # Bail if superseded after start; the newer thread's mp.start() will
                 # have already called stop() on our proc via its own start sequence

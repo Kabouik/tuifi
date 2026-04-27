@@ -6692,7 +6692,7 @@ class App:
             _spec_rows_stacked = 0
             if queue_panel:
                 artist_pane_w = w - left_w  # share the queue column
-                _cover_rows_base = min(artist_pane_w // 2, max(6, usable_h - 8))
+                _cover_rows_base = min(artist_pane_w // 2, max(6, usable_h - 5))
                 if _both_pane_active:
                     # Ensure at least 3 miniqueue rows remain below the stacked panes.
                     _avail_spec = usable_h - _cover_rows_base - 4  # cover + gap + 3 queue rows

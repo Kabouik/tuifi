@@ -273,7 +273,6 @@ class App:
         self._mouse_last_press: tuple = (0.0, -1, -1)  # (time, row, col) for double-click / long-press
         self._mouse_long_press_pending: bool = False
         self._cover_lyrics: bool = True; self._cover_lyrics_max_scroll: int = 10_000
-        self._cover_lyrics_sideview: bool = False   # lyrics+sideview mode: right column shared
         self._show_singles_eps: bool = bool(self.settings.get("include_singles_and_eps_in_artist_tab", False))
         self._max_all_tracks: int = int(self.settings.get("max_all_tracks_number", 0) or 0)
         self._last_artist_fetch_track: Optional["Track"] = None
@@ -3463,7 +3462,7 @@ class App:
     def _cover_portrait(self, h: int, w: int) -> bool:
         """Portrait mode: terminal is square or taller in pixel terms (2:1 cell ratio assumed).
         Triggers as soon as pixel height >= pixel width, i.e. w <= 2*h."""
-        if not self._cover_lyrics or self._cover_lyrics_sideview or (self.queue_overlay and self.tab != TAB_QUEUE):
+        if not self._cover_lyrics or (self.queue_overlay and self.tab != TAB_QUEUE):
             return False
         return w <= h * 2
 
@@ -3482,8 +3481,6 @@ class App:
         if self.queue_overlay and self.tab != TAB_QUEUE:
             # 1-col gap between main cover and right panel (miniqueue / minicover / both).
             right_w = 45
-        elif self._cover_lyrics and self._cover_lyrics_sideview:
-            right_w = self._album_cover_pane_w(w) + 1
         elif self._cover_lyrics:
             right_w = self._lyrics_panel_w(w)
         else:
@@ -6588,7 +6585,7 @@ class App:
         _kitty = self._cover_backend() == "chafa-kitty"
         # On the playback tab in lyrics mode (no queue overlay), suppress spectrum:
         # the screen is lyrics + main cover only.
-        _lyrics_mode = self.tab == TAB_PLAYBACK and self._cover_lyrics and not self.queue_overlay and not self._cover_lyrics_sideview
+        _lyrics_mode = self.tab == TAB_PLAYBACK and self._cover_lyrics and not self.queue_overlay
         _cava_pane_active_early = self._cava_pane and not hide_cover and (self.tab != TAB_PLAYBACK or _kitty) and not _lyrics_mode
 
         if not _throttle_cover:
@@ -6633,7 +6630,7 @@ class App:
         artist_cover_rows = 0   # non-zero only when stacked with miniqueue
         # Pane suppressed on Playback tab unless the miniqueue is also open.
         # hide_cover is intentionally excluded: dialogs must not shift the layout.
-        _pane_suppressed = (self.tab == TAB_PLAYBACK and not queue_panel and not self._cover_lyrics_sideview)
+        _pane_suppressed = (self.tab == TAB_PLAYBACK and not queue_panel)
         _cover_pane_active = self._album_cover_pane and not _pane_suppressed
         # Cava pane allowed everywhere; only suppressed on playback tab with sixel/ueberzugpp
         # (conflict with full-screen cover) or when lyrics mode is active (lyrics+maincover only).
@@ -6706,11 +6703,6 @@ class App:
                 artist_pane_w = self._album_cover_pane_w(w)
                 left_w = max(10, left_w - artist_pane_w)
 
-        # In lyrics+sideview mode the right column is split: pane on top, lyrics below.
-        _lyrics_sideview_h = 0
-        if self._cover_lyrics_sideview and artist_pane_w > 0 and _pane_active:
-            _lyrics_sideview_h = min(artist_pane_w // 2, max(4, (usable_h - 1) // 2))
-
         _order = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
         _short_tabs_w = len("  ".join(TAB_SHORT_NAMES[i] for i in _order))
         _label_w = artist_pane_w + 1   # separator + pane width
@@ -6739,18 +6731,28 @@ class App:
 
         self._draw_status(h - status_h, 0, w)
 
-        if self.tab == TAB_PLAYBACK and self._cover_lyrics and not queue_panel:
+        if self.tab == TAB_PLAYBACK and self._cover_lyrics:
             # Auto-fetch lyrics for the playing track if not already loaded.
             t_cov = self.current_track
             if t_cov and not self.lyrics_loading and not (self.lyrics_track_id == t_cov.id and self.lyrics_lines):
                 self.toggle_lyrics(t_cov)
                 self.lyrics_overlay = False
-            if self._cover_lyrics_sideview:  # lyrics+sideview: lyrics in the lower right column
-                _lsw = self._album_cover_pane_w(w)
-                _ly  = top_h + _lyrics_sideview_h + (1 if _lyrics_sideview_h else 0)
-                _lh  = usable_h - _lyrics_sideview_h - (1 if _lyrics_sideview_h else 0)
-                if _lh > 2 and _lsw > 0:
-                    self._draw_playback_lyrics_panel(_ly, w - _lsw, _lh, _lsw)
+            if queue_panel:
+                # lyrics+miniqueue mode: fill horizontal gap between cover image and miniqueue.
+                # The main cover is allocated left_w-1 cols but chafa renders at most usable_h*2
+                # cols wide (2:1 cell aspect ratio for square image), leaving empty space.
+                _cic = left_w - 1              # allocated cover cols (= _cover_img_cols(w) here)
+                _cover_vis_w = min(_cic, usable_h * 2)  # estimated actual rendered width
+                _lyr_x = _cover_vis_w + 1
+                _lyr_w = left_w - _lyr_x - 1  # width between rendered cover and miniqueue
+                if _lyr_w >= 25:               # landscape: enough horizontal room for lyrics
+                    self._draw_playback_lyrics_panel(top_h, _lyr_x, usable_h, _lyr_w)
+                else:                          # portrait/narrow: lyrics below the cover
+                    _cover_h = _cic // 2       # square cover height in the narrow left panel
+                    _lyr_y = top_h + _cover_h + 1
+                    _lyr_h = usable_h - _cover_h - 1
+                    if _lyr_h >= 3:
+                        self._draw_playback_lyrics_panel(_lyr_y, 0, _lyr_h, left_w)
             elif self._cover_portrait(h, w):  # portrait: lyrics below the cover image
                 cover_rows = self._cover_img_rows_portrait(h, w)
                 self._draw_playback_lyrics_panel(top_h + cover_rows, 0,
@@ -6803,12 +6805,7 @@ class App:
             # Side pane: render cover or cava (or both stacked) after curses refresh.
             if _pane_active and artist_pane_w > 0:
                 artist_x = w - artist_pane_w
-                if queue_panel:
-                    _render_h = artist_cover_rows
-                elif _lyrics_sideview_h:
-                    _render_h = _lyrics_sideview_h
-                else:
-                    _render_h = usable_h - 1
+                _render_h = artist_cover_rows if queue_panel else (usable_h - 1)
                 if _render_h > 0 and not hide_cover:
                     if _both_pane_active:
                         # Stacked layout: cover on top, spectrum below, separated by a blank row.
@@ -6925,7 +6922,6 @@ class App:
             self.playlist_view_name = None
             self.playlist_view_tracks = []
         elif t == TAB_PLAYBACK:
-            self._cover_lyrics_sideview = False
             _layout = self.settings.get("playback_tab_layout", "lyrics")
             if _layout == "lyrics":
                 self._cover_lyrics = True
@@ -7315,7 +7311,6 @@ class App:
                                 if _on_cover:                                  # cycle pane: lyrics→queue→none→lyrics
                                     if not self.queue_overlay and self._cover_lyrics:
                                         self._cover_lyrics = False
-                                        self._cover_lyrics_sideview = False
                                         self.queue_overlay = True
                                         self.focus = "queue"
                                         self.queue_cursor = clamp(self.queue_play_idx, 0, len(self.queue_items) - 1)
@@ -7325,11 +7320,9 @@ class App:
                                                 self.queue_cursor = _nxt
                                     elif self.queue_overlay:
                                         self.queue_overlay = False
-                                        self._cover_lyrics_sideview = False
                                         self.focus = "left"
                                     else:
                                         self._cover_lyrics = True
-                                        self._cover_lyrics_sideview = False
                                         if self.current_track and not self.lyrics_lines and not self.lyrics_loading:
                                             self.toggle_lyrics(self.current_track)
                                             self.lyrics_overlay = False
@@ -7444,18 +7437,11 @@ class App:
                     _fn()
                     continue
 
-            # V in playback tab:
-            #   - If miniqueue is open → close it and show lyrics (one action, no toggle).
-            #   - If miniqueue is closed → toggle inline lyrics panel on/off.
+            # V in playback tab: cycle through 4 views.
             if ch == ord("V") and self.tab == TAB_PLAYBACK:
-                # Cycle: lyrics → lyrics+sideview → miniqueue+sideview → cover-only → lyrics
-                if not self.queue_overlay and self._cover_lyrics and not self._cover_lyrics_sideview:
-                    # lyrics → lyrics+sideview
-                    self._cover_lyrics_sideview = True
-                elif not self.queue_overlay and self._cover_lyrics_sideview:
-                    # lyrics+sideview → miniqueue+sideview
-                    self._cover_lyrics = False
-                    self._cover_lyrics_sideview = False
+                # Cycle: lyrics → lyrics+miniqueue → miniqueue-only → cover-only → lyrics
+                if self._cover_lyrics and not self.queue_overlay:
+                    # lyrics → lyrics+miniqueue
                     self.queue_overlay = True
                     self.focus = "queue"
                     self.queue_cursor = clamp(self.queue_play_idx, 0, len(self.queue_items) - 1)
@@ -7463,15 +7449,16 @@ class App:
                         _nxt = self._preview_next_idx()
                         if 0 <= _nxt < len(self.queue_items):
                             self.queue_cursor = _nxt
+                elif self._cover_lyrics and self.queue_overlay:
+                    # lyrics+miniqueue → miniqueue-only
+                    self._cover_lyrics = False
                 elif self.queue_overlay:
-                    # miniqueue+sideview → cover-only
+                    # miniqueue-only → cover-only
                     self.queue_overlay = False
-                    self._cover_lyrics_sideview = False
                     self.focus = "left"
                 else:
                     # cover-only → lyrics
                     self._cover_lyrics = True
-                    self._cover_lyrics_sideview = False
                     if self.current_track and not self.lyrics_lines and not self.lyrics_loading:
                         self.toggle_lyrics(self.current_track)
                         self.lyrics_overlay = False

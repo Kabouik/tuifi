@@ -305,7 +305,7 @@ def load_settings() -> Dict[str, Any]:
     s.setdefault("color_separator", "white")
     s.setdefault("color_liked",     "white")
     s.setdefault("color_mark",      "red")
-    s.setdefault("color_spectrum",  "")     # empty = inherit color_accent
+    s.setdefault("color_spectrum",  "")     # empty = inherit color_chrome
 
     # -- Spectrum / cava --
     s.setdefault("spectrum_method", "pulse")
@@ -350,7 +350,7 @@ def save_settings(s: Dict[str, Any]) -> None:
         "history_max":         "0=unlimited",
         "max_all_tracks_number": "0=unlimited",
         "cover_lyrics_color_pair": "color name for lyrics panel text; \"default\" = terminal default",
-        "color_spectrum":  "spectrum bar color; empty = inherit color_accent; click spectrum to cycle",
+        "color_spectrum":  "spectrum bar color; empty = inherit color_chrome; click spectrum to cycle",
         "spectrum_method": "cava input method: pulse | pipewire | alsa | fifo | ...",
         "spectrum_source": "cava input source (device/path); empty = cava default",
         "initial_tab":         "last active tab, restored on startup",

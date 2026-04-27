@@ -741,7 +741,7 @@ class App:
                 _lyric_color_raw = "default"
                 s["cover_lyrics_color_pair"] = "default"
             curses.init_pair(18, self._name_to_curses_color(_lyric_color_raw), -1)
-            _spectrum_raw = s.get("color_spectrum") or s.get("color_accent", "magenta")
+            _spectrum_raw = s.get("color_spectrum") or s.get("color_chrome", "blue")
             curses.init_pair(19, self._name_to_curses_color(_spectrum_raw), -1)
 
     def C(self, pair: int) -> int:
@@ -4369,7 +4369,7 @@ class App:
 
     def _cycle_spectrum_color(self) -> None:
         """Cycle color_spectrum to the next preset and reinitialise pair 19."""
-        cur = str(self.settings.get("color_spectrum") or self.settings.get("color_accent", "magenta"))
+        cur = str(self.settings.get("color_spectrum") or self.settings.get("color_chrome", "blue"))
         try:
             idx = self._SPECTRUM_COLORS.index(cur)
             nxt = self._SPECTRUM_COLORS[(idx + 1) % len(self._SPECTRUM_COLORS)]
@@ -5030,7 +5030,7 @@ class App:
         self.draw()
 
         h, w = self.stdscr.getmaxyx()
-        _hint2_str = " a: add to playlist   e/E: enqueue   l: like   f: filter   q/s/Esc: close "
+        _hint2_str = " a: add to playlist   e/E: enqueue   l: like   f: filter   q/S/Esc: close "
         box_w = min(w - 6, max(len(_hint2_str) + 5, max(len(a.name) for a in artists) + 8))
         box_h = min(h - 6, max(8, len(artists) + 4))
         y0, x0, win = self._popup_win(box_h, box_w)

@@ -5266,7 +5266,7 @@ class App:
 
             threading.Thread(target=_worker, daemon=True).start()
 
-        self._hide_cover_for_popup = True
+        self._hide_cover_for_popup = self._cover_backend() == "ueberzugpp"
         self._need_redraw = True
         self.draw()
         h, w = self.stdscr.getmaxyx()
@@ -6385,7 +6385,7 @@ class App:
         filt_q = ""
         filt_hits: List[int] = []
         filt_pos = -1
-        self._hide_cover_for_popup = True
+        self._hide_cover_for_popup = self._cover_backend() == "ueberzugpp"
         self._need_redraw = True
         self.draw()
         y0, x0, win = self._popup_win(box_h, box_w)

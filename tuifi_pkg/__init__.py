@@ -1,7 +1,7 @@
 """tuifi package — a TUI music player for TIDAL HiFi API."""
 
 APP_NAME = "tuifi"
-VERSION = "2.3.11"
+VERSION = "2.3.12"
 DEFAULT_API = ""
 
 TAB_SEARCH      = 1

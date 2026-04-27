@@ -3487,7 +3487,8 @@ class App:
             right_w = 0
         # When the standalone album cover pane is visible (no miniqueue), reserve its
         # width + 1-col gap — consistent with the miniqueue case above.
-        if (self._album_cover_pane or self._cava_pane) and not (self.queue_overlay and self.tab != TAB_QUEUE):
+        # On TAB_PLAYBACK the pane is always suppressed (unless queue_panel), so skip.
+        if (self._album_cover_pane or self._cava_pane) and not (self.queue_overlay and self.tab != TAB_QUEUE) and self.tab != TAB_PLAYBACK:
             right_w = max(right_w, self._album_cover_pane_w(w) + 1)
         return w - right_w
 
@@ -3510,6 +3511,10 @@ class App:
         else:
             img_rows = h - top_h - status_h - 1  # -1 matches _render_cover_image gap
             img_cols = self._cover_img_cols(w)
+            # In lyrics+miniqueue mode cap to actual visual width so the cover
+            # (symbols fill the full allocated area) does not bleed into the lyrics panel.
+            if self._cover_lyrics and self.queue_overlay and self.tab == TAB_PLAYBACK:
+                img_cols = min(img_cols, img_rows * 2)
         if img_rows <= 0 or img_cols <= 0: return
         fmt = "kitty" if backend == "chafa-kitty" else ("sixel" if backend == "chafa" else "symbols")
         render_key = f"{path}:{img_cols}x{img_rows}:{fmt}"
@@ -3552,6 +3557,8 @@ class App:
         else:
             img_rows = h - top_h - status_h - 1
             img_cols = self._cover_img_cols(w)
+            if self._cover_lyrics and self.queue_overlay and self.tab == TAB_PLAYBACK:
+                img_cols = min(img_cols, img_rows * 2)
             img_x = 0
         if img_rows <= 0 or img_cols <= 0: return
 

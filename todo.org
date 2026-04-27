@@ -31,9 +31,17 @@
    :DONE: cover-click cycle to queue_overlay=True now re-applies preview_next cursor offset when _album_cover_pane is active (app.py ~6739)
 ** DONE When preview_next is enabled, add the text "Next in queue:" above the cover (same line as the tab names)
    :DONE: "Next in queue:" drawn at row 0 in the pane area when preview_next=True on TAB_PLAYBACK+queue+pane (draw() ~6184)
-** Lyrics (see git.sr.ht #1)
-** When showing the help, the miniqueue jumps over the minocover (and/or spectrum), there's no need for that, it should stay where it is since we decided dialogs no longer freeze or hide status/info/side/cursor moving with queue next tracks.
+** Lyrics (see git.sr.ht #1) (not now, we'll see later)
+** DONE When showing the help, the miniqueue jumps over the minocover (and/or spectrum), there's no need for that, it should stay where it is since we decided dialogs no longer freeze or hide status/info/side/cursor moving with queue next tracks.
+   :DONE: removed hide_cover from _pane_suppressed/_cava_pane_active; gated only actual render calls; layout unchanged during popups (app.py ~6588)
 ** When the geometry is small and the sideview: both mode collapses to hide the spectrum, the miniqueue should shift up to use that space instead of staying where it is; there are 4 extra rows to use I believe
-** In the help dialog, there should be an empty row between the content (the help text) and the bottom line of the frame where the keybinds for the dialog are listed.
-** The 8s timer for hi_res_lossless is probably too long, makes dl very long when they have to fallback to lower quality, I think we know before 8 seconds if we found the first part for max quality
-** Playback stops when a track ends and there are others in the queue if the download dialog is open, it should continue
+** DONE In the help dialog, there should be an empty row between the content (the help text) and the bottom line of the frame where the keybinds for the dialog are listed.
+   :DONE: inner_h = box_h - 3 (was box_h - 2) in show_help_dialog() (app.py ~6390)
+** DONE The 8s timer for hi_res_lossless is probably too long, makes dl very long when they have to fallback to lower quality, I think we know before 8 seconds if we found the first part for max quality
+   :DONE: reduced DASH wait loop from range(16) to range(6) (~3s); log updated to "3s" (app.py ~1682)
+** DONE Playback stops when a track ends and there are others in the queue if the download dialog is open, it should continue
+   :DONE: download dialog ch==-1 branch now runs auto-advance check before continue (app.py show_download_queue_dialog)
+** See if extra tags can be included, like lyrics, url, etc.
+** See if we can avoid the cursor block being flickering/blinking at rows where redraws are occurring.
+** DONE I don't see the spectrum color setting in setting.jsonc (I had the file before but would expect it to update), and there should also be a way to set the cava method (pulse, pipewire, etc) as well as the source.
+   :DONE: color_spectrum/spectrum_method/spectrum_source added to persistence.py defaults and save_settings() SPECTRUM section; color_spectrum inherits color_chrome; sideview auto-detected on first run

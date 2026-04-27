@@ -705,6 +705,8 @@ class App:
         except Exception:
             pass
         curses.curs_set(0)
+        sys.stdout.buffer.write(b"\x1b[?25l")
+        sys.stdout.buffer.flush()
         self.stdscr.nodelay(True)
         self.stdscr.keypad(True)
         curses.noecho()
@@ -1343,6 +1345,8 @@ class App:
         cur = len(s)
         undo_stack: list = []
         curses.curs_set(1)
+        sys.stdout.buffer.write(b"\x1b[?25h")
+        sys.stdout.buffer.flush()
         self.stdscr.nodelay(False)
         inner_w = max(1, box_w - 4 - label_len)
         input_x = 2 + label_len
@@ -1375,10 +1379,14 @@ class App:
                 while self.stdscr.getch() != -1:
                     pass
                 curses.curs_set(0)
+                sys.stdout.buffer.write(b"\x1b[?25l")
+                sys.stdout.buffer.flush()
                 self._full_redraw()
                 return None
             elif ch in (10, 13):
                 curses.curs_set(0)
+                sys.stdout.buffer.write(b"\x1b[?25l")
+                sys.stdout.buffer.flush()
                 self.stdscr.nodelay(True)
                 self._full_redraw()
                 return s.strip()
@@ -1426,6 +1434,8 @@ class App:
                 if (not (y0 <= my < y0 + box_h and x0 <= mx < x0 + box_w)
                         and bstate & (curses.BUTTON1_PRESSED | curses.BUTTON3_PRESSED)):
                     curses.curs_set(0)
+                    sys.stdout.buffer.write(b"\x1b[?25l")
+                    sys.stdout.buffer.flush()
                     self.stdscr.nodelay(True)
                     self._full_redraw()
                     return None
@@ -8691,6 +8701,8 @@ def main(argv: List[str]) -> int:
 
     os.environ.setdefault("ESCDELAY", "25")  # shorten ncurses ESC wait (ms)
     curses.wrapper(wrapped)
+    sys.stdout.write("\x1b[?25h")
+    sys.stdout.flush()
     return 0
 
 

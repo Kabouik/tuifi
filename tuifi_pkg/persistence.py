@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import time
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
@@ -226,6 +227,20 @@ def _migrate_settings_json() -> None:
         pass                        # leave old file in place if anything fails
 
 
+def _detect_sideview_default() -> str:
+    """Return the best sideview default based on available system tools."""
+    has_cava     = shutil.which("cava") is not None
+    has_graphics = (shutil.which("ueberzugpp") is not None
+                    or shutil.which("chafa") is not None)
+    if has_cava and has_graphics:
+        return "both"
+    if has_cava:
+        return "spectrum"
+    if has_graphics:
+        return "cover"
+    return "off"
+
+
 def load_settings() -> Dict[str, Any]:
     _migrate_settings_json()
     s = _load_jsonc(SETTINGS_FILE, {})
@@ -269,6 +284,7 @@ def load_settings() -> Dict[str, Any]:
     s.setdefault("show_line_numbers", False)
     s.setdefault("show_album_track_count", True)
     s.setdefault("tab_align", True)
+    s.setdefault("sideview", _detect_sideview_default())  # cover|both|spectrum|off; auto-detected on first run
 
     # -- History --
     s.setdefault("history_max", 0)              # 0 = unlimited

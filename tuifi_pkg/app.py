@@ -6819,6 +6819,10 @@ class App:
                 if self._cover_sixel_visible:
                     self.stdscr.redrawln(0, top_h)
                     self.stdscr.redrawln(h - status_h - 1, status_h + 1)
+                    try:
+                        self.stdscr.move(0, 0)
+                    except curses.error:
+                        pass
                     self.stdscr.refresh()
 
             # Side pane: render cover or cava (or both stacked) after curses refresh.
@@ -6844,6 +6848,10 @@ class App:
                             if _pane_wrote:
                                 self.stdscr.redrawln(0, top_h)
                                 self.stdscr.redrawln(h - status_h - 1, status_h + 1)
+                                try:
+                                    self.stdscr.move(0, 0)
+                                except curses.error:
+                                    pass
                                 self.stdscr.refresh()
                         if _s_h > 0:
                             self._cava_pane_geom = (_s_y, artist_x, _s_h, _spec_w)
@@ -6860,6 +6868,10 @@ class App:
                         if _pane_wrote:
                             self.stdscr.redrawln(0, top_h)
                             self.stdscr.redrawln(h - status_h - 1, status_h + 1)
+                            try:
+                                self.stdscr.move(0, 0)
+                            except curses.error:
+                                pass
                             self.stdscr.refresh()
         finally:
             sys.stdout.buffer.write(b"\033[?2026l")

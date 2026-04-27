@@ -705,7 +705,7 @@ class App:
         except Exception:
             pass
         curses.curs_set(0)
-        sys.stdout.buffer.write(b"\x1b[?25l")
+        sys.stdout.buffer.write(b"\x1b[?25l\x1b]12;black\x07")
         sys.stdout.buffer.flush()
         self.stdscr.nodelay(True)
         self.stdscr.keypad(True)
@@ -4387,7 +4387,7 @@ class App:
                     pass
         # Park the cursor away from the pane so it doesn't appear at the spectrum edge
         try:
-            self.stdscr.move(0, 0)
+            self.stdscr.move(curses.LINES - 1, curses.COLS - 1)
         except curses.error:
             pass
 
@@ -6812,7 +6812,7 @@ class App:
         sys.stdout.buffer.flush()
         try:
             try:
-                self.stdscr.move(0, 0)   # park cursor under tab bar before refresh
+                self.stdscr.move(curses.LINES - 1, curses.COLS - 1)   # park cursor at bottom-right before refresh
             except curses.error:
                 pass
             self.stdscr.refresh()
@@ -6830,7 +6830,7 @@ class App:
                     self.stdscr.redrawln(0, top_h)
                     self.stdscr.redrawln(h - status_h - 1, status_h + 1)
                     try:
-                        self.stdscr.move(0, 0)
+                        self.stdscr.move(curses.LINES - 1, curses.COLS - 1)
                     except curses.error:
                         pass
                     self.stdscr.refresh()
@@ -6859,7 +6859,7 @@ class App:
                                 self.stdscr.redrawln(0, top_h)
                                 self.stdscr.redrawln(h - status_h - 1, status_h + 1)
                                 try:
-                                    self.stdscr.move(0, 0)
+                                    self.stdscr.move(curses.LINES - 1, curses.COLS - 1)
                                 except curses.error:
                                     pass
                                 self.stdscr.refresh()
@@ -6879,7 +6879,7 @@ class App:
                             self.stdscr.redrawln(0, top_h)
                             self.stdscr.redrawln(h - status_h - 1, status_h + 1)
                             try:
-                                self.stdscr.move(0, 0)
+                                self.stdscr.move(curses.LINES - 1, curses.COLS - 1)
                             except curses.error:
                                 pass
                             self.stdscr.refresh()
@@ -8701,7 +8701,7 @@ def main(argv: List[str]) -> int:
 
     os.environ.setdefault("ESCDELAY", "25")  # shorten ncurses ESC wait (ms)
     curses.wrapper(wrapped)
-    sys.stdout.write("\x1b[?25h")
+    sys.stdout.write("\x1b[?25h\x1b]112\x07")  # restore cursor visibility and color
     sys.stdout.flush()
     return 0
 

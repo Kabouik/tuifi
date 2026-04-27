@@ -6600,9 +6600,10 @@ class App:
             # until the new one overwrites it. Erasing explicitly causes a one-frame
             # flash of empty space before the replacement arrives.
             if self._album_cover_visible and _backend != "chafa-kitty":
-                # Erase if cava pane is now active (cover replaced by bars) or path changed.
+                # Erase if cava pane is now active (cover replaced by bars), path changed,
+                # or a popup is open (cover must not peek through the dialog background).
                 cur_path = self._album_cover_path or ""
-                if _cava_pane_active_early or not self._album_cover_pane_write_key or \
+                if hide_cover or _cava_pane_active_early or not self._album_cover_pane_write_key or \
                         not self._album_cover_pane_write_key.startswith(cur_path + ":"):
                     self._erase_album_cover_terminal()
             # Full redraw: stdscr.erase()+refresh() will overwrite the sixel/chafa area
@@ -6626,13 +6627,16 @@ class App:
         artist_pane_w = 0
         artist_cover_rows = 0   # non-zero only when stacked with miniqueue
         # Pane suppressed on Playback tab unless the miniqueue is also open.
-        _pane_suppressed = hide_cover or (self.tab == TAB_PLAYBACK and not queue_panel)
+        # hide_cover is intentionally excluded: dialogs must not shift the layout.
+        _pane_suppressed = (self.tab == TAB_PLAYBACK and not queue_panel)
         _cover_pane_active = self._album_cover_pane and not _pane_suppressed
         # Cava pane allowed everywhere; only suppressed on playback tab with sixel/ueberzugpp
         # (conflict with full-screen cover) or when lyrics mode is active (lyrics+maincover only).
         # With kitty graphics the image lives in a separate compositor layer — no conflict.
-        _cava_pane_active  = self._cava_pane and not hide_cover and (self.tab != TAB_PLAYBACK or _kitty) and not _lyrics_mode
-        if not _cava_pane_active:
+        _cava_pane_active  = self._cava_pane and (self.tab != TAB_PLAYBACK or _kitty) and not _lyrics_mode
+        # During a popup, suppress cava bars (they'd flicker behind the dialog) but keep
+        # the geometry None so _popup_draw_cava does not attempt to redraw them either.
+        if not _cava_pane_active or hide_cover:
             self._cava_pane_geom = None
         _pane_active = _cover_pane_active or _cava_pane_active
         if _pane_active:
@@ -6752,7 +6756,7 @@ class App:
         # Prevent ncurses scroll-region optimisation for the pane rows (same reason
         # as the TAB_PLAYBACK block above).  Skip during throttle/debounce: those rows
         # must NOT be repainted with spaces when the cover write is also being skipped.
-        if _pane_active and artist_pane_w > 0 and not _throttle_cover:
+        if _pane_active and artist_pane_w > 0 and not _throttle_cover and not hide_cover:
             if _cover_pane_active and self._album_cover_path:
                 _ar_rows = artist_cover_rows if queue_panel else usable_h
                 if _ar_rows > 0:
@@ -6784,7 +6788,7 @@ class App:
             if _pane_active and artist_pane_w > 0:
                 artist_x = w - artist_pane_w
                 _render_h = artist_cover_rows if queue_panel else (usable_h - 1)
-                if _render_h > 0:
+                if _render_h > 0 and not hide_cover:
                     if _both_pane_active:
                         # Stacked layout: cover on top, spectrum below, separated by a blank row.
                         if queue_panel:

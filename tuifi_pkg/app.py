@@ -3709,7 +3709,10 @@ class App:
         x0 = (w - box_w) // 2
         # For kitty backend: delete the compositor image before drawing the popup
         # so it appears on a clean background.  The image is restored on next redraw.
-        if self._cover_sixel_visible and self._cover_backend() == "chafa-kitty":
+        # Scrollable popups (help, lyrics) set _hide_cover_for_popup — for those, the
+        # kitty image lives behind text (z=-1) and stays visible intentionally.
+        if (self._cover_sixel_visible and self._cover_backend() == "chafa-kitty"
+                and not getattr(self, "_hide_cover_for_popup", False)):
             sys.stdout.buffer.write(b"\033_Ga=d,d=A\033\\")
             sys.stdout.buffer.flush()
             self._cover_sixel_visible = False
@@ -6592,7 +6595,7 @@ class App:
             # while curses repaints the UI chrome — the new cover is written after
             # stdscr.refresh(), and overlays are drawn on top of it afterwards.
             # On any other tab (or if cover_path is unset), erase any stale sixel first.
-            if hide_cover or not (self.tab == TAB_PLAYBACK and self.cover_path):
+            if (hide_cover and _backend != "chafa-kitty") or not (self.tab == TAB_PLAYBACK and self.cover_path):
                 self._cover_erase_terminal()
             # Artist cover pane: erase before redraw so the cells below are clean.
             # Skip for Kitty — images live in a separate graphics layer that
@@ -6603,7 +6606,7 @@ class App:
                 # Erase if cava pane is now active (cover replaced by bars), path changed,
                 # or a popup is open (cover must not peek through the dialog background).
                 cur_path = self._album_cover_path or ""
-                if hide_cover or _cava_pane_active_early or not self._album_cover_pane_write_key or \
+                if (hide_cover and _backend != "chafa-kitty") or _cava_pane_active_early or not self._album_cover_pane_write_key or \
                         not self._album_cover_pane_write_key.startswith(cur_path + ":"):
                     self._erase_album_cover_terminal()
             # Full redraw: stdscr.erase()+refresh() will overwrite the sixel/chafa area
@@ -6611,7 +6614,8 @@ class App:
             # and _render_album_cover_pane re-write on the next pass even when the path/
             # geometry are unchanged.  Kitty images live in a separate graphics layer and
             # survive curses erases, so their write_key remains valid.
-            self._cover_sixel_visible = False
+            if not (hide_cover and _backend == "chafa-kitty"):
+                self._cover_sixel_visible = False
             if _backend != "chafa-kitty":
                 self._album_cover_pane_write_key = ""
             self.stdscr.erase()

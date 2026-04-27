@@ -6886,13 +6886,14 @@ class App:
                 self._mix_pending_ctx = None          # type: ignore[attr-defined]
             if self.tab == TAB_ARTIST:
                 self._artist_pending_ctx = None       # type: ignore[attr-defined]
-            # Reset current displayed cover when switching tabs (new context needs fresh cover).
+            # Erase the graphic overlay (ueberzugpp/kitty) so it doesn't bleed into the new
+            # tab, but keep item_key / path / render_buf so the cover stays visible while the
+            # new tab's selection is resolved.  If the new tab has an immediate selection the
+            # fetch functions will transition naturally (old cover shown until new is ready);
+            # if the new tab has no selection the last cover persists (playing track / queue).
             if self._album_cover_visible:
                 self._erase_album_cover_terminal()
-            self._album_cover_item_key = ""
-            self._album_cover_path = None
-            self._album_cover_render_buf = None
-            self._album_cover_render_key = ""
+            self._album_cover_pane_write_key = ""
             self.stdscr.clearok(True)
             if self.tab == TAB_ALBUM:
                 self._album_pending_ctx = None        # type: ignore[attr-defined]

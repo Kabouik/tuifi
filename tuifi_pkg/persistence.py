@@ -305,6 +305,11 @@ def load_settings() -> Dict[str, Any]:
     s.setdefault("color_separator", "white")
     s.setdefault("color_liked",     "white")
     s.setdefault("color_mark",      "red")
+    s.setdefault("color_spectrum",  "")     # empty = inherit color_accent
+
+    # -- Spectrum / cava --
+    s.setdefault("spectrum_method", "pulse")
+    s.setdefault("spectrum_source", "")     # empty = cava default
 
     # -- Downloads --
     s.setdefault("download_dir", _default_downloads_dir())
@@ -345,6 +350,9 @@ def save_settings(s: Dict[str, Any]) -> None:
         "history_max":         "0=unlimited",
         "max_all_tracks_number": "0=unlimited",
         "cover_lyrics_color_pair": "color name for lyrics panel text; \"default\" = terminal default",
+        "color_spectrum":  "spectrum bar color; empty = inherit color_accent; click spectrum to cycle",
+        "spectrum_method": "cava input method: pulse | pipewire | alsa | fifo | ...",
+        "spectrum_source": "cava input source (device/path); empty = cava default",
         "initial_tab":         "last active tab, restored on startup",
     }
 
@@ -383,7 +391,11 @@ def save_settings(s: Dict[str, Any]) -> None:
         "color_duration", "color_line_numbers", "color_album_track_count", "color_title",
         "color_separator", "color_liked", "color_mark",
         "cover_lyrics_color_pair",
+        "color_spectrum",
     )
+
+    _section("── SPECTRUM  (cava spectrum pane settings) " + "─" * 26)
+    _keys("spectrum_method", "spectrum_source")
 
     _section("── DOWNLOADS " + "─" * 56)
     _keys("download_dir", "download_structure", "download_filename")

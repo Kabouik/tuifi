@@ -741,7 +741,8 @@ class App:
                 _lyric_color_raw = "default"
                 s["cover_lyrics_color_pair"] = "default"
             curses.init_pair(18, self._name_to_curses_color(_lyric_color_raw), -1)
-            curses.init_pair(19, _cp("color_spectrum", s.get("color_chrome", "black")), -1)
+            _spectrum_raw = s.get("color_spectrum") or s.get("color_accent", "magenta")
+            curses.init_pair(19, self._name_to_curses_color(_spectrum_raw), -1)
 
     def C(self, pair: int) -> int:
         if self.color_mode and curses.has_colors():
@@ -4368,7 +4369,7 @@ class App:
 
     def _cycle_spectrum_color(self) -> None:
         """Cycle color_spectrum to the next preset and reinitialise pair 19."""
-        cur = str(self.settings.get("color_spectrum", "black"))
+        cur = str(self.settings.get("color_spectrum") or self.settings.get("color_accent", "magenta"))
         try:
             idx = self._SPECTRUM_COLORS.index(cur)
             nxt = self._SPECTRUM_COLORS[(idx + 1) % len(self._SPECTRUM_COLORS)]
@@ -6360,7 +6361,9 @@ class App:
             " color_playing  color_paused  color_error  color_chrome  color_accent",
             " color_artist   color_title   color_album  color_year    color_separator",
             " color_duration color_line_numbers color_album_track_count color_liked  color_mark",
-            " color_spectrum: spectrum/eq bar color (default: color_accent; click spectrum to cycle)",
+            " color_spectrum: spectrum bar color (empty = color_accent; click spectrum to cycle)",
+            " spectrum_method: cava input method (pulse, pipewire, alsa, …; default: pulse)",
+            " spectrum_source: cava input source/device (empty = cava default)",
             " cover_lyrics_color_pair: lyrics panel text color (e.g. white, cyan; default: terminal default)",
             " values: black red green yellow blue magenta cyan white (or 0-255)",
             "",

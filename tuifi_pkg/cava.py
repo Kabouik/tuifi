@@ -18,7 +18,7 @@ framerate = {framerate}
 
 [input]
 method = {method}
-
+{source_line}
 [output]
 method = raw
 raw_target = {fifo}
@@ -37,8 +37,9 @@ class CavaReader:
     which avoids line-buffering issues and gives fixed-size chunk reads.
 
     Settings keys (from app settings dict):
-        cava_method    – cava input method (default: "pulse")
-        cava_framerate – output framerate (default: 30)
+        spectrum_method – cava input method (default: "pulse")
+        spectrum_source – cava input source/device (default: "" = cava default)
+        cava_framerate  – output framerate (default: 30)
     """
 
     _FRAME_MAX = 65535  # 16-bit unsigned max
@@ -78,12 +79,14 @@ class CavaReader:
 
         # Write config
         framerate = int(self._settings.get("cava_framerate", 30))
-        method = str(self._settings.get("cava_method", "pulse"))
+        method = str(self._settings.get("spectrum_method", "pulse"))
+        source = str(self._settings.get("spectrum_source", "") or "")
+        source_line = f"source = {source}" if source else ""
         try:
             with open(self._cfg_path, "w", encoding="utf-8") as f:
                 f.write(_CAVA_CFG_TEMPLATE.format(
                     bars=bars, framerate=framerate,
-                    method=method, fifo=self._fifo_path,
+                    method=method, source_line=source_line, fifo=self._fifo_path,
                 ))
         except OSError:
             return False

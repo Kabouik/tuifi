@@ -6691,7 +6691,7 @@ class App:
                 if _both_pane_active:
                     # Ensure at least 3 miniqueue rows remain below the stacked panes.
                     _avail_spec = usable_h - _cover_rows_base - 4  # cover + gap + 3 queue rows
-                    if _avail_spec >= 3:
+                    if _avail_spec >= 4:
                         _spec_rows_stacked = min(max(3, _cover_rows_base // 3), _avail_spec)
                         artist_cover_rows = _cover_rows_base + _spec_rows_stacked + 1  # +1 gap row
                     else:

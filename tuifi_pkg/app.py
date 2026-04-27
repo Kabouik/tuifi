@@ -705,7 +705,6 @@ class App:
         except Exception:
             pass
         curses.curs_set(0)
-        self.stdscr.leaveok(True)   # don't reposition hardware cursor after refresh
         self.stdscr.nodelay(True)
         self.stdscr.keypad(True)
         curses.noecho()
@@ -6802,6 +6801,10 @@ class App:
         sys.stdout.buffer.write(b"\033[?2026h")
         sys.stdout.buffer.flush()
         try:
+            try:
+                self.stdscr.move(0, 0)   # park cursor under tab bar before refresh
+            except curses.error:
+                pass
             self.stdscr.refresh()
 
             # After curses has refreshed, write the cover image.  Overlays (info,

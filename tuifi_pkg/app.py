@@ -6168,6 +6168,23 @@ class App:
         tp, du, pa, vo, mu = self.mp.snapshot()
         alive = self.mp.alive()
 
+        # Right-side info (toast, dl progress, artist status) — always on row y
+        now = time.time()
+        if not self.dl.active and self.dl.progress_clear_at and now > self.dl.progress_clear_at:
+            self.dl.progress_line = ""
+            self.dl.progress_clear_at = 0.0
+        right = ""
+        if self.dl.progress_line:
+            right = self.dl.progress_line
+        elif self.dl.error:
+            right = "DLERR"
+        elif now < self.toast_until and self.toast_msg:
+            right = self.toast_msg
+        elif self._artist_status:
+            right = self._artist_status
+
+        row1_w = max(0, w - 1)
+        dim = curses.A_DIM if self.color_mode else 0
         if self.show_toggles:
             parts = []
             if self.repeat_mode:
@@ -6201,10 +6218,20 @@ class App:
                 parts.append("sideview: spectrum")
             elif self._album_cover_pane:
                 parts.append("sideview: next" if self._preview_next else "sideview: cover")
-            line1 = " ? help  |  " + "   ".join(parts)
-            self.stdscr.addstr(y, x, line1[:max(0, w - 1)].ljust(max(0, w - 1)), curses.A_DIM if self.color_mode else 0)
+            line1 = " " + "   ".join(parts)
         else:
-            self.stdscr.addstr(y, x, " " * max(0, w - 1))
+            line1 = ""
+
+        if right:
+            right_trunc = _truncate_to_display_width(right, max(0, row1_w - 2))
+            right_w = _str_display_width(right_trunc)
+            right_pos1 = max(0, row1_w - right_w)
+            left_limit = max(0, right_pos1 - 1)
+            row1 = line1[:left_limit].ljust(row1_w)
+            self.stdscr.addstr(y, x, row1, dim)
+            self.stdscr.addstr(y, x + right_pos1, right_trunc, self.C(4))
+        else:
+            self.stdscr.addstr(y, x, line1[:row1_w].ljust(row1_w), dim)
 
         state = "⏹"
         if alive:
@@ -6215,41 +6242,19 @@ class App:
         song = self.fmt_track_status(self.current_track, 10_000) if self.current_track else ""
         if self.last_error:
             song = f"ERROR: {self.last_error}"
-        _help_hint = " help:?"
+        _help_hint = " help: ?"
         _hint_w = len(_help_hint)
-        col_limit = max(0, w - 1 - _hint_w)
         heart_col = len(left)
+        col_limit = max(0, w - 1 - _hint_w)
         line2 = _truncate_to_display_width(left + heart + song, col_limit).ljust(col_limit)
-
-        now = time.time()
-        if not self.dl.active and self.dl.progress_clear_at and now > self.dl.progress_clear_at:
-            self.dl.progress_line = ""
-            self.dl.progress_clear_at = 0.0
-        right = ""
-        if self.dl.progress_line:
-            right = self.dl.progress_line
-        elif self.dl.error:
-            right = "DLERR"
-        elif now < self.toast_until and self.toast_msg:
-            right = self.toast_msg
-        elif self._artist_status:
-            right = self._artist_status
-        right_pos = None
-        if right:
-            right = _truncate_to_display_width(right, max(0, col_limit - 2))
-            right_pos = max(0, col_limit - _str_display_width(right))
-            line2 = line2[:right_pos] + " " * _str_display_width(right) + line2[right_pos + _str_display_width(right):]
 
         try:
             self.stdscr.addstr(y + 1, x, line2, self._status_color_pair(pa, alive))
-            if right and right_pos is not None:
-                self.stdscr.addstr(y + 1, x + right_pos, right, self.C(4))
         except curses.error:
             pass
         if w > _hint_w + 5:
-            dim = curses.A_DIM if self.color_mode else 0
             try:
-                self.stdscr.addstr(y + 1, w - _hint_w, " help:", dim)
+                self.stdscr.addstr(y + 1, w - _hint_w, " help: ", dim)
                 self.stdscr.addstr(y + 1, w - 1, "?", dim)
             except curses.error:
                 pass

@@ -2974,6 +2974,13 @@ class App:
                 curses.doupdate()
                 ch = win.getch()
                 if ch == -1:
+                    if self.current_track and not self.mp.alive() and self._play_serial == self._current_track_serial:
+                        tp, du, pa, vo, mu = self.mp.snapshot()
+                        if tp is None and du is None:
+                            self.current_track = None
+                            self._last_stream_quality = None
+                            self.next_track()
+                            self._need_redraw = True
                     continue
                 elif ch == curses.KEY_MOUSE:
                     try:

@@ -1322,6 +1322,9 @@ class App:
         if self._queue_context():
             return self._queue_selected_track()
         if self.tab == TAB_PLAYBACK:
+            # When miniqueue is open the cursor track is the visible selection
+            if self.queue_overlay and self.queue_items:
+                return self._queue_selected_track()
             return self.current_track
         return self._selected_left_track()
 
@@ -6880,6 +6883,16 @@ class App:
             self._prev_tab = self.tab
             if self.tab == TAB_PLAYBACK:
                 self._cover_clear_image()
+                # If preview_next auto-positioned the cursor, reset it to the playing
+                # track so the minicover shows the right cover on the destination tab.
+                if (self._preview_next and self.queue_overlay and self.queue_items
+                        and self.queue_cursor == self._preview_next_idx()):
+                    self.queue_cursor = clamp(self.queue_play_idx, 0, len(self.queue_items) - 1)
+                    if self.current_track and self.cover_path:
+                        self._album_cover_item_key = f"t:{self.current_track.id}"
+                        self._album_cover_path = self.cover_path
+                        self._album_cover_render_key = ""
+                        self._album_cover_render_buf = None
             if self.tab == TAB_RECOMMENDED:
                 self._recommended_pending_ctx = None  # type: ignore[attr-defined]
             if self.tab == TAB_MIX:
@@ -7631,9 +7644,6 @@ class App:
                         self.switch_tab(TAB_MIX, refresh=False)
 
                 elif t_num == TAB_ARTIST:
-                    if self.tab == TAB_PLAYBACK:
-                        self.switch_tab(TAB_ARTIST)
-                        continue
                     if self.tab == TAB_ARTIST and not self._queue_context():
                         if self._artist_pending_ctx:
                             _ctx2 = self._artist_pending_ctx

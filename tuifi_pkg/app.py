@@ -3719,7 +3719,7 @@ class App:
         self._popup_clear_bg(y0, x0, box_h, box_w)
         win = self.stdscr.derwin(box_h, box_w, y0, x0)
         win.keypad(True)
-        win.bkgd(' ', self.C(0))
+        win.bkgd(' ', self.C(16))
         return y0, x0, win
 
     def _popup_refresh(self, y0: int, x0: int, box_h: int, box_w: int) -> None:
@@ -3773,7 +3773,7 @@ class App:
         if _erase_bg:
             # Use pair 16 (white on black) — the only explicitly non-default-bg pair —
             # so popup background cells are opaque when a kitty z=-1 image is beneath.
-            bg_attr = self.C(0)
+            bg_attr = self.C(16)
             for yy in range(pad_y, pad_y + pad_h):
                 try:
                     self.stdscr.addstr(yy, pad_x, " " * pad_w, bg_attr)

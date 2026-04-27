@@ -6368,7 +6368,7 @@ class App:
         h, w = self.stdscr.getmaxyx()
         box_w = min(w - 4, 109)
         box_h = min(h - 6, 38)
-        inner_h = box_h - 2
+        inner_h = box_h - 3  # -3 leaves a blank row between content and hint bar
         max_scroll = max(0, len(lines) - inner_h)
         scroll = clamp(getattr(self, "help_scroll", 0), 0, max_scroll)
         filt_q = ""

@@ -3482,7 +3482,7 @@ class App:
             # 1-col gap between main cover and right panel (miniqueue / minicover / both).
             right_w = 45
         elif self._cover_lyrics:
-            right_w = self._lyrics_panel_w(w) + 2
+            right_w = self._lyrics_panel_w(w)
         else:
             right_w = 0
         # When the standalone album cover pane is visible (no miniqueue), reserve its
@@ -6743,7 +6743,7 @@ class App:
                                               usable_h - cover_rows - 1, w)
             else:       # landscape: lyrics on the right
                 lyrics_w = self._lyrics_panel_w(w)
-                self._draw_playback_lyrics_panel(top_h, w - lyrics_w, usable_h, lyrics_w)
+                self._draw_playback_lyrics_panel(top_h, w - lyrics_w + 2, usable_h, lyrics_w - 2)
 
         if self.tab == TAB_PLAYBACK and self.cover_path and not _throttle_cover:
             # Prevent ncurses scroll-region optimisation for the content rows.

@@ -51,7 +51,7 @@ While [HiFi API instances with unrestricted access](https://github.com/monochrom
 - If you are choosing a TUI, then there likely is no official TIDAL application packaged for your platform or distribution, and you have no way to use the service offline (_e.g._, during flights), so `tuifi` can prefetch individual or multiple tracks (_e.g._, marked, albums, playlists, artists) for offline playback in other music players
 
 > [!WARNING]
-> Beware that offline fetching is intended for ephemeral listening since your TIDAL subscription does not grant you permanent access to the catalog, only to their service while you are a subscriber, and owning a physical copy of the media is likely required even with a valid TIDAL subscription to legitimately keep a local file. Consequently, tuifi` defaults to the `/tmp` folder due to its ephemeral nature to discourage permanent copies, by lack of a proper method to date to play TIDAL DRM material directly from the CLI and in a multiplatform way (where ephemeral storage would otherwise no longer be advised).
+> Beware that offline fetching is intended for ephemeral listening since your TIDAL subscription does not grant you permanent access to the catalog, only to their service while you are a subscriber, and owning a physical copy of the media is likely required even with a valid TIDAL subscription to legitimately keep a local file. Consequently, `tuifi` defaults to the `/tmp` folder due to its ephemeral nature to discourage permanent copies, by lack of a proper method to date to play TIDAL DRM material directly from the CLI and in a multiplatform way (where ephemeral storage would otherwise no longer be advised).
 
 ## Interface & interaction
 

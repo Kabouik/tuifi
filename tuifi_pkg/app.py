@@ -6215,7 +6215,9 @@ class App:
         song = self.fmt_track_status(self.current_track, 10_000) if self.current_track else ""
         if self.last_error:
             song = f"ERROR: {self.last_error}"
-        col_limit = max(0, w - 1)
+        _help_hint = " help:?"
+        _hint_w = len(_help_hint)
+        col_limit = max(0, w - 1 - _hint_w)
         heart_col = len(left)
         line2 = _truncate_to_display_width(left + heart + song, col_limit).ljust(col_limit)
 
@@ -6234,7 +6236,7 @@ class App:
             right = self._artist_status
         right_pos = None
         if right:
-            right = _truncate_to_display_width(right, max(0, w - 2))
+            right = _truncate_to_display_width(right, max(0, col_limit - 2))
             right_pos = max(0, col_limit - _str_display_width(right))
             line2 = line2[:right_pos] + " " * _str_display_width(right) + line2[right_pos + _str_display_width(right):]
 
@@ -6244,6 +6246,13 @@ class App:
                 self.stdscr.addstr(y + 1, x + right_pos, right, self.C(4))
         except curses.error:
             pass
+        if w > _hint_w + 5:
+            dim = curses.A_DIM if self.color_mode else 0
+            try:
+                self.stdscr.addstr(y + 1, w - _hint_w, " help:", dim)
+                self.stdscr.addstr(y + 1, w - 1, "?", dim)
+            except curses.error:
+                pass
 
     def _render_popup_lines(self, win, lines: List[str], start: int, inner_h: int, box_w: int,
                             hit_lines: "frozenset[int]" = frozenset()) -> None:

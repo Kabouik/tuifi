@@ -36,3 +36,4 @@
 ** When the geometry is small and the sideview: both mode collapses to hide the spectrum, the miniqueue should shift up to use that space instead of staying where it is; there are 4 extra rows to use I believe
 ** In the help dialog, there should be an empty row between the content (the help text) and the bottom line of the frame where the keybinds for the dialog are listed.
 ** The 8s timer for hi_res_lossless is probably too long, makes dl very long when they have to fallback to lower quality, I think we know before 8 seconds if we found the first part for max quality
+** Playback stops when a track ends and there are others in the queue if the download dialog is open, it should continue

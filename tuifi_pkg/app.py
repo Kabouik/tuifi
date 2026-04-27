@@ -705,6 +705,7 @@ class App:
         except Exception:
             pass
         curses.curs_set(0)
+        self.stdscr.leaveok(True)   # don't reposition hardware cursor after refresh
         self.stdscr.nodelay(True)
         self.stdscr.keypad(True)
         curses.noecho()
@@ -4375,6 +4376,11 @@ class App:
                     self.stdscr.addch(y + row, gap_col, " ")
                 except curses.error:
                     pass
+        # Park the cursor away from the pane so it doesn't appear at the spectrum edge
+        try:
+            self.stdscr.move(0, 0)
+        except curses.error:
+            pass
 
     _SPECTRUM_COLORS = ["black", "blue", "magenta", "cyan", "green", "yellow", "red", "white"]
 

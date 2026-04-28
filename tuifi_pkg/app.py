@@ -108,6 +108,7 @@ class App:
         self.dl = DownloadManager()
         self._download_dialog_open = False
         self._dl_status_rect: Optional[tuple] = None  # (y, col, width) of last dl-status render
+        self._help_btn_pos: Optional[tuple] = None    # (y, col) of the '?' in the toggle bar
 
         mkdirp(STATE_DIR)
 
@@ -6194,9 +6195,22 @@ class App:
         elif self.dl.error:
             dl_right = "DLERR"
 
+        # Help button: " ? help " reversed + "  |  " separator at the start of the toggle bar.
+        # The cursor is parked on the '?' so it visually highlights it like a button.
+        # Visible only when show_toggles is on (can be hidden with 't').
+        _HELP_BTN     = " ? help "   # 8 chars; '?' is at offset 1
+        _HELP_BTN_SEP = "  |  "      # 5 chars separator after the button
+        _BTN_W = len(_HELP_BTN) + len(_HELP_BTN_SEP)  # 13
+
         row1_w = max(0, w - 1)
         dim = curses.A_DIM if self.color_mode else 0
         if self.show_toggles:
+            self._help_btn_pos = (y, x + 1)  # col of '?' in " ? help "
+            try:
+                self.stdscr.addstr(y, x, _HELP_BTN, curses.A_REVERSE)
+                self.stdscr.addstr(y, x + len(_HELP_BTN), _HELP_BTN_SEP, dim)
+            except curses.error:
+                pass
             parts = []
             if self.repeat_mode:
                 parts.append("repeat: " + ("all" if self.repeat_mode == 1 else "one"))
@@ -6230,20 +6244,24 @@ class App:
             elif self._album_cover_pane:
                 parts.append("sideview: next" if self._preview_next else "sideview: cover")
             line1 = " " + "   ".join(parts)
+            toggle_x = x + _BTN_W
         else:
+            self._help_btn_pos = None
             line1 = ""
+            toggle_x = x
 
         self._dl_status_rect = None
         if dl_right:
             dl_trunc = _truncate_to_display_width(dl_right, max(0, row1_w - 2))
             dl_w = _str_display_width(dl_trunc)
             dl_col = max(0, row1_w - dl_w)
-            left_limit = max(0, dl_col - 1)
-            self.stdscr.addstr(y, x, line1[:left_limit].ljust(row1_w), dim)
+            left_limit = max(0, dl_col - toggle_x - 1)
+            self.stdscr.addstr(y, toggle_x, line1[:left_limit].ljust(max(0, dl_col - toggle_x)), dim)
             self.stdscr.addstr(y, x + dl_col, dl_trunc, self.C(4))
             self._dl_status_rect = (y, x + dl_col, dl_w)
         else:
-            self.stdscr.addstr(y, x, line1[:row1_w].ljust(row1_w), dim)
+            toggle_max = max(0, row1_w - toggle_x)
+            self.stdscr.addstr(y, toggle_x, line1[:toggle_max].ljust(toggle_max), dim)
 
         # Row y+1 (playback row): player state left; toast/artist status right (yellow).
         toast_right = ""
@@ -6261,8 +6279,6 @@ class App:
         song = self.fmt_track_status(self.current_track, 10_000) if self.current_track else ""
         if self.last_error:
             song = f"ERROR: {self.last_error}"
-        _help_hint = " help: ?"
-        _hint_w = len(_help_hint)
 
         if toast_right:
             toast_trunc = _truncate_to_display_width(toast_right, max(0, row1_w - 2))
@@ -6280,18 +6296,12 @@ class App:
             except curses.error:
                 pass
         else:
-            col_limit = max(0, w - 1 - _hint_w)
+            col_limit = max(0, w - 1)
             line2 = _truncate_to_display_width(left + heart + song, col_limit).ljust(col_limit)
             try:
                 self.stdscr.addstr(y + 1, x, line2, self._status_color_pair(pa, alive))
             except curses.error:
                 pass
-            if w > _hint_w + 5:
-                try:
-                    self.stdscr.addstr(y + 1, w - _hint_w, " help: ", dim)
-                    self.stdscr.addstr(y + 1, w - 1, "?", dim)
-                except curses.error:
-                    pass
 
     def _render_popup_lines(self, win, lines: List[str], start: int, inner_h: int, box_w: int,
                             hit_lines: "frozenset[int]" = frozenset()) -> None:
@@ -6860,7 +6870,7 @@ class App:
         sys.stdout.buffer.flush()
         try:
             try:
-                self.stdscr.move(curses.LINES - 1, curses.COLS - 1)   # park cursor at bottom-right before refresh
+                self.stdscr.move(*(self._help_btn_pos or (curses.LINES - 1, curses.COLS - 1)))  # park cursor
             except curses.error:
                 pass
             self.stdscr.refresh()
@@ -6878,7 +6888,7 @@ class App:
                     self.stdscr.redrawln(0, top_h)
                     self.stdscr.redrawln(h - status_h - 1, status_h + 1)
                     try:
-                        self.stdscr.move(curses.LINES - 1, curses.COLS - 1)
+                        self.stdscr.move(*(self._help_btn_pos or (curses.LINES - 1, curses.COLS - 1)))
                     except curses.error:
                         pass
                     self.stdscr.refresh()

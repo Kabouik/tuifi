@@ -3160,7 +3160,23 @@ class App:
             self._log_download_failure(t, f"error: {e}", url or "")
             return
         sp(f"DL {count_s} done {fname}")
-        out_path = self._tag_with_ffmpeg(out_path, t, sp, count_s)
+
+        # Fetch lyrics before tagging so they can be embedded in the file.
+        base_name = safe_filename(base_name_raw)
+        lrc_path = os.path.join(out_dir, f"{base_name}.lrc")
+        lyr_text: Optional[str] = None
+        try:
+            sp(f"DL {count_s} lyrics {fname}")
+            lyr_lines = self._fetch_lyrics_lines(t.id, strip_lrc=False)
+            if lyr_lines:
+                lyr_text = "\n".join(lyr_lines)
+                if not os.path.exists(lrc_path):
+                    with open(lrc_path, "w", encoding="utf-8") as f:
+                        f.write(lyr_text)
+        except Exception:
+            pass
+
+        out_path = self._tag_with_ffmpeg(out_path, t, sp, count_s, lyrics=lyr_text)
         fname = os.path.basename(out_path)
 
         cover_path = os.path.join(out_dir, "cover.jpg")
@@ -3175,18 +3191,6 @@ class App:
             except Exception:
                 pass
 
-        base_name = safe_filename(base_name_raw)
-        lrc_path = os.path.join(out_dir, f"{base_name}.lrc")
-        if not os.path.exists(lrc_path):
-            try:
-                sp(f"DL {count_s} lyrics {fname}")
-                lyr_lines = self._fetch_lyrics_lines(t.id, strip_lrc=False)
-                if lyr_lines:
-                    with open(lrc_path, "w", encoding="utf-8") as f:
-                        f.write("\n".join(lyr_lines))
-            except Exception:
-                pass
-
         # Always overwrite the last sub-step (e.g. "lyrics ...") with a final completion line.
         # Use full (non-truncated) artist/title here, and include the extension.
         full_label = f"{t.artist} - {t.title}.{ext}"
@@ -3194,7 +3198,8 @@ class App:
         self.dl.mark_result(t, "DONE")
 
 
-    def _tag_with_ffmpeg(self, path: str, t: Track, set_progress=None, label: str = "") -> str:
+    def _tag_with_ffmpeg(self, path: str, t: Track, set_progress=None, label: str = "",
+                         lyrics: Optional[str] = None) -> str:
         """Remux and tag an audio file using ffmpeg.
 
         For DASH FLAC files the assembled container is ISOBMFF (MP4 atoms), not a
@@ -3212,6 +3217,7 @@ class App:
             set_progress(f"DL {label} tags {os.path.basename(path)}")
             self._need_redraw = True
             self._redraw_status_only = True
+        tidal_url = f"https://tidal.com/browse/track/{t.id}"
         cmd = [
             "ffmpeg", "-y", "-i", path,
             "-c", "copy",
@@ -3219,9 +3225,12 @@ class App:
             "-metadata", f"artist={t.artist or ''}",
             "-metadata", f"album={t.album or ''}",
             "-metadata", f"tracknumber={t.track_no if isinstance(t.track_no, int) and t.track_no > 0 else ''}",
+            "-metadata", f"comment={tidal_url}",
         ]
         if t.year and t.year != "????":
             cmd += ["-metadata", f"date={t.year}"]
+        if lyrics:
+            cmd += ["-metadata", f"lyrics={lyrics}"]
         cmd.append(tmp)
         try:
             result = subprocess.run(

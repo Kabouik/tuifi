@@ -2889,7 +2889,7 @@ class App:
 
     def show_download_queue_dialog(self) -> None:
         h, w = self.stdscr.getmaxyx()
-        box_w = min(w - 4, 73)
+        box_w = min(w - 4, 83)
         box_h = min(h - 4, 27)
         inner_rows = box_h - 6  # title + status + progress + separator + hint1 + hint2
         y0, x0, win = self._popup_win(box_h, box_w)
@@ -2965,7 +2965,7 @@ class App:
                             break
                         trk, st = rows[idx]
                         is_cur = (idx == cursor)
-                        prefix_col = self.C(2) if st == "DONE" else self.C(1) if st == "FAIL" else self.C(2) if st == "CANC" else self.C(10)
+                        prefix_col = self.C(1) if st == "DONE" else self.C(3) if st == "FAIL" else self.C(2) if st == "CANC" else self.C(10)
                         prefix = f"{st} "
                         track_str = f"{trk.artist} - {trk.title}"
                         rev = curses.A_REVERSE if is_cur else 0

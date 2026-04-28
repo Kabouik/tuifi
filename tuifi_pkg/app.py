@@ -2907,7 +2907,7 @@ class App:
             while True:
                 all_tracks, track_status, completed, total, failed = self.dl.queue_snapshot()
                 if self.dl.paused:
-                    status = "PAUSED"
+                    status = "Paused"
                 elif self.dl.active:
                     status = "Downloading"
                 else:
@@ -2977,8 +2977,8 @@ class App:
                             win.addstr(track_str[: box_w - 4 - len(prefix)], hi)
                         except curses.error:
                             pass
-                hint  = " j/k ^n/^p: navigate   g/G: top/bottom   @: retry failed   x: remove "
-                hint2 = " %: pause  $: cancel  f: filter   q/#/Esc: close "
+                hint  = " j/k ^n/^p: navigate    g/G: top/bottom   f: filter   x: remove "
+                hint2 = " $: pause   %: cancel   @: retry failed   q/#/Esc: close "
                 win.addstr(box_h - 2, 2, hint[:box_w - 4], self.C(10))
                 win.addstr(box_h - 1, 2, hint2[:box_w - 4], self.C(10))
                 # Also refresh the status bar so playback progress stays live
@@ -3046,9 +3046,9 @@ class App:
                     n = self.dl.retry_failed(self._download_worker)
                     if n:
                         manual_scroll = False
-                elif ch == ord("%"):
-                    self.dl.toggle_pause()
                 elif ch == ord("$"):
+                    self.dl.toggle_pause()
+                elif ch == ord("%"):
                     self.dl.cancel()
                 elif ch in (27, ord("q"), ord("#")):
                     break
@@ -6202,12 +6202,12 @@ class App:
         elif self.dl.error:
             dl_right = "DLERR"
 
-        # Help button: " ? help " reversed + "  |  " separator at the start of the toggle bar.
+        # Help button: " ? help " reversed at the start of the toggle bar.
         # The cursor is parked on the '?' so it visually highlights it like a button.
         # Visible only when show_toggles is on (can be hidden with 't').
         _HELP_BTN     = " ? help "   # 8 chars; '?' is at offset 1
-        _HELP_BTN_SEP = "  |  "      # 5 chars separator after the button
-        _BTN_W = len(_HELP_BTN) + len(_HELP_BTN_SEP)  # 13
+        _HELP_BTN_SEP = "  "          # 2 chars separator after the button
+        _BTN_W = len(_HELP_BTN) + len(_HELP_BTN_SEP)  # 10
 
         row1_w = max(0, w - 1)
         dim = curses.A_DIM if self.color_mode else 0
@@ -6361,8 +6361,9 @@ class App:
             " d         download selected track(s), album(s) or artist(s)",
             " D         download full album(s) for selected track(s)",
             " #         show download queue dialog",
-            " %         pause/resume download queue",
-            " $         cancel pending downloads (current track finishes)",
+            " $         pause/resume download queue",
+            " %         cancel pending downloads (current track finishes)",
+            " @         retry failed downloads",
             " Space     (un)mark selected and advance",
             " u/U       (un)mark all",
             " l         (un)like selected or marked: track, album, artist,  playlist",
@@ -6372,7 +6373,7 @@ class App:
             " x         remove track from queue/playlist/history",
             " X         clear queue/playlist",
             " i/I       show selected/playing info",
-            " v/V       show lyrics of selected/playing",
+            " v/V       show lyrics of selected/playing (in tab 0, V cycles display modes)",
             " o/O       open selected/playing in browser",
             "",
             "\x01 GENERAL",
@@ -6400,6 +6401,7 @@ class App:
             " C         color/bw",
             " W/Y/R/T/N show/hide fields for album, year, duration, album track count, line numbers",
             " t         status bar",
+            " V         cycle display modes in playback tab",
             " \\         toggle TSV mode",
             "",
             "\x01 TOGGLES",
@@ -6833,9 +6835,11 @@ class App:
                 # cols wide (2:1 cell aspect ratio for square image), leaving empty space.
                 _cic = left_w - 1              # allocated cover cols (= _cover_img_cols(w) here)
                 _cover_vis_w = min(_cic, usable_h * 2)  # estimated actual rendered width
-                _lyr_x = _cover_vis_w + 1
+                # Lyrics start immediately after the cover's visual edge (no extra margin
+                # taken from the cover), filling all space up to the miniqueue separator.
+                _lyr_x = _cover_vis_w
                 _lyr_w = left_w - _lyr_x - 1  # width between rendered cover and miniqueue
-                if _lyr_w >= 25:               # landscape: enough horizontal room for lyrics
+                if _lyr_w >= 20:               # landscape: enough horizontal room for lyrics
                     self._draw_playback_lyrics_panel(top_h, _lyr_x, usable_h, _lyr_w)
                 else:                          # portrait/narrow: lyrics below the cover
                     _cover_h = _cic // 2       # square cover height in the narrow left panel
@@ -7264,8 +7268,8 @@ class App:
             ord(";"): lambda: self.switch_tab(self._prev_tab, refresh=False) if self._prev_tab != self.tab else None,
             ord("N"): lambda: self.playlists_create() if self.tab == TAB_PLAYLISTS else _tog("show_line_numbers", "Line numbers: on", "Line numbers: off"),
             ord("T"): lambda: _tog("show_album_track_count", "Album track count: on", "Album track count: off"),
-            ord("%"): lambda: self.toast("Download paused" if self.dl.toggle_pause() else "Download resumed"),
-            ord("$"): lambda: (self.dl.cancel(), self.toast("Download queue cancelled")),
+            ord("$"): lambda: self.toast("Download paused" if self.dl.toggle_pause() else "Download resumed"),
+            ord("%"): lambda: (self.dl.cancel(), self.toast("Download queue cancelled")),
             ord("#"): self.show_download_queue_dialog,
         }
 

@@ -120,6 +120,22 @@ class DownloadManager:
             self._all_tracks = [t for t in self._all_tracks if t.id != track_id]
             self._track_status.pop(track_id, None)
 
+    def retry_failed(self, worker_fn) -> int:
+        """Re-queue all FAIL tracks. Returns the number of tracks re-queued."""
+        with self._lock:
+            fail_tracks = [t for t in self._all_tracks if self._track_status.get(t.id) == "FAIL"]
+            if not fail_tracks:
+                return 0
+            for t in fail_tracks:
+                del self._track_status[t.id]
+                self._queue.append(t)
+            self.failed -= len(fail_tracks)
+            self._total += len(fail_tracks)
+            if self._thread is None or not self._thread.is_alive():
+                self._thread = threading.Thread(target=self._run, args=(worker_fn,), daemon=True)
+                self._thread.start()
+        return len(fail_tracks)
+
     def mark_result(self, t: Track, status: str) -> None:
         """Record a track result ('DONE' or 'FAIL') for display in the dialog."""
         with self._lock:

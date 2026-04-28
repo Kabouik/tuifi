@@ -2975,7 +2975,7 @@ class App:
                             win.addstr(track_str[: box_w - 4 - len(prefix)], hi)
                         except curses.error:
                             pass
-                hint  = " j/k ^n/^p: navigate   g/G: top/bottom   x: remove "
+                hint  = " j/k ^n/^p: navigate   g/G: top/bottom   @: retry failed   x: remove "
                 hint2 = " %: pause  $: cancel  f: filter   q/#/Esc: close "
                 win.addstr(box_h - 2, 2, hint[:box_w - 4], self.C(10))
                 win.addstr(box_h - 1, 2, hint2[:box_w - 4], self.C(10))
@@ -3039,6 +3039,10 @@ class App:
                         filt_q = q.strip().lower()
                         filt_hits = []
                         filt_pos = -1
+                        manual_scroll = False
+                elif ch == ord("@"):
+                    n = self.dl.retry_failed(self._download_worker)
+                    if n:
                         manual_scroll = False
                 elif ch == ord("%"):
                     self.dl.toggle_pause()

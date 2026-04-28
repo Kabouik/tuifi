@@ -4352,6 +4352,13 @@ class App:
         """Render the cava spectrum visualiser into the region (y,x,h,w) using ncurses."""
         if w < 3 or h < 1:
             return
+        # Clamp to safe terminal rows (leave status bar + one buffer row untouched).
+        scr_h = curses.LINES
+        y_max = scr_h - 3   # don't draw into the 2-row status bar or the very last row
+        if y > y_max:
+            return
+        if y + h - 1 > y_max:
+            h = max(1, y_max - y + 1)
         # Each bar takes 1 col; bars are separated by 1 col gap.
         # bars = (w + 1) // 2  (e.g. w=20 → 10 bars, w=21 → 11 bars)
         bars = max(1, (w + 1) // 2)

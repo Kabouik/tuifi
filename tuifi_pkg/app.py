@@ -107,6 +107,7 @@ class App:
         self.mp_poller = MPVPoller(self.mp, self._on_mpv_tick)
         self.dl = DownloadManager()
         self._download_dialog_open = False
+        self._dl_status_rect: Optional[tuple] = None  # (y, col, width) of last dl-status render
 
         mkdirp(STATE_DIR)
 
@@ -6172,20 +6173,17 @@ class App:
         tp, du, pa, vo, mu = self.mp.snapshot()
         alive = self.mp.alive()
 
-        # Right-side info (toast, dl progress, artist status) — always on row y
         now = time.time()
         if not self.dl.active and self.dl.progress_clear_at and now > self.dl.progress_clear_at:
             self.dl.progress_line = ""
             self.dl.progress_clear_at = 0.0
-        right = ""
+
+        # Row y (toggle/info row): toggle bar on left; dl progress/error on right (independent).
+        dl_right = ""
         if self.dl.progress_line:
-            right = self.dl.progress_line
+            dl_right = self.dl.progress_line
         elif self.dl.error:
-            right = "DLERR"
-        elif now < self.toast_until and self.toast_msg:
-            right = self.toast_msg
-        elif self._artist_status:
-            right = self._artist_status
+            dl_right = "DLERR"
 
         row1_w = max(0, w - 1)
         dim = curses.A_DIM if self.color_mode else 0
@@ -6226,16 +6224,24 @@ class App:
         else:
             line1 = ""
 
-        if right:
-            right_trunc = _truncate_to_display_width(right, max(0, row1_w - 2))
-            right_w = _str_display_width(right_trunc)
-            right_pos1 = max(0, row1_w - right_w)
-            left_limit = max(0, right_pos1 - 1)
-            row1 = line1[:left_limit].ljust(row1_w)
-            self.stdscr.addstr(y, x, row1, dim)
-            self.stdscr.addstr(y, x + right_pos1, right_trunc, self.C(4))
+        self._dl_status_rect = None
+        if dl_right:
+            dl_trunc = _truncate_to_display_width(dl_right, max(0, row1_w - 2))
+            dl_w = _str_display_width(dl_trunc)
+            dl_col = max(0, row1_w - dl_w)
+            left_limit = max(0, dl_col - 1)
+            self.stdscr.addstr(y, x, line1[:left_limit].ljust(row1_w), dim)
+            self.stdscr.addstr(y, x + dl_col, dl_trunc, self.C(4))
+            self._dl_status_rect = (y, x + dl_col, dl_w)
         else:
             self.stdscr.addstr(y, x, line1[:row1_w].ljust(row1_w), dim)
+
+        # Row y+1 (playback row): player state left; toast/artist status right (yellow).
+        toast_right = ""
+        if now < self.toast_until and self.toast_msg:
+            toast_right = self.toast_msg
+        elif self._artist_status:
+            toast_right = self._artist_status
 
         state = "⏹"
         if alive:
@@ -6248,20 +6254,35 @@ class App:
             song = f"ERROR: {self.last_error}"
         _help_hint = " help: ?"
         _hint_w = len(_help_hint)
-        heart_col = len(left)
-        col_limit = max(0, w - 1 - _hint_w)
-        line2 = _truncate_to_display_width(left + heart + song, col_limit).ljust(col_limit)
 
-        try:
-            self.stdscr.addstr(y + 1, x, line2, self._status_color_pair(pa, alive))
-        except curses.error:
-            pass
-        if w > _hint_w + 5:
+        if toast_right:
+            toast_trunc = _truncate_to_display_width(toast_right, max(0, row1_w - 2))
+            toast_w = _str_display_width(toast_trunc)
+            toast_col = max(0, row1_w - toast_w)
+            col_limit = max(0, toast_col - 1)
+            line2 = _truncate_to_display_width(left + heart + song, col_limit).ljust(col_limit)
             try:
-                self.stdscr.addstr(y + 1, w - _hint_w, " help: ", dim)
-                self.stdscr.addstr(y + 1, w - 1, "?", dim)
+                self.stdscr.addstr(y + 1, x, line2, self._status_color_pair(pa, alive))
             except curses.error:
                 pass
+            toast_attr = self.C(2) if self.color_mode else 0
+            try:
+                self.stdscr.addstr(y + 1, x + toast_col, toast_trunc, toast_attr)
+            except curses.error:
+                pass
+        else:
+            col_limit = max(0, w - 1 - _hint_w)
+            line2 = _truncate_to_display_width(left + heart + song, col_limit).ljust(col_limit)
+            try:
+                self.stdscr.addstr(y + 1, x, line2, self._status_color_pair(pa, alive))
+            except curses.error:
+                pass
+            if w > _hint_w + 5:
+                try:
+                    self.stdscr.addstr(y + 1, w - _hint_w, " help: ", dim)
+                    self.stdscr.addstr(y + 1, w - 1, "?", dim)
+                except curses.error:
+                    pass
 
     def _render_popup_lines(self, win, lines: List[str], start: int, inner_h: int, box_w: int,
                             hit_lines: "frozenset[int]" = frozenset()) -> None:

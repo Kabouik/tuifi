@@ -7359,8 +7359,13 @@ class App:
                             break
                         pos += len(nm) + 2
                 elif my >= h - 2 and bstate & curses.BUTTON1_PRESSED:        # status bar
-                    if my == h - 2:                                            # toggles line
-                        _tog("show_toggles", "Toggles: on", "Toggles: off")
+                    if my == h - 2:                                            # toggles/dl-status line
+                        # Click on dl status text → open download dialog
+                        _dsr = self._dl_status_rect
+                        if (_dsr and _dsr[0] == my and _dsr[1] <= mx < _dsr[1] + _dsr[2]):
+                            self.show_download_queue_dialog()
+                        else:
+                            _tog("show_toggles", "Toggles: on", "Toggles: off")
                     else:                                                       # playback line
                         _DISPATCH[ord("p")]()
                 elif top_h <= my < top_h + usable_h:

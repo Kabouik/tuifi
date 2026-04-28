@@ -7430,9 +7430,9 @@ class App:
                                         _on_cover = (my - top_h) < self._cover_img_rows_portrait(h, w)
                                     else:
                                         _on_cover = mx < w - self._lyrics_panel_w(w)
-                                if _on_cover:                                  # cycle pane: lyrics→queue→none→lyrics
-                                    if not self.queue_overlay and self._cover_lyrics:
-                                        self._cover_lyrics = False
+                                if _on_cover:                                  # same 4-step cycle as V key
+                                    if self._cover_lyrics and not self.queue_overlay:
+                                        # lyrics → lyrics+miniqueue
                                         self.queue_overlay = True
                                         self.focus = "queue"
                                         self.queue_cursor = clamp(self.queue_play_idx, 0, len(self.queue_items) - 1)
@@ -7440,10 +7440,15 @@ class App:
                                             _nxt = self._preview_next_idx()
                                             if 0 <= _nxt < len(self.queue_items):
                                                 self.queue_cursor = _nxt
+                                    elif self._cover_lyrics and self.queue_overlay:
+                                        # lyrics+miniqueue → miniqueue-only
+                                        self._cover_lyrics = False
                                     elif self.queue_overlay:
+                                        # miniqueue-only → cover-only
                                         self.queue_overlay = False
                                         self.focus = "left"
                                     else:
+                                        # cover-only → lyrics
                                         self._cover_lyrics = True
                                         if self.current_track and not self.lyrics_lines and not self.lyrics_loading:
                                             self.toggle_lyrics(self.current_track)

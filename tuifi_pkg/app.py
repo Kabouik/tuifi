@@ -1732,10 +1732,12 @@ class App:
                 else:
                     self._next_shuffle_idx = None
                     self._shuffle_restore_next = None
-                # Update preview_next cursor now that shuffle index is known
-                if (self._preview_next and self._next_shuffle_idx is not None
-                        and self.tab == TAB_PLAYBACK and self.queue_overlay and self._album_cover_pane):
-                    self.queue_cursor = self._next_shuffle_idx
+                # Update preview_next cursor to point at the next-to-play track
+                if (self._preview_next and self.tab == TAB_PLAYBACK
+                        and self.queue_overlay and self._album_cover_pane):
+                    _nxt = self._preview_next_idx()
+                    if 0 <= _nxt < len(self.queue_items):
+                        self.queue_cursor = _nxt
                 self.current_track = t
                 self._current_track_serial = _my_serial
                 self._last_played_track = t
@@ -7383,11 +7385,15 @@ class App:
                         else:
                             target = clamp(target, 0, n_q - 1)
                         self.play_queue_index(target)
-                    # Immediately point cursor at the new playing track so the minicover
-                    # refreshes without waiting for the async success callback.
+                    # Immediately point cursor so the minicover refreshes without
+                    # waiting for the async success callback.  For preview_next,
+                    # jump straight to the next-to-play track; for shuffle the
+                    # callback will correct _next_shuffle_idx once it is known.
                     if self.tab == TAB_PLAYBACK and self.queue_overlay and self._album_cover_pane:
-                        self.queue_cursor = clamp(self.queue_play_idx, 0, n_q - 1)
-                        # success callback will move cursor to _next_shuffle_idx if preview_next
+                        if self._preview_next:
+                            self.queue_cursor = clamp(self._preview_next_idx(), 0, n_q - 1)
+                        else:
+                            self.queue_cursor = clamp(self.queue_play_idx, 0, n_q - 1)
 
             self.draw()
 

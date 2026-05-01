@@ -53,3 +53,47 @@
 ** The V cycle in tab 0 should not take marging/padding space on the maincover when the triple mode (maincover + lyrics + miniqueue/sideview) is enabled, but on the lyrics (they can be rewrapped to narrower width).
 ** Download status at the bottom right should show in a line different from the info message because it can be long and will prevent other info messages/toasts to show while active. They should therefore be independent from the info/toast system (but they can re-use the functions partly of course). I suggest Download status stays where it is, i.e., one line above the bottom line, to the right, and info/toasts go back to the bottom right. This way, we don't waste space.
 ** Clicking on the download status info should open the download dialog.
+** DONE See if we can easily include the cover into the downloaded files as tag
+   :DONE: cover downloaded first (reused if exists), then passed to _tag_with_ffmpeg as -i input with -map 0:a -map 1:v -c:v copy -disposition:v attached_pic (app.py ~3183)
+** DONE Got a crash, I don't know what triggered it as the PC was left unattended, tuifi was just downloading tracks:
+   :DONE: drawing block in show_download_queue_dialog wrapped in try/except curses.error: break to handle terminal resize gracefully (app.py ~2944)
+#+begin_src 
+ e SystemExit(main(sys.argv))
+                     ^^^^^^^^^^^^^^
+  File "/home/mat/Projects/tuifi/tuifi_pkg/app.py", line 8717, in main
+    debug_log(f"sixel probe error: {e}")
+^^^^^^^^^^^^^^^^^^^^^^^
+  File "/gnu/store/xkc78v2qj003v5vrvcdsqcwn0k2v3b6s-python-3.11.14/lib/python3.11/curses/__init__.py", line 94, in wrapper
+    return func(stdscr, *args, **kwds)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mat/Projects/tuifi/tuifi_pkg/app.py", line 8711, in wrapped
+    os.close(fd)
+^^^^^^^^^
+  File "/home/mat/Projects/tuifi/tuifi_pkg/app.py", line 7503, in run
+    # Format 1 — CSI u: "N;Mu"  (kitty/foot/CSI u protocol)
+    ^^^^^
+  File "/home/mat/Projects/tuifi/tuifi_pkg/app.py", line 2945, in show_download_queue_dialog
+    win.erase()
+    ^^^^^^^^^^^^
+_curses.error: addwstr() returned ERR
+⏎                                                                                                                                                                                                                                        ⏎mat@em780-guix~/P/tuifi $ 
+#+end_src
+
+HiFi API logs were also showing that, but not sure if related at all:
+#+begin_src 
+      127.0.0.1:58846 - "GET /track/?id=194068899&quality=LOSSLESS HTTP/1.1" 401 Unauthorized
+INFO:     127.0.0.1:58850 - "GET /track/?id=194068899&quality=HIGH HTTP/1.1" 401 Unauthorized
+INFO:     127.0.0.1:58864 - "GET /track/?id=194068899&quality=LOW HTTP/1.1" 401 Unauthorized
+INFO:     127.0.0.1:58878 - "GET /trackManifests/?id=194068900&usage=PLAYBACK&manifestType=MPEG_DASH&uriScheme=HTTPS&adaptive=false&formats=FLAC_HIRES&formats=FLAC HTTP/1.1" 401 Unauthorized
+INFO:     127.0.0.1:58890 - "GET /track/?id=194068900&quality=HI_RES_LOSSLESS HTTP/1.1" 401 Unauthorized
+INFO:     127.0.0.1:58906 - "GET /trackManifests/?id=194068900&usage=PLAYBACK&manifestType=MPEG_DASH&uriScheme=HTTPS&adaptive=false&formats=FLAC HTTP/1.1" 401 Unauthorized
+INFO:     127.0.0.1:58908 - "GET /track/?id=194068900&quality=LOSSLESS HTTP/1.1" 401 Unauthorized
+INFO:     127.0.0.1:58922 - "GET /track/?id=194068900&quality=HIGH HTTP/1.1" 401 Unauthorized
+INFO:     127.0.0.1:58938 - "GET /track/?id=194068900&quality=LOW HTTP/1.1" 401 Unauthorized
+#+end_src
+
+I don't know if related, but I might have been running out of disk storage while downloading (only 1GB left when I went back to the PC, with tuifi already crashed). Perhaps totally unrelated.
+** DONE Maybe we could add a notification system when playing a new track, using notify-send, which would show the cover, artist, track, album. This sould be a toggle (notif: on) on key | (temporary but this one is free) and have a setting in toggles in settings.jsonc.
+   :DONE: | toggles _notify_on_track; warns if notify-send absent; _send_track_notification fires in bg thread with cached cover icon; notify_on_track persisted in settings (app.py ~3067)
+** DONE We need to add cover and lyrics to tracks tags when downloading, flac or m4a (depending on quality), and avoid redownloading the cover for each track when we can re-use them. We still download lyrics and cover files though, just add them as tags as well.
+   :DONE: covered by the cover-in-tag item above; lyrics already embedded via _tag_with_ffmpeg since commit 431d7bf; cover reused from cover.jpg if already present

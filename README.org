@@ -83,6 +83,7 @@ Press ? in tuifi for keybindings
 - [[https://ffmpeg.org/download.html][ffmpeg]]
 - (Optional for cover art rendering) [[https://github.com/hpjansson/chafa/][chafa]] and/or [[https://github.com/jstkdng/ueberzugpp][ueberzugpp]] and a terminal emulator [[https://www.arewesixelyet.com/][compatible]] with Sixel or Kitty graphics
 - (Optional for the audio spectrum visualiser) [[https://github.com/karlstav/cava][cava]]
+- (Optional for desktop notifications) [[https://gitlab.gnome.org/GNOME/libnotify][libnotify]]
 
 * Installation
 

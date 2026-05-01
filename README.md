@@ -81,6 +81,7 @@ While [HiFi API instances with unrestricted access](https://github.com/monochrom
 - [ffmpeg](https://ffmpeg.org/download.html)
 - (Optional for cover art rendering) [chafa](https://github.com/hpjansson/chafa/) and/or [ueberzugpp](https://github.com/jstkdng/ueberzugpp) and a terminal emulator [compatible](https://www.arewesixelyet.com/) with Sixel or Kitty graphics
 - (Optional for the audio spectrum visualiser) [cava](https://github.com/karlstav/cava)
+- (Optional for desktop notifications) [libnotify](https://gitlab.gnome.org/GNOME/libnotify)
 
 # Installation
 

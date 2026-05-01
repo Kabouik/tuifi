@@ -276,6 +276,8 @@ class App:
         self._mouse_long_press_pending: bool = False
         self._cover_lyrics: bool = True; self._cover_lyrics_max_scroll: int = 10_000
         self._show_singles_eps: bool = bool(self.settings.get("include_singles_and_eps_in_artist_tab", False))
+        self._notify_on_track: bool = bool(self.settings.get("notify_on_track", False))
+        self._notify_send_ok: Optional[bool] = None  # None = unchecked
         self._max_all_tracks: int = int(self.settings.get("max_all_tracks_number", 0) or 0)
         self._last_artist_fetch_track: Optional["Track"] = None
         self._artist_cache: Dict[int, Tuple[List[Any], List[Any], Tuple[int, str]]] = {}
@@ -781,6 +783,7 @@ class App:
             "autoextend": AUTOPLAY_NAMES[self.autoplay], "initial_tab": self.tab,
             "tab_align": self.tab_align,
             "include_singles_and_eps_in_artist_tab": self._show_singles_eps,
+            "notify_on_track": self._notify_on_track,
             "playback_tab_preview_next": self._preview_next,
             "sideview": ("both" if (self._cava_pane and self._album_cover_pane)
                          else "spectrum" if self._cava_pane
@@ -1742,6 +1745,8 @@ class App:
                 self._record_history(t)
                 # Pre-fetch cover art in the background so tab 0 is instant
                 self.fetch_cover_async(t)
+                if self._notify_on_track:
+                    self._bg(lambda _t=t: self._send_track_notification(_t), on_error="")
                 # Trigger autoplay logic whenever a new track starts
                 self._autoplay_maybe_enqueue()
                 return
@@ -2942,52 +2947,55 @@ class App:
                     self._popup_refresh(y0, x0, box_h, box_w)
 
                 self._popup_draw_cava()
-                win.erase()
-                win.box()
-                win.addstr(0, 2, " Download queue ", self.C(4))
-                summary = f"{status}  {completed}/{total} done  {len(rows) - completed} pending"
-                if failed:
-                    summary += f"  {failed} failed"
-                summary += "  ep/s: " + ("on" if self._show_singles_eps else "off")
-                win.addstr(1, 2, summary[:box_w - 4])
-                if filt_q:
-                    filt_info = f"/{filt_q}  {filt_pos+1}/{len(filt_hits)}" if filt_hits else f"/{filt_q}  no match"
-                    win.addstr(2, 2, filt_info[:box_w - 4].ljust(box_w - 4), self.C(4))
-                else:
-                    prog = (self.dl.progress_line or "")[:box_w - 4]
-                    win.addstr(2, 2, prog.ljust(box_w - 4))
-                win.hline(3, 1, curses.ACS_HLINE, box_w - 2)
-                hit_set = set(filt_hits) if filt_q else set()
-                if not rows:
-                    win.addstr(4, 2, "(queue empty)", self.C(10))
-                else:
-                    for i in range(inner_rows):
-                        idx = scroll + i
-                        if idx >= len(rows):
-                            break
-                        trk, st = rows[idx]
-                        is_cur = (idx == cursor)
-                        prefix_col = self.C(1) if st == "DONE" else self.C(3) if st == "FAIL" else self.C(2) if st == "CANC" else self.C(10)
-                        prefix = f"{st} "
-                        track_str = f"{trk.artist} - {trk.title}"
-                        rev = curses.A_REVERSE if is_cur else 0
-                        hi = rev | (curses.A_BOLD if idx in hit_set else 0)
-                        try:
-                            win.addstr(4 + i, 2, prefix, prefix_col | rev)
-                            win.addstr(track_str[: box_w - 4 - len(prefix)], hi)
-                        except curses.error:
-                            pass
-                hint  = " j/k ^n/^p: navigate    g/G: top/bottom   f: filter   x: remove "
-                hint2 = " $: pause   %: cancel   @: retry failed   q/#/Esc: close "
-                win.addstr(box_h - 2, 2, hint[:box_w - 4], self.C(10))
-                win.addstr(box_h - 1, 2, hint2[:box_w - 4], self.C(10))
-                # Also refresh the status bar so playback progress stays live
-                h_scr, w_scr = self.stdscr.getmaxyx()
-                self._draw_status(h_scr - 2, 0, w_scr)
-                self.stdscr.noutrefresh()
-                win.touchwin()
-                win.noutrefresh()
-                curses.doupdate()
+                try:
+                    win.erase()
+                    win.box()
+                    win.addstr(0, 2, " Download queue ", self.C(4))
+                    summary = f"{status}  {completed}/{total} done  {len(rows) - completed} pending"
+                    if failed:
+                        summary += f"  {failed} failed"
+                    summary += "  ep/s: " + ("on" if self._show_singles_eps else "off")
+                    win.addstr(1, 2, summary[:box_w - 4])
+                    if filt_q:
+                        filt_info = f"/{filt_q}  {filt_pos+1}/{len(filt_hits)}" if filt_hits else f"/{filt_q}  no match"
+                        win.addstr(2, 2, filt_info[:box_w - 4].ljust(box_w - 4), self.C(4))
+                    else:
+                        prog = (self.dl.progress_line or "")[:box_w - 4]
+                        win.addstr(2, 2, prog.ljust(box_w - 4))
+                    win.hline(3, 1, curses.ACS_HLINE, box_w - 2)
+                    hit_set = set(filt_hits) if filt_q else set()
+                    if not rows:
+                        win.addstr(4, 2, "(queue empty)", self.C(10))
+                    else:
+                        for i in range(inner_rows):
+                            idx = scroll + i
+                            if idx >= len(rows):
+                                break
+                            trk, st = rows[idx]
+                            is_cur = (idx == cursor)
+                            prefix_col = self.C(1) if st == "DONE" else self.C(3) if st == "FAIL" else self.C(2) if st == "CANC" else self.C(10)
+                            prefix = f"{st} "
+                            track_str = f"{trk.artist} - {trk.title}"
+                            rev = curses.A_REVERSE if is_cur else 0
+                            hi = rev | (curses.A_BOLD if idx in hit_set else 0)
+                            try:
+                                win.addstr(4 + i, 2, prefix, prefix_col | rev)
+                                win.addstr(track_str[: box_w - 4 - len(prefix)], hi)
+                            except curses.error:
+                                pass
+                    hint  = " j/k ^n/^p: navigate    g/G: top/bottom   f: filter   x: remove "
+                    hint2 = " $: pause   %: cancel   @: retry failed   q/#/Esc: close "
+                    win.addstr(box_h - 2, 2, hint[:box_w - 4], self.C(10))
+                    win.addstr(box_h - 1, 2, hint2[:box_w - 4], self.C(10))
+                    # Also refresh the status bar so playback progress stays live
+                    h_scr, w_scr = self.stdscr.getmaxyx()
+                    self._draw_status(h_scr - 2, 0, w_scr)
+                    self.stdscr.noutrefresh()
+                    win.touchwin()
+                    win.noutrefresh()
+                    curses.doupdate()
+                except curses.error:
+                    break
                 ch = win.getch()
                 if ch == -1:
                     if self.current_track and not self.mp.alive() and self._play_serial == self._current_track_serial:
@@ -3055,6 +3063,33 @@ class App:
         finally:
             self._download_dialog_open = False
         self._full_redraw()
+
+    def _send_track_notification(self, t: Track) -> None:
+        """Fire a desktop notification via notify-send for the given track.
+
+        Silently does nothing if notify-send is absent.  Lazily caches the
+        availability check in self._notify_send_ok so we only call shutil.which
+        once per session.
+        """
+        if self._notify_send_ok is None:
+            self._notify_send_ok = bool(shutil.which("notify-send"))
+        if not self._notify_send_ok:
+            return
+        summary = f"{t.artist} — {t.title}" if t.artist else t.title
+        body = t.album or ""
+        # Use the cached cover image if available, otherwise skip the icon.
+        icon_arg = []
+        if t.album_id:
+            cover = self._cover_cache_path(t.album_id)
+            if os.path.exists(cover):
+                icon_arg = ["--icon", cover]
+        try:
+            subprocess.run(
+                ["notify-send", "--app-name=tuifi", *icon_arg, summary, body],
+                capture_output=True, timeout=5,
+            )
+        except Exception as e:
+            debug_log(f"_send_track_notification: {e}")
 
     def _log_download_failure(self, t: Track, error: str, url: Optional[str] = None) -> None:
         try:
@@ -3177,9 +3212,6 @@ class App:
         except Exception:
             pass
 
-        out_path = self._tag_with_ffmpeg(out_path, t, sp, count_s, lyrics=lyr_text)
-        fname = os.path.basename(out_path)
-
         cover_path = os.path.join(out_dir, "cover.jpg")
         if not os.path.exists(cover_path):
             try:
@@ -3192,6 +3224,10 @@ class App:
             except Exception:
                 pass
 
+        out_path = self._tag_with_ffmpeg(out_path, t, sp, count_s, lyrics=lyr_text,
+                                         cover_path=cover_path if os.path.exists(cover_path) else None)
+        fname = os.path.basename(out_path)
+
         # Always overwrite the last sub-step (e.g. "lyrics ...") with a final completion line.
         # Use full (non-truncated) artist/title here, and include the extension.
         full_label = f"{t.artist} - {t.title}.{ext}"
@@ -3200,7 +3236,7 @@ class App:
 
 
     def _tag_with_ffmpeg(self, path: str, t: Track, set_progress=None, label: str = "",
-                         lyrics: Optional[str] = None) -> str:
+                         lyrics: Optional[str] = None, cover_path: Optional[str] = None) -> str:
         """Remux and tag an audio file using ffmpeg.
 
         For DASH FLAC files the assembled container is ISOBMFF (MP4 atoms), not a
@@ -3219,9 +3255,14 @@ class App:
             self._need_redraw = True
             self._redraw_status_only = True
         tidal_url = f"https://tidal.com/browse/track/{t.id}"
-        cmd = [
-            "ffmpeg", "-y", "-i", path,
-            "-c", "copy",
+        embed_cover = cover_path and os.path.exists(cover_path)
+        cmd = ["ffmpeg", "-y", "-i", path]
+        if embed_cover:
+            cmd += ["-i", cover_path]
+        cmd += [
+            "-map", "0:a",
+            *(["-map", "1:v", "-c:v", "copy", "-disposition:v", "attached_pic"] if embed_cover else []),
+            "-c:a", "copy",
             "-metadata", f"title={t.title or ''}",
             "-metadata", f"artist={t.artist or ''}",
             "-metadata", f"album={t.album or ''}",
@@ -6244,6 +6285,8 @@ class App:
                 parts.append(f"pq: {len(self.priority_queue)}")
             if self._show_singles_eps:
                 parts.append("ep/s: on")
+            if self._notify_on_track:
+                parts.append("notif: on")
             if self._cava_pane and self._album_cover_pane:
                 parts.append("sideview: both")
             elif self._cava_pane:
@@ -6410,6 +6453,7 @@ class App:
             " A         autoextend mode: off, mix, recommended",
             " F         track quality",
             " &         consider EPs and singles (for artist tab and downloads)",
+            " |         desktop notifications on track change",
             " c/n       sideview modes (see also VIEW section)",
             "",
             "\x01 AUTOEXTEND MODES",
@@ -6435,6 +6479,7 @@ class App:
             "",
             " Artist tab:",
             " include_singles_and_eps_in_artist_tab: show singles/EPs (default: false, toggle with &)",
+            " notify_on_track: desktop notification on each track change (default: false, toggle with |)",
             " max_all_tracks_number: max total tracks in All tracks section (default: 0 = unlimited)",
             "",
             " Playback tab:",
@@ -7911,6 +7956,18 @@ class App:
                         if _cache_key:
                             self._artist_cache.pop(int(_cache_key), None)
                         self.fetch_artist_async(_ref)
+                self._full_redraw()
+                continue
+            if ch == ord("|"):
+                self._notify_on_track = not self._notify_on_track
+                self.settings["notify_on_track"] = self._notify_on_track
+                if self._notify_on_track and self._notify_send_ok is None:
+                    self._notify_send_ok = bool(shutil.which("notify-send"))
+                if self._notify_on_track and not self._notify_send_ok:
+                    self.toast("notify-send not found — install libnotify")
+                else:
+                    self.toast(f"Notifications: {'on' if self._notify_on_track else 'off'}")
+                self._persist_settings()
                 self._full_redraw()
                 continue
             if ch in (curses.KEY_BACKSPACE, 127, 8):

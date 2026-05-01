@@ -7361,7 +7361,7 @@ class App:
                 delta = self._skip_delta
                 self._skip_delta = 0
                 if n_q > 0:
-                    if (self.shuffle_on or self.priority_queue) and delta > 0:
+                    if self.shuffle_on and delta > 0:
                         self.next_track()
                     elif self.shuffle_on and delta < 0:
                         # Pop from back stack to return to the track played before this one.
@@ -8318,11 +8318,8 @@ class App:
                     if self.shuffle_on and self.queue_items:
                         self._shuffle_back_stack.append((self.queue_play_idx, self._next_shuffle_idx))
                     self.play_queue_index(self.queue_cursor)
-                    if self._preview_next and self.tab == TAB_PLAYBACK and self.queue_overlay and self._album_cover_pane:
-                        _nq = len(self.queue_items)
-                        _nxt = self._preview_next_idx()
-                        if 0 <= _nxt < _nq:
-                            self.queue_cursor = _nxt
+                    # preview_next cursor update is handled by the play_track success
+                    # callback so it moves only once the track actually starts playing.
                     continue
                 if self.tab == TAB_LIKED:
                     it_liked = self._selected_left_item()

@@ -294,6 +294,7 @@ def load_settings() -> Dict[str, Any]:
     s.setdefault("max_all_tracks_number", 0)                      # 0 = unlimited
 
     # -- Miscellaneous user preferences --
+    s.setdefault("gapless_on", False)              # keep mpv alive between tracks; toggle with _
     s.setdefault("remember_last_input", False)     # prefill search/filter with last query within a session
     s.setdefault("playback_tab_layout", "lyrics")  # right-pane layout: "lyrics", "cover", etc.
     s.setdefault("cover_lyrics_color_pair", "default")  # color name; "default" = terminal default

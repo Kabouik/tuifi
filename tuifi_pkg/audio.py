@@ -62,19 +62,33 @@ class MPV:
             "--reset-on-next-file=no",
         ]
         if gapless:
-            args.append("--gapless-audio=weak")
+            # --gapless-audio=weak: decoder handoff without gap (falls back to tiny
+            # gap only on codec/samplerate mismatch between tracks).
+            # --prefetch-playlist=yes: mpv starts downloading the next playlist entry
+            # while the current track still plays — critical for zero-gap DASH.
+            # --demuxer-lavf-o / --ytdl=no: needed so preloaded local .mpd files
+            # (DASH manifests written to disk for /track/ API fallback) are opened
+            # correctly by any subsequent loadfile append-play call.
+            args += [
+                "--gapless-audio=weak",
+                "--prefetch-playlist=yes",
+                "--demuxer-lavf-o=allowed_extensions=MPD,m4s,mp4,aac,flac,mp3,frag",
+                "--ytdl=no",
+            ]
         if not resume:
             args.append("--no-resume-playback")
         if start_pos > 0.0:
             args.append(f"--start={start_pos:.1f}")
 
         is_mpd = isinstance(url, str) and url.endswith(".mpd") and os.path.isfile(url)
-        if is_mpd:
+        if is_mpd and not gapless:
+            # In non-gapless mode add DASH args per-file; in gapless they're global (above).
             args += [
                 "--demuxer-lavf-o=allowed_extensions=MPD,m4s,mp4,aac,flac,mp3,frag",
                 "--ytdl=no",
-                "--cache=no",
             ]
+        if is_mpd:
+            args.append("--cache=no")
 
         args.append(url)
 

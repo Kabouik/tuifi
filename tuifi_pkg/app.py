@@ -2013,18 +2013,19 @@ class App:
         if not pf:
             debug_log("gapless preload: no prefetch result, skipping preload")
             return
-        # Only DASH (is_manifest=True) URLs are stable enough to preload;
-        # non-DASH signed URLs expire quickly.
-        if not pf["is_manifest"]:
-            debug_log(f"gapless preload: non-DASH URL for {t.id}, skipping preload")
-            return
         url = pf["url"]
+        # Accept any URL that _prefetch_next_url resolved (LOSSLESS / HI_RES_LOSSLESS tier):
+        # - Remote HTTPS DASH manifest (is_manifest=True) — mpv fetches natively
+        # - Local .mpd file (is_manifest=False, /track/ fallback) — mpv opens via lavf
+        # - Direct HTTPS stream URL (is_manifest=False, bts manifest) — mpv streams directly
+        # All of these are valid for loadfile append-play; signed URLs are preloaded only
+        # seconds before playback so expiry is not a concern at this timescale.
         # Capture the current playlist-pos so we know when mpv advances past it.
         _cur_pp = self.mp.playlist_pos or 0
         self.mp.preload(url)
         self._gapless_preloaded = (t, nxt_queue_idx)
         self._gapless_expected_pos = _cur_pp + 1
-        debug_log(f"gapless preload: track {t.id} queued at expected playlist-pos {self._gapless_expected_pos}")
+        debug_log(f"gapless preload: track {t.id} url={url[:60]!r} expected-pos={self._gapless_expected_pos}")
 
     def _prefetch_next_url(self, t: "Track", start_qi: int) -> None:
         """Resolve the stream URL for the next track in a background thread.
@@ -7517,15 +7518,17 @@ class App:
                             self.queue_cursor = _nxt
                     self._full_redraw()
 
-            # Pre-fetch next track DASH URL once the current track has >=10 s buffered
-            # (safe on slow connections) or as a fallback when <=5 s remain.
-            # When gapless is on, also issue loadfile append-play to mpv after prefetch.
+            # Pre-fetch next track URL and (when gapless) preload into mpv.
+            # Trigger as early as 5 s into the current track so mpv's --prefetch-playlist
+            # has the entire remaining duration to buffer the next file.  Also fire when
+            # <=5 s remain (fallback) or when demuxer cache reports >=10 s ahead.
             if self.current_track and self.mp.alive() and not self._prefetch_in_progress:
                 _tp, _du, *_ = self.mp.snapshot()
                 _cd = self.mp.demuxer_cache_duration
-                _near_end = _tp is not None and _du is not None and _du > 0 and _du - _tp <= 5.0
+                _playing_5s    = _tp is not None and _tp >= 5.0
+                _near_end      = _tp is not None and _du is not None and _du > 0 and _du - _tp <= 5.0
                 _buffered_enough = isinstance(_cd, (int, float)) and _cd >= 10.0
-                if _near_end or _buffered_enough:
+                if _playing_5s or _near_end or _buffered_enough:
                     _nxt_t = self._next_queued_track()
                     if _nxt_t and self._prefetch_trigger_id != _nxt_t.id:
                         self._prefetch_trigger_id = _nxt_t.id

@@ -189,11 +189,13 @@ class MPV:
 
         Only valid when mpv is alive (gapless mode).  Clears any preloaded
         playlist entries, then issues ``loadfile url replace`` so mpv switches
-        immediately.  Resets the cached time_pos so callers can wait for a
-        fresh value from the new file.
+        immediately.  Per-file options ensure the new file starts from the
+        beginning regardless of any ``--start`` offset inherited from the
+        initial command line (via ``--reset-on-next-file=no``).
+        Resets the cached time_pos so callers can wait for a fresh value.
         """
         self.playlist_clear()
-        self.cmd("loadfile", url, "replace")
+        self.cmd("loadfile", url, "replace", "start=0,no-resume-playback=yes")
         with self._lock:
             self.time_pos = None  # invalidate so probe loop waits for fresh data
 
@@ -201,9 +203,11 @@ class MPV:
         """Append *url* to mpv's internal playlist for gapless continuation.
 
         mpv will start playing it automatically when the current file ends.
+        Per-file options ensure it starts from the beginning and does not
+        restore a watch-later position.
         Only meaningful when the process was started with ``gapless=True``.
         """
-        self.cmd("loadfile", url, "append-play")
+        self.cmd("loadfile", url, "append-play", "start=0,no-resume-playback=yes")
         debug_log(f"mpv preload: loadfile append-play {url[:80]!r}")
 
     def playlist_clear(self) -> None:

@@ -1728,7 +1728,7 @@ class App:
                     # Bail if superseded while waiting for the lock
                     if _my_serial != self._play_serial:
                         return
-                    if self.gapless_on and self.mp.alive() and not resume and start_pos == 0.0:
+                    if self.gapless_on and self.mp.alive() and not resume and start_pos == 0.0 and not is_local_mpd:
                         # Reuse the existing mpv process: replace the current file
                         # via IPC instead of killing and respawning.  This avoids the
                         # ~300 ms process-startup overhead on every manual skip.

@@ -3078,7 +3078,7 @@ class App:
         summary = f"{t.artist} — {t.title}" if t.artist else t.title
         body = t.album or ""
         if t.year and t.year != "????":
-            body += f" [{t.year}]"
+            body += f" ({t.year})"
         # Use the cached cover image if available, otherwise skip the icon.
         icon_arg = []
         if t.album_id:

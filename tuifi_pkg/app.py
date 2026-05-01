@@ -1925,10 +1925,15 @@ class App:
     def _prefetch_next_url(self, t: "Track", start_qi: int) -> None:
         """Resolve the stream URL for the next track in a background thread.
 
-        Only the preferred quality (start_qi) is attempted; on success the result
-        is cached in self._prefetch_next so play_track() can skip the HTTP call.
+        Only attempted for DASH qualities (HI_RES_LOSSLESS / LOSSLESS) because
+        non-DASH URLs are short-lived signed links and calling _resolve_stream_url_for_quality
+        from a background thread would race on _last_url_is_manifest/_last_resolved_quality.
         Falls back silently — play_track() always resolves fresh if cache misses.
         """
+        if QUALITY_ORDER[start_qi] not in self._MANIFESTS_FORMATS:
+            debug_log(f"prefetch: skipping non-DASH quality {QUALITY_ORDER[start_qi]!r}")
+            self._prefetch_in_progress = False
+            return
         try:
             url = self._resolve_stream_url_for_quality(t.id, QUALITY_ORDER[start_qi])
             self._prefetch_next = {
@@ -6340,7 +6345,7 @@ class App:
             if self._show_singles_eps:
                 parts.append("ep/s: on")
             if self._notify_on_track:
-                parts.append("notif: on")
+                parts.append("notify: on")
             if self._cava_pane and self._album_cover_pane:
                 parts.append("sideview: both")
             elif self._cava_pane:
@@ -7395,10 +7400,14 @@ class App:
                             self.queue_cursor = _nxt
                     self._full_redraw()
 
-            # Pre-fetch next track URL ~5 s before end to hide DASH startup latency.
+            # Pre-fetch next track DASH URL once the current track has >=10 s buffered
+            # (safe on slow connections) or as a fallback when <=5 s remain.
             if self.current_track and self.mp.alive() and not self._prefetch_in_progress:
                 _tp, _du, *_ = self.mp.snapshot()
-                if _tp is not None and _du is not None and _du > 0 and _du - _tp <= 5.0:
+                _cd = self.mp.demuxer_cache_duration
+                _near_end = _tp is not None and _du is not None and _du > 0 and _du - _tp <= 5.0
+                _buffered_enough = isinstance(_cd, (int, float)) and _cd >= 10.0
+                if _near_end or _buffered_enough:
                     _nxt_t = self._next_queued_track()
                     if _nxt_t and self._prefetch_trigger_id != _nxt_t.id:
                         self._prefetch_trigger_id = _nxt_t.id
@@ -7440,7 +7449,12 @@ class App:
                         self._shuffle_restore_next = orig_next
                         self.play_queue_index(target_idx)
                     else:
-                        target = self.queue_play_idx + delta
+                        if delta < 0 and self._queue_resume_idx is not None:
+                            # Playing a priority track: prev goes back to the last
+                            # regular-queue track, not the adjacent queue slot.
+                            target = self._queue_resume_idx
+                        else:
+                            target = self.queue_play_idx + delta
                         if self.repeat_mode == 1:
                             target = target % n_q
                         else:

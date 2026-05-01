@@ -97,3 +97,9 @@ I don't know if related, but I might have been running out of disk storage while
    :DONE: | toggles _notify_on_track; warns if notify-send absent; _send_track_notification fires in bg thread with cached cover icon; notify_on_track persisted in settings (app.py ~3067)
 ** DONE We need to add cover and lyrics to tracks tags when downloading, flac or m4a (depending on quality), and avoid redownloading the cover for each track when we can re-use them. We still download lyrics and cover files though, just add them as tags as well.
    :DONE: covered by the cover-in-tag item above; lyrics already embedded via _tag_with_ffmpeg since commit 431d7bf; cover reused from cover.jpg if already present
+** DONE The prefetch system should maybe trigger before the last 5s of the next track, it would be best to actually prefetch as soon as the current track has buffered enough to avoid interruptions on slow connections. So maybe as soon as the current has 10s cache?
+   :DONE: MPV.poll_once() now polls demuxer-cache-duration; main loop triggers prefetch when cache>=10s OR <=5s remain (audio.py poll_once, app.py main loop)
+** DONE The prefetch system works for hi_res_lossless and lossless qualities, but it will cause errors for all other qualities (that do not use dash) and prevent playing new tracks (be it with autoadvance or track skipping).
+   :DONE: _prefetch_next_url() now returns early for non-DASH qualities (HIGH/LOW) to avoid short-lived URL caching and thread-safety races on _last_url_is_manifest (app.py ~1925)
+** DONE When pressing prev-track while a priority track is being played, the prev track should actually be the last one played previously, not the prev track adjacent to the priority one.
+   :DONE: skip debounce delta<0 now checks _queue_resume_idx; if set (priority active), plays _queue_resume_idx instead of queue_play_idx-1 (app.py skip debounce)

@@ -26,6 +26,7 @@ class MPV:
         self.pause: Optional[bool] = None
         self.volume: Optional[float] = None
         self.mute: Optional[bool] = None
+        self.demuxer_cache_duration: Optional[float] = None
         self._mpv_stderr_path: Optional[str] = None
         self._mpv_stderr_fh = None
 
@@ -114,6 +115,7 @@ class MPV:
         with self._lock:
             self.time_pos = self.duration = None
             self.pause = self.volume = self.mute = None
+            self.demuxer_cache_duration = None
 
     def alive(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
@@ -160,12 +162,14 @@ class MPV:
             with self._lock:
                 self.time_pos = self.duration = None
                 self.pause = self.volume = self.mute = None
+                self.demuxer_cache_duration = None
             return
         tp = self.get("time-pos")
         du = self.get("duration")
         pa = self.get("pause")
         vo = self.get("volume")
         mu = self.get("mute")
+        cd = self.get("demuxer-cache-duration")
         with self._lock:
             self.time_pos = tp if isinstance(tp, (int, float)) else None
             self.duration = du if isinstance(du, (int, float)) else None
@@ -175,6 +179,7 @@ class MPV:
             except Exception:
                 self.volume = None
             self.mute = bool(mu) if mu is not None else None
+            self.demuxer_cache_duration = cd if isinstance(cd, (int, float)) else None
 
     def snapshot(self) -> Tuple[Optional[float], Optional[float], Optional[bool], Optional[float], Optional[bool]]:
         with self._lock:

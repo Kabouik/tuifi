@@ -293,6 +293,9 @@ def load_settings() -> Dict[str, Any]:
     s.setdefault("include_singles_and_eps_in_artist_tab", False)  # toggle with #
     s.setdefault("max_all_tracks_number", 0)                      # 0 = unlimited
 
+    # -- Gapless playback --
+    s.setdefault("gapless_on", False)              # keep mpv alive between tracks for zero-gap DASH playback
+
     # -- Miscellaneous user preferences --
     s.setdefault("remember_last_input", False)     # prefill search/filter with last query within a session
     s.setdefault("playback_tab_layout", "lyrics")  # right-pane layout: "lyrics", "cover", etc.
@@ -431,6 +434,8 @@ def save_settings(s: Dict[str, Any]) -> None:
         "show_track_duration", "show_line_numbers", "show_album_track_count", "tab_align",
         "include_singles_and_eps_in_artist_tab",
         "playback_tab_preview_next",
+        "notify_on_track",
+        "gapless_on",
         "cover_pane",
     )
 

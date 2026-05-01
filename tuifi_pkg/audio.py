@@ -27,10 +27,21 @@ class MPV:
         self.volume: Optional[float] = None
         self.mute: Optional[bool] = None
         self.demuxer_cache_duration: Optional[float] = None
+        self.playlist_pos: Optional[int] = None    # mpv internal playlist position (0-based)
+        self.playlist_count: Optional[int] = None  # number of entries in mpv playlist
         self._mpv_stderr_path: Optional[str] = None
         self._mpv_stderr_fh = None
 
-    def start(self, url: str, resume: bool = False, start_pos: float = 0.0) -> None:
+    def start(self, url: str, resume: bool = False, start_pos: float = 0.0,
+              gapless: bool = False) -> None:
+        """Start mpv on *url*, killing any existing process first.
+
+        When *gapless* is True the process is kept alive between tracks
+        (``--idle=yes``) and audio is decoded gaplessly (``--gapless-audio=weak``).
+        Additional tracks are queued via :meth:`preload` while this process
+        lives.  The process is still killed on the *next* :meth:`start` call
+        (e.g. a user-initiated skip), so normal playback control is unchanged.
+        """
         self.stop()
         _tmp = os.environ.get("TMPDIR", "/tmp")
         _clutter = os.path.join(_tmp, APP_NAME, "clutter")
@@ -46,9 +57,12 @@ class MPV:
             pass
         args = [
             "mpv", "--no-video", "--force-window=no", "--really-quiet",
-            "--idle=no", f"--input-ipc-server={self.sock_path}",
+            "--idle=yes" if gapless else "--idle=no",
+            f"--input-ipc-server={self.sock_path}",
             "--reset-on-next-file=no",
         ]
+        if gapless:
+            args.append("--gapless-audio=weak")
         if not resume:
             args.append("--no-resume-playback")
         if start_pos > 0.0:
@@ -116,6 +130,8 @@ class MPV:
             self.time_pos = self.duration = None
             self.pause = self.volume = self.mute = None
             self.demuxer_cache_duration = None
+            self.playlist_pos = None
+            self.playlist_count = None
 
     def alive(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
@@ -157,12 +173,28 @@ class MPV:
             return r.get("data")
         return None
 
+    def preload(self, url: str) -> None:
+        """Append *url* to mpv's internal playlist for gapless continuation.
+
+        mpv will start playing it automatically when the current file ends.
+        Only meaningful when the process was started with ``gapless=True``.
+        """
+        self.cmd("loadfile", url, "append-play")
+        debug_log(f"mpv preload: loadfile append-play {url[:80]!r}")
+
+    def playlist_clear(self) -> None:
+        """Remove all playlist entries after the currently playing file."""
+        self.cmd("playlist-clear")
+        debug_log("mpv playlist_clear")
+
     def poll_once(self) -> None:
         if not self.alive():
             with self._lock:
                 self.time_pos = self.duration = None
                 self.pause = self.volume = self.mute = None
                 self.demuxer_cache_duration = None
+                self.playlist_pos = None
+                self.playlist_count = None
             return
         tp = self.get("time-pos")
         du = self.get("duration")
@@ -170,6 +202,8 @@ class MPV:
         vo = self.get("volume")
         mu = self.get("mute")
         cd = self.get("demuxer-cache-duration")
+        pp = self.get("playlist-pos")
+        pc = self.get("playlist-count")
         with self._lock:
             self.time_pos = tp if isinstance(tp, (int, float)) else None
             self.duration = du if isinstance(du, (int, float)) else None
@@ -180,6 +214,8 @@ class MPV:
                 self.volume = None
             self.mute = bool(mu) if mu is not None else None
             self.demuxer_cache_duration = cd if isinstance(cd, (int, float)) else None
+            self.playlist_pos = int(pp) if isinstance(pp, int) else None
+            self.playlist_count = int(pc) if isinstance(pc, int) else None
 
     def snapshot(self) -> Tuple[Optional[float], Optional[float], Optional[bool], Optional[float], Optional[bool]]:
         with self._lock:

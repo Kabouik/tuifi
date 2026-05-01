@@ -1468,12 +1468,17 @@ class App:
         win.addstr(2, 2, title[:box_w - 4], self.C(4))
         win.touchwin()
         win.refresh()
+        result = False
         while True:
             ch = self.stdscr.getch()
             if ch in (ord("y"), ord("Y")):
-                return True
+                result = True
+                break
             if ch in (ord("n"), ord("N"), 27):
-                return False
+                break
+        # Erase the popup so callers don't need to trigger their own redraw.
+        self._full_redraw()
+        return result
 
     def pick_playlist(self, title: str, exclude: Optional[str] = None) -> Optional[str]:
         names = [n for n in sorted(self.playlists.keys()) if n != exclude]
@@ -1641,6 +1646,13 @@ class App:
                 debug_log(f"  DASH: extracted direct URL from MPD: {direct_url[:120]}")
                 return direct_url
 
+            # Only LOSSLESS and HI_RES_LOSSLESS should play via a local DASH .mpd file.
+            # For HIGH/LOW the DASH segments use short-lived CDN auth that mpv cannot
+            # re-authenticate, so playing via local .mpd always fails.  Raise instead.
+            if quality not in self._MANIFESTS_FORMATS:
+                debug_log(f"  DASH manifest for non-lossless quality {quality!r}: no direct URL, refusing local .mpd")
+                raise RuntimeError(f"DASH manifest not playable for quality {quality!r}")
+
             _clutter = os.path.join(os.environ.get("TMPDIR") or tempfile.gettempdir(), APP_NAME, "clutter")
             os.makedirs(_clutter, exist_ok=True)
             mpd_path = os.path.join(_clutter, f"{track_id}-{int(time.time()*1000)}.mpd")
@@ -1727,18 +1739,20 @@ class App:
                     if _my_serial != self._play_serial:
                         return
                     _replace_ok = False
+                    _t_start = time.time()
                     if self.gapless_on and self.mp.alive() and not resume and start_pos == 0.0 and not is_local_mpd:
                         # Reuse the live mpv process: replace the current track via IPC.
                         # playlist_clear() removes preloaded entries, loadfile replace
                         # starts the new URL immediately; avoids ~300ms process-restart lag.
                         # Falls back to start() if the IPC command is rejected or times out.
                         _replace_ok = self.mp.replace(url)
-                        debug_log(f"play_track: mp.replace() ok={_replace_ok} for {t.id}")
+                        debug_log(f"play_track: [TIMING] mp.replace() ok={_replace_ok} for {t.id} took {(time.time()-_t_start)*1000:.0f}ms")
                     if _replace_ok:
                         _used_replace = True
                     else:
                         self.mp.start(url, resume=resume, start_pos=start_pos,
                                       gapless=self.gapless_on)
+                        debug_log(f"play_track: [TIMING] mp.start() for {t.id} took {(time.time()-_t_start)*1000:.0f}ms")
                         _used_replace = False
                 self._apply_mpv_prefs()
                 if is_dash:
@@ -2065,7 +2079,7 @@ class App:
         if self._notify_on_track:
             self._bg(lambda _t=t: self._send_track_notification(_t), on_error="")
         self._autoplay_maybe_enqueue()
-        debug_log(f"gapless: advanced to track {t.id} '{t.title}' qi={queue_idx}")
+        debug_log(f"gapless: [TIMING] advanced to track {t.id} '{t.title}' qi={queue_idx} at t={time.time():.3f}")
 
     def _prefetch_and_gapless_append(self, t: "Track", start_qi: int,
                                      nxt_queue_idx: int) -> None:
@@ -4107,14 +4121,22 @@ class App:
             li = scroll + row
             if y + 1 + row >= y + h:
                 break
-            text = lines[li].rstrip() if li < len(lines) else ""
+            raw = lines[li].rstrip() if li < len(lines) else ""
+            # Strip control chars (nulls, escapes, carriage returns, etc.) that
+            # curses cannot render and that overflow into adjacent panes.
+            raw = "".join(c if c >= " " else " " for c in raw)
+            safe = _truncate_to_display_width(raw, w)
+            pad = w - _str_display_width(safe)
             if li == current_hit:
                 attr = curses.A_REVERSE
             elif li in hit_set:
                 attr = self.C(5)
             else:
                 attr = lyr_attr
-            self.stdscr.addstr(y + 1 + row, x, text[:w].ljust(w), attr)
+            try:
+                self.stdscr.addstr(y + 1 + row, x, safe + " " * pad, attr)
+            except curses.error:
+                pass
 
     def _cover_clear_image(self) -> None:
         """Clear the displayed cover image (called when leaving playback tab or before full redraw)."""
@@ -6503,13 +6525,13 @@ class App:
             if mu if mu is not None else self.desired_mute:
                 parts.append("muted")
             if self.priority_queue:
-                parts.append(f"pq: {len(self.priority_queue)}")
+                parts.append(f"priority: {len(self.priority_queue)}")
             if self._show_singles_eps:
-                parts.append("ep/s: on")
+                parts.append("ep/s")
             if self._notify_on_track:
-                parts.append("notify: on")
+                parts.append("notify")
             if self.gapless_on:
-                parts.append("gapless: on")
+                parts.append("gapless")
             if self._cava_pane and self._album_cover_pane:
                 parts.append("sideview: both")
             elif self._cava_pane:
@@ -7556,16 +7578,16 @@ class App:
 
 
             # Track-end detection: mpv died normally (non-gapless) or crashed (gapless fallback).
+            # No snapshot check needed — if alive() is False and serials match the track ended.
             if self.current_track and not self.mp.alive() and self._play_serial == self._current_track_serial:
-                _tp0, _du0, *_ = self.mp.snapshot()
-                if _tp0 is None and _du0 is None:
-                    self.current_track = None
-                    self._last_stream_quality = None
-                    self._mpv_qi_map = []
-                    self._mpv_last_pp = None
-                    self._gapless_idle_since = None
-                    self.next_track()
-                    self._full_redraw()
+                debug_log(f"track-end: mpv died, calling next_track() t={now:.3f}")
+                self.current_track = None
+                self._last_stream_quality = None
+                self._mpv_qi_map = []
+                self._mpv_last_pp = None
+                self._gapless_idle_since = None
+                self.next_track()
+                self._full_redraw()
 
             # Pre-fetch the next track's DASH URL early and, when gapless is on, append
             # it to mpv's internal playlist so --prefetch-playlist can buffer it ahead.
@@ -7606,15 +7628,20 @@ class App:
                             self._on_gapless_advance(self.queue_items[_gl_qi], _gl_qi)
                             self._full_redraw()
 
-            # Gapless: detect queue exhaustion — mpv alive but idle (playlist ran out).
-            if self.gapless_on and self.current_track and self.mp.alive() and self._mpv_last_pp is not None:
+            # Idle detection: mpv alive but idle (track ended with --idle=yes).
+            # Fires for gapless mode AND when gapless was toggled off but the
+            # --idle=yes process is still running (gapless_on check removed).
+            # Gated on _mpv_last_pp is not None so it only triggers for processes
+            # started with gapless=True (i.e., --idle=yes).
+            if self.current_track and self.mp.alive() and self._mpv_last_pp is not None:
                 _tp3, _du3, *_ = self.mp.snapshot()
-                _has_ahead = len(self._mpv_qi_map) > (self._mpv_last_pp or 0) + 1
+                # Only count ahead entries as "has content" when gapless is still on.
+                _has_ahead = self.gapless_on and len(self._mpv_qi_map) > (self._mpv_last_pp or 0) + 1
                 if _tp3 is None and _du3 is None and not _has_ahead and not self._prefetch_in_progress:
                     if self._gapless_idle_since is None:
                         self._gapless_idle_since = now
                     elif now - self._gapless_idle_since > 0.5:
-                        debug_log("gapless: queue exhausted — mpv idle >0.5 s")
+                        debug_log(f"mpv idle >0.5 s, calling next_track() t={now:.3f}")
                         self._gapless_idle_since = None
                         self.current_track = None
                         self._last_stream_quality = None

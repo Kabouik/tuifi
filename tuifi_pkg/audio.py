@@ -173,8 +173,11 @@ class MPV:
         except Exception:
             return None
 
-    def cmd(self, *args: Any) -> None:
-        self._rpc({"command": list(args)})
+    def cmd(self, *args: Any, timeout: float = 0.10) -> bool:
+        """Send a fire-and-forget IPC command.  Returns True iff mpv responded
+        with ``{"error": "success"}``; False on socket failure or mpv error."""
+        r = self._rpc({"command": list(args)}, timeout=timeout)
+        return isinstance(r, dict) and r.get("error") == "success"
 
     def get(self, prop: str) -> Optional[Any]:
         r = self._rpc({"command": ["get_property", prop]})
@@ -182,11 +185,11 @@ class MPV:
             return r.get("data")
         return None
 
-    def playlist_clear(self) -> None:
+    def playlist_clear(self) -> bool:
         """Remove all playlist entries after the currently playing file."""
-        self.cmd("playlist-clear")
+        return self.cmd("playlist-clear")
 
-    def replace(self, url: str) -> None:
+    def replace(self, url: str) -> bool:
         """Replace the current track via IPC without restarting the process.
 
         Only valid when mpv is alive (gapless mode).  Clears any ahead-queued
@@ -194,26 +197,36 @@ class MPV:
         immediately.  Per-file option ``start=0`` overrides any ``--start``
         offset that ``--reset-on-next-file=no`` would otherwise carry over.
         Resets the cached time_pos so callers can wait for a fresh value.
-        """
-        self.playlist_clear()
-        self.cmd("loadfile", url, "replace", "start=0")
-        with self._lock:
-            self.time_pos = None  # invalidate so probe loop waits for fresh data
 
-    def append(self, url: str) -> None:
+        Returns True if both IPC commands succeeded; False on any failure so
+        the caller can fall back to ``start()``.
+        """
+        self.playlist_clear()  # best-effort; don't fail on this
+        # Use a longer timeout for loadfile: mpv may be mid-decode when it
+        # receives the command and takes slightly longer to respond.
+        ok = self.cmd("loadfile", url, "replace", "start=0", timeout=0.5)
+        if ok:
+            with self._lock:
+                self.time_pos = None  # invalidate so probe loop waits for fresh data
+        return ok
+
+    def append(self, url: str) -> bool:
         """Append *url* to mpv's internal playlist for gapless continuation.
 
         mpv will start playing it automatically when the current file ends,
         using the gapless decoder handoff if codecs allow.  Per-file option
         ``start=0`` prevents any inherited ``--start`` offset.
         Only meaningful when the process was started with ``gapless=True``.
+        Returns True iff mpv confirmed the append via IPC.
         """
-        self.cmd("loadfile", url, "append", "start=0")
-        debug_log(f"mpv append: loadfile append {url[:80]!r}")
+        ok = self.cmd("loadfile", url, "append", "start=0")
+        debug_log(f"mpv append: loadfile append {url[:80]!r} ok={ok}")
+        return ok
 
-    def playlist_next(self) -> None:
-        """Skip to the next entry in mpv's internal playlist (gapless skip)."""
-        self.cmd("playlist-next")
+    def playlist_next(self) -> bool:
+        """Skip to the next entry in mpv's internal playlist (gapless skip).
+        Returns True iff mpv confirmed the command via IPC."""
+        return self.cmd("playlist-next")
 
     def poll_once(self) -> None:
         if not self.alive():

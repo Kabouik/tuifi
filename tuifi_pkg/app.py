@@ -1726,11 +1726,15 @@ class App:
                     # Bail if superseded while waiting for the lock
                     if _my_serial != self._play_serial:
                         return
+                    _replace_ok = False
                     if self.gapless_on and self.mp.alive() and not resume and start_pos == 0.0 and not is_local_mpd:
                         # Reuse the live mpv process: replace the current track via IPC.
                         # playlist_clear() removes preloaded entries, loadfile replace
                         # starts the new URL immediately; avoids ~300ms process-restart lag.
-                        self.mp.replace(url)
+                        # Falls back to start() if the IPC command is rejected or times out.
+                        _replace_ok = self.mp.replace(url)
+                        debug_log(f"play_track: mp.replace() ok={_replace_ok} for {t.id}")
+                    if _replace_ok:
                         _used_replace = True
                     else:
                         self.mp.start(url, resume=resume, start_pos=start_pos,
@@ -1928,15 +1932,17 @@ class App:
                 start_pos == 0.0 and
                 _pp + 1 < len(self._mpv_qi_map) and
                 self._mpv_qi_map[_pp + 1] == idx):
-            self.queue_play_idx = idx
-            self.queue_cursor = idx
-            if idx in self.priority_queue:
-                self.priority_queue.remove(idx)
-            self.mp.playlist_next()
-            # The main-loop advance-detection will call _on_gapless_advance() once
-            # poll_once() sees the playlist-pos change.
-            self._full_redraw()
-            return
+            if self.mp.playlist_next():
+                # IPC succeeded: mpv will advance to the pre-loaded track.
+                # _on_gapless_advance() fires once poll_once() sees the pos change.
+                self.queue_play_idx = idx
+                self.queue_cursor = idx
+                if idx in self.priority_queue:
+                    self.priority_queue.remove(idx)
+                self._full_redraw()
+                return
+            # IPC failed — fall through to the normal play_track() path below.
+            debug_log(f"gapless shortcut: playlist_next() failed for qi={idx}, falling back")
 
         prev_play_idx = self.queue_play_idx
         self.queue_play_idx = idx
@@ -2085,9 +2091,11 @@ class App:
         if not self.mp.alive():
             debug_log("gapless append: mpv not alive, skipping")
             return
-        self.mp.append(url)
-        self._mpv_qi_map.append(nxt_queue_idx)
-        debug_log(f"gapless append: track {t.id} → mpv pos {len(self._mpv_qi_map)-1} qi={nxt_queue_idx}")
+        if self.mp.append(url):
+            self._mpv_qi_map.append(nxt_queue_idx)
+            debug_log(f"gapless append: track {t.id} → mpv pos {len(self._mpv_qi_map)-1} qi={nxt_queue_idx}")
+        else:
+            debug_log(f"gapless append: IPC failed for track {t.id}, skipping qi-map extension")
 
     def _gapless_invalidate_ahead(self) -> None:
         """Called when the queue changes in a way that affects what comes next.

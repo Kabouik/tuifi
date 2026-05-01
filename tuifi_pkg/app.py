@@ -7361,7 +7361,7 @@ class App:
                 delta = self._skip_delta
                 self._skip_delta = 0
                 if n_q > 0:
-                    if self.shuffle_on and delta > 0:
+                    if (self.shuffle_on or self.priority_queue) and delta > 0:
                         self.next_track()
                     elif self.shuffle_on and delta < 0:
                         # Pop from back stack to return to the track played before this one.

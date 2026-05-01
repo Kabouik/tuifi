@@ -1728,16 +1728,24 @@ class App:
                     # Bail if superseded while waiting for the lock
                     if _my_serial != self._play_serial:
                         return
-                    self.mp.start(url, resume=resume, start_pos=start_pos,
-                                  gapless=self.gapless_on)
+                    if self.gapless_on and self.mp.alive() and not resume and start_pos == 0.0:
+                        # Reuse the existing mpv process: replace the current file
+                        # via IPC instead of killing and respawning.  This avoids the
+                        # ~300 ms process-startup overhead on every manual skip.
+                        self.mp.replace(url)
+                    else:
+                        self.mp.start(url, resume=resume, start_pos=start_pos,
+                                      gapless=self.gapless_on)
                 self._apply_mpv_prefs()
                 if is_dash:
                     # Give mpv time to parse the MPD, hit the CDN, and buffer.
                     # SegmentTemplate DASH needs noticeably more than a direct URL.
                     # Poll up to 3 s; break early once time_pos is reported (playback running).
+                    # When using replace() the process stays alive on failure (no alive() check).
+                    _used_replace = self.gapless_on and self.mp.alive()
                     for _i in range(6):
                         time.sleep(0.5)
-                        if not self.mp.alive():
+                        if not _used_replace and not self.mp.alive():
                             debug_log(f"play_track: mpv died on DASH for {quality} after {(_i+1)*0.5:.1f}s — trying lower quality")
                             raise RuntimeError("dash playback failed")
                         if self.mp.snapshot()[0] is not None:
@@ -2014,12 +2022,12 @@ class App:
             debug_log("gapless preload: no prefetch result, skipping preload")
             return
         url = pf["url"]
-        # Accept any URL that _prefetch_next_url resolved (LOSSLESS / HI_RES_LOSSLESS tier):
-        # - Remote HTTPS DASH manifest (is_manifest=True) — mpv fetches natively
-        # - Local .mpd file (is_manifest=False, /track/ fallback) — mpv opens via lavf
-        # - Direct HTTPS stream URL (is_manifest=False, bts manifest) — mpv streams directly
-        # All of these are valid for loadfile append-play; signed URLs are preloaded only
-        # seconds before playback so expiry is not a concern at this timescale.
+        # Local .mpd files need per-file lavf options that loadfile append-play cannot
+        # pass portably; skip them to avoid silent demux failures.  Remote HTTPS URLs
+        # (both manifest and direct stream) work fine with loadfile append-play.
+        if url.endswith(".mpd") and os.path.isfile(url):
+            debug_log(f"gapless preload: local .mpd for {t.id}, skipping (no per-file lavf opts)")
+            return
         # Capture the current playlist-pos so we know when mpv advances past it.
         _cur_pp = self.mp.playlist_pos or 0
         self.mp.preload(url)

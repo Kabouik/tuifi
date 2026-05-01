@@ -62,18 +62,17 @@ class MPV:
             "--reset-on-next-file=no",
         ]
         if gapless:
-            # --gapless-audio=weak: decoder handoff without gap (falls back to tiny
-            # gap only on codec/samplerate mismatch between tracks).
-            # --prefetch-playlist=yes: mpv starts downloading the next playlist entry
-            # while the current track still plays — critical for zero-gap DASH.
-            # --demuxer-lavf-o / --ytdl=no: needed so preloaded local .mpd files
-            # (DASH manifests written to disk for /track/ API fallback) are opened
-            # correctly by any subsequent loadfile append-play call.
+            # --gapless-audio=weak: decoder handoff without gap; falls back to a tiny
+            # gap only when codec/samplerate differs between adjacent tracks.
+            # --prefetch-playlist=yes: mpv proactively downloads the next playlist entry
+            # while the current track plays — essential for zero-gap DASH streaming.
+            # NOTE: --demuxer-lavf-o and --ytdl=no are intentionally NOT set globally:
+            # they break remote HTTPS DASH manifest URLs by restricting lavf's format
+            # probing (allowed_extensions check) and disabling yt-dlp fallbacks.  They
+            # are only added for local .mpd files (see below).
             args += [
                 "--gapless-audio=weak",
                 "--prefetch-playlist=yes",
-                "--demuxer-lavf-o=allowed_extensions=MPD,m4s,mp4,aac,flac,mp3,frag",
-                "--ytdl=no",
             ]
         if not resume:
             args.append("--no-resume-playback")
@@ -81,14 +80,12 @@ class MPV:
             args.append(f"--start={start_pos:.1f}")
 
         is_mpd = isinstance(url, str) and url.endswith(".mpd") and os.path.isfile(url)
-        if is_mpd and not gapless:
-            # In non-gapless mode add DASH args per-file; in gapless they're global (above).
+        if is_mpd:
             args += [
                 "--demuxer-lavf-o=allowed_extensions=MPD,m4s,mp4,aac,flac,mp3,frag",
                 "--ytdl=no",
+                "--cache=no",
             ]
-        if is_mpd:
-            args.append("--cache=no")
 
         args.append(url)
 
@@ -186,6 +183,19 @@ class MPV:
         if isinstance(r, dict) and r.get("error") == "success":
             return r.get("data")
         return None
+
+    def replace(self, url: str) -> None:
+        """Replace the current file via IPC without restarting the process.
+
+        Only valid when mpv is alive (gapless mode).  Clears any preloaded
+        playlist entries, then issues ``loadfile url replace`` so mpv switches
+        immediately.  Resets the cached time_pos so callers can wait for a
+        fresh value from the new file.
+        """
+        self.playlist_clear()
+        self.cmd("loadfile", url, "replace")
+        with self._lock:
+            self.time_pos = None  # invalidate so probe loop waits for fresh data
 
     def preload(self, url: str) -> None:
         """Append *url* to mpv's internal playlist for gapless continuation.

@@ -6619,7 +6619,7 @@ class App:
             " F         track quality",
             " &         consider EPs and singles (for artist tab and downloads)",
             " |         desktop notifications on track change",
-            " G         gapless playback (DASH/lossless only; keep mpv alive between tracks)",
+            " _         gapless playback (DASH/lossless only; keep mpv alive between tracks)",
             " c/n       sideview modes (see also VIEW section)",
             "",
             "\x01 AUTOEXTEND MODES",
@@ -7483,7 +7483,7 @@ class App:
             ord("$"): lambda: self.toast("Download paused" if self.dl.toggle_pause() else "Download resumed"),
             ord("%"): lambda: (self.dl.cancel(), self.toast("Download queue cancelled")),
             ord("#"): self.show_download_queue_dialog,
-            ord("G"): lambda: self._toggle_gapless(),
+            ord("_"): lambda: self._toggle_gapless(),
         }
 
         while True:

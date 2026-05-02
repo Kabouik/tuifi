@@ -315,6 +315,7 @@ class App:
         self._mpv_last_pp: Optional[int] = None
         self._gapless_idle_since: Optional[float] = None
         self._current_track_seen_tp: bool = False  # True once time_pos seen for current track
+        self._play_start_time: Optional[float] = None  # wall time when play_track last succeeded
 
         self._init_curses()
 
@@ -1755,13 +1756,14 @@ class App:
                         debug_log(f"play_track: [TIMING] mp.start() for {t.id} took {(time.time()-_t_start)*1000:.0f}ms")
                         _used_replace = False
                 self._apply_mpv_prefs()
-                if is_dash:
-                    # Give mpv time to parse the MPD, hit the CDN, and buffer.
-                    # Poll up to 3 s; break early once time_pos is reported (playback running).
-                    # When using replace() the process stays alive even on failure.
+                if is_dash and not _used_replace:
+                    # New mpv process for DASH: poll up to 3 s for time_pos (playback start).
+                    # If mpv dies or times out, try lower quality.
+                    # When replace() was used, the process stays alive; _current_track_seen_tp
+                    # guards idle detection, so we skip the poll here and trust the main loop.
                     for _i in range(6):
                         time.sleep(0.5)
-                        if not _used_replace and not self.mp.alive():
+                        if not self.mp.alive():
                             debug_log(f"play_track: mpv died on DASH for {quality} after {(_i+1)*0.5:.1f}s — trying lower quality")
                             raise RuntimeError("dash playback failed")
                         if self.mp.snapshot()[0] is not None:
@@ -1793,8 +1795,10 @@ class App:
                 else:
                     self._next_shuffle_idx = None
                     self._shuffle_restore_next = None
-                # Update preview_next cursor to point at the next-to-play track
-                if (self._preview_next and self.tab == TAB_PLAYBACK
+                # Update preview_next cursor to point at the next-to-play track.
+                # Skipped on resume (start_pos > 1 s): keep cursor on the resuming track
+                # so the user can see what is actually playing when the app restores state.
+                if (start_pos <= 1.0 and self._preview_next and self.tab == TAB_PLAYBACK
                         and self.queue_overlay and self._album_cover_pane):
                     _nxt = self._preview_next_idx()
                     if 0 <= _nxt < len(self.queue_items):
@@ -1804,6 +1808,7 @@ class App:
                 self._last_played_track = t
                 self._last_played_duration = None  # will be updated by _on_mpv_tick
                 self.last_error = None
+                self._play_start_time = time.time()
                 # Set up gapless playlist map: this track is at mpv playlist position 0
                 # (replace() resets to a single-entry playlist; start() kills+restarts).
                 self._mpv_qi_map = [self.queue_play_idx]
@@ -2067,6 +2072,7 @@ class App:
         self._prefetch_trigger_id = None   # allow prefetch for the new current track
         self._gapless_idle_since = None
         self._current_track_seen_tp = True  # gapless advance: track was already playing
+        self._play_start_time = time.time()
 
         self._record_history(t)
         self.fetch_cover_async(t)
@@ -4109,7 +4115,7 @@ class App:
         elif self._lyrics_filter_q:
             title = f"[{self._lyrics_filter_q}] no match  f: re-filter  Esc: clear"
         else:
-            title = "Lyrics  j/k: scroll  f: filter  V: show/hide"
+            title = "Lyrics  j/k: scroll  f: filter  V: cycle view"
         self.stdscr.addstr(y, x, title[:w].ljust(w), self.C(4))
         lines = self.lyrics_lines or []
         inner_h = h - 1
@@ -7428,6 +7434,7 @@ class App:
             self.fetch_liked_async()
 
         # Auto-resume playback from last session if enabled and queue is populated.
+        _did_auto_resume = False
         if self.settings.get("auto_resume_playback") and self.queue_items and not self.mp.alive():
             _resume_idx = int(self.settings.get("_resume_queue_idx", self.queue_play_idx))
             _resume_pos = float(self.settings.get("_resume_position", 0.0))
@@ -7436,10 +7443,14 @@ class App:
             if _resume_pos > 1.0:
                 self.toast(f"Resumed from {fmt_time(_resume_pos)}")
             self.jump_to_playing_in_queue()
+            _did_auto_resume = True
 
         # If starting on the Playback tab with preview-next enabled, move the
-        # queue cursor to the next track (after any auto-resume has reset it).
-        if self.tab == TAB_PLAYBACK and self._preview_next and self.queue_overlay and self._album_cover_pane:
+        # queue cursor to the next track — but not during auto-resume, where the
+        # cursor should stay on the track that is actually playing/resuming.
+        if (not _did_auto_resume
+                and self.tab == TAB_PLAYBACK and self._preview_next
+                and self.queue_overlay and self._album_cover_pane):
             _nxt = self._preview_next_idx()
             if 0 <= _nxt < len(self.queue_items):
                 self.queue_cursor = _nxt
@@ -7654,7 +7665,8 @@ class App:
                 _has_ahead = len(self._mpv_qi_map) > (self._mpv_last_pp or 0) + 1
                 if _tp3 is None and _du3 is None and not _has_ahead and not self._prefetch_in_progress:
                     # Don't start the idle timer until we've seen at least one time_pos:
-                    # mpv can take 1–2 s to buffer a fresh URL, during which it looks idle.
+                    # mpv can take several seconds to buffer a fresh DASH URL (especially
+                    # hi_res_lossless FLAC), during which time_pos looks idle.
                     if self._current_track_seen_tp:
                         if self._gapless_idle_since is None:
                             self._gapless_idle_since = now
@@ -7665,6 +7677,16 @@ class App:
                             self._last_stream_quality = None
                             self.next_track()
                             self._full_redraw()
+                    elif (self._play_start_time is not None
+                            and now - self._play_start_time > 10.0):
+                        # Failsafe: DASH track never produced a time_pos in 10 s —
+                        # URL likely expired or unreachable; skip to next track.
+                        debug_log(f"play_start_time failsafe: no time_pos in 10 s, skipping")
+                        self._play_start_time = None
+                        self.current_track = None
+                        self._last_stream_quality = None
+                        self.next_track()
+                        self._full_redraw()
                 else:
                     self._gapless_idle_since = None
 

@@ -202,9 +202,9 @@ class MPV:
         the caller can fall back to ``start()``.
         """
         self.playlist_clear()  # best-effort; don't fail on this
-        # Use a longer timeout for loadfile: mpv may be mid-decode when it
-        # receives the command and takes slightly longer to respond.
-        ok = self.cmd("loadfile", url, "replace", "start=0", timeout=0.5)
+        # Use a generous timeout: mpv may be mid-decode of a large hi_res FLAC
+        # segment when it receives the command and can take >0.5 s to respond.
+        ok = self.cmd("loadfile", url, "replace", "start=0", timeout=1.5)
         if ok:
             with self._lock:
                 self.time_pos = None  # invalidate so probe loop waits for fresh data
@@ -219,14 +219,14 @@ class MPV:
         Only meaningful when the process was started with ``gapless=True``.
         Returns True iff mpv confirmed the append via IPC.
         """
-        ok = self.cmd("loadfile", url, "append", "start=0")
+        ok = self.cmd("loadfile", url, "append", "start=0", timeout=0.5)
         debug_log(f"mpv append: loadfile append {url[:80]!r} ok={ok}")
         return ok
 
     def playlist_next(self) -> bool:
         """Skip to the next entry in mpv's internal playlist (gapless skip).
         Returns True iff mpv confirmed the command via IPC."""
-        return self.cmd("playlist-next")
+        return self.cmd("playlist-next", timeout=0.5)
 
     def poll_once(self) -> None:
         if not self.alive():

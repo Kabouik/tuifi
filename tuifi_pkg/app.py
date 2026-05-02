@@ -7154,7 +7154,10 @@ class App:
             # redrawln marks those rows as physically corrupted so ncurses
             # rewrites each cell individually on the next refresh instead of
             # issuing ESC[S/ESC[T sequences that shift the sixel image.
-            self.stdscr.redrawln(top_h, usable_h)
+            try:
+                self.stdscr.redrawln(top_h, usable_h)
+            except curses.error:
+                pass
 
         # Persist offset so the mouse handler can compute correct queue click rows.
         self._album_cover_rows_offset = artist_cover_rows if queue_panel else 0
@@ -7166,7 +7169,10 @@ class App:
             if _cover_pane_active and self._album_cover_path:
                 _ar_rows = artist_cover_rows if queue_panel else usable_h
                 if _ar_rows > 0:
-                    self.stdscr.redrawln(top_h, _ar_rows)
+                    try:
+                        self.stdscr.redrawln(top_h, _ar_rows)
+                    except curses.error:
+                        pass
 
         # Synchronized output (DEC mode 2026): tells the terminal to buffer all
         # output until the ESU marker, presenting the entire frame atomically.
@@ -7239,8 +7245,11 @@ class App:
                     elif _cover_pane_active and self._album_cover_path:
                         _pane_wrote = self._render_album_cover_pane(top_h, artist_x, artist_pane_w, _render_h, skip_overflow_blank=queue_panel)
                         if _pane_wrote:
-                            self.stdscr.redrawln(0, top_h)
-                            self.stdscr.redrawln(h - status_h - 1, status_h + 1)
+                            try:
+                                self.stdscr.redrawln(0, top_h)
+                                self.stdscr.redrawln(h - status_h - 1, status_h + 1)
+                            except curses.error:
+                                pass
                             try:
                                 self.stdscr.move(curses.LINES - 1, curses.COLS - 1)
                             except curses.error:

@@ -108,14 +108,6 @@ I don't know if related, but I might have been running out of disk storage while
 ** Make sure the spectrum never overextends and alters the minicover. It should have reserved space and not expand beyond (maybe it is the case already, but do make sure).
 ** DONE In tab 0, when in landscape, everytime the lyrics are shown (with V or with clicking on the main cover to cycle modes), this pushes the maincover to the left a little bit and decrease its size. In fact, the main cover should use the maximal space and the lyrics should appear in the not used space, with padding/margin between maincover and lyrics, but without touching the maincover. And when the miniqueue is shown too (triple mode), then this padding should be reduced a bit (but not suppressed) by moving lyrics to the left a little bit, ad making them narrower (to leave space for miniqueue), but the maincover should remain untouched. Curently the cover gets pushed to the left (and therefore decreased in height too) whenever lyrics show. And when in portrait or square geometry, the lyrics should go below the maincover, and the miniqueue, when shown, should decrease the maincover width accordingly to get space for itself. Currently, in this square/portrait layout, the maincover overexpands over the miniqueue and minicover; this did not use to be the case: it was working in the commits before latest changes.
    :DONE: _cover_img_cols() now always returns height-based natural square (rows×2) on TAB_PLAYBACK landscape, stable across all layout modes; lyrics at cic+1 gap; triple mode takes space from lyrics not cover (app.py ~3775, ~7128)
-** In the help, I see this:
-#+begin_src 
-            " playback_tab_layout: default layout in tab 0",
-            "   values: \"lyrics\" (default), \"miniqueue\", \"miniqueue_cover\"",
-            " playback_tab_preview_next: sideview shows next track cover on tab 0 (toggle with n)",
-            "   (requires miniqueue + minicover pane; default: false)",
-#+end_src
-In fact, there should be a layout setting for triple mode too, right? i.e., miniqueue_lyrics and miniqueue_lyrics_cover
-Also, this should be the default.
-Also, preview_next should be default too, since we don't really need twice the same cover in the playback tab and we made miniqueue_cover_lyrics default.
+** DONE In the help, I see this:
+   :DONE: added lyrics_miniqueue and lyrics_miniqueue_minicover layout modes; latter is now default; preview_next defaults to true; miniqueue panel widened 44→46; 2-col min gap between cover and miniqueue; cover height now uses full available rows (persistence.py, app.py ~7339, ~3784, ~7012)
 ** When a dialog is open (such as help), autoadvance should still work.

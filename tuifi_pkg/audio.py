@@ -146,7 +146,11 @@ class MPV:
         return self.proc is not None and self.proc.poll() is None
 
     def _rpc(self, payload: Dict[str, Any], timeout: float = 0.10) -> Optional[Dict[str, Any]]:
-        if not self.sock_path or not os.path.exists(self.sock_path):
+        if not self.sock_path:
+            debug_log(f"_rpc: no sock_path for cmd={payload.get('command', ['?'])[0]!r}")
+            return None
+        if not os.path.exists(self.sock_path):
+            debug_log(f"_rpc: socket file missing: {self.sock_path} for cmd={payload.get('command', ['?'])[0]!r}")
             return None
         self._req_id += 1
         payload = dict(payload)
@@ -165,18 +169,22 @@ class MPV:
                 data += chunk
             s.close()
             if not data:
+                debug_log(f"_rpc: empty response for cmd={payload.get('command', ['?'])[0]!r}")
                 return None
             try:
                 return json.loads(data.decode("utf-8", "replace"))
             except json.JSONDecodeError:
                 return None
-        except Exception:
+        except Exception as _e:
+            debug_log(f"_rpc: socket error {type(_e).__name__}({_e}) for cmd={payload.get('command', ['?'])[0]!r}")
             return None
 
     def cmd(self, *args: Any, timeout: float = 0.10) -> bool:
         """Send a fire-and-forget IPC command.  Returns True iff mpv responded
         with ``{"error": "success"}``; False on socket failure or mpv error."""
         r = self._rpc({"command": list(args)}, timeout=timeout)
+        if r is not None and not (isinstance(r, dict) and r.get("error") == "success"):
+            debug_log(f"cmd: mpv error response for {args[0]!r}: {r}")
         return isinstance(r, dict) and r.get("error") == "success"
 
     def get(self, prop: str) -> Optional[Any]:
@@ -201,6 +209,7 @@ class MPV:
         Returns True if both IPC commands succeeded; False on any failure so
         the caller can fall back to ``start()``.
         """
+        debug_log(f"replace: alive={self.alive()} sock={self.sock_path!r} sock_exists={bool(self.sock_path and os.path.exists(self.sock_path))}")
         self.playlist_clear()  # best-effort; don't fail on this
         # Use a generous timeout: mpv may be mid-decode of a large hi_res FLAC
         # segment when it receives the command and can take >0.5 s to respond.

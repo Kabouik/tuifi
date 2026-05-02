@@ -1677,7 +1677,7 @@ class App:
         "stream unavailable", "missing manifest", "invalid /track",
         "manifest has no urls", "could not extract", "manifest decode",
         "non-json", "empty http", "403", "404", "not available",
-        "dash playback failed",
+        "dash playback failed", "not playable",
     )
 
     def _apply_mpv_prefs(self) -> None:

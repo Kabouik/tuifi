@@ -3772,10 +3772,32 @@ class App:
         ideal = w // 2           # square image assuming ~2:1 cell pixel ratio
         return max(4, min(ideal, usable - min_lyrics_h - gap))
 
-    def _cover_img_cols(self, w: int) -> int:
-        """Compute cover image display width accounting for side panels."""
+    def _cover_img_cols(self, w: int, h: int = 0) -> int:
+        """Compute cover image display width accounting for side panels.
+
+        On TAB_PLAYBACK landscape the cover is always sized as a natural square
+        (cols = rows × 2, height-based) regardless of whether lyrics or the
+        miniqueue are shown.  This keeps the render_key stable so toggling those
+        panels never triggers a chafa re-render or a cover-size change — lyrics
+        and miniqueue fill whatever horizontal space remains to the right.
+        """
+        if self.tab == TAB_PLAYBACK:
+            if not h:
+                try:
+                    h, _ = self.stdscr.getmaxyx()
+                except Exception:
+                    h = 40
+            if not self._cover_portrait(h, w):
+                top_h, status_h = 2, 2
+                img_rows = max(1, h - top_h - status_h - 1)
+                # Natural square: 2 terminal-cols per row (cells are ~0.5 pixel aspect ratio).
+                natural_w = img_rows * 2
+                # When the miniqueue is open (triple mode), cap cover at left_w so it
+                # never overextends into the miniqueue column.
+                max_w = (w - 44) if self.queue_overlay else (w - 1)
+                return max(1, min(max_w, natural_w))
+
         if self.queue_overlay and self.tab != TAB_QUEUE:
-            # 1-col gap between main cover and right panel (miniqueue / minicover / both).
             right_w = 45
         elif self._cover_lyrics:
             right_w = self._lyrics_panel_w(w)
@@ -3806,11 +3828,7 @@ class App:
             img_cols = min(w, img_rows * 2)
         else:
             img_rows = h - top_h - status_h - 1  # -1 matches _render_cover_image gap
-            img_cols = self._cover_img_cols(w)
-            # In lyrics+miniqueue mode cap to actual visual width so the cover
-            # (symbols fill the full allocated area) does not bleed into the lyrics panel.
-            if self._cover_lyrics and self.queue_overlay and self.tab == TAB_PLAYBACK:
-                img_cols = min(img_cols, img_rows * 2)
+            img_cols = self._cover_img_cols(w, h)  # pass h so lyrics mode uses height-based sizing
         if img_rows <= 0 or img_cols <= 0: return
         fmt = "kitty" if backend == "chafa-kitty" else ("sixel" if backend == "chafa" else "symbols")
         render_key = f"{path}:{img_cols}x{img_rows}:{fmt}"
@@ -3852,9 +3870,7 @@ class App:
             img_x = (w - img_cols) // 2
         else:
             img_rows = h - top_h - status_h - 1
-            img_cols = self._cover_img_cols(w)
-            if self._cover_lyrics and self.queue_overlay and self.tab == TAB_PLAYBACK:
-                img_cols = min(img_cols, img_rows * 2)
+            img_cols = self._cover_img_cols(w, h)  # height-based in lyrics mode
             img_x = 0
         if img_rows <= 0 or img_cols <= 0: return
 
@@ -7110,19 +7126,16 @@ class App:
                 self.toggle_lyrics(t_cov)
                 self.lyrics_overlay = False
             if queue_panel:
-                # lyrics+miniqueue mode: fill horizontal gap between cover image and miniqueue.
-                # The main cover is allocated left_w-1 cols but chafa renders at most usable_h*2
-                # cols wide (2:1 cell aspect ratio for square image), leaving empty space.
-                _cic = left_w - 1              # allocated cover cols (= _cover_img_cols(w) here)
-                _cover_vis_w = min(_cic, usable_h * 2)  # estimated actual rendered width
-                # Lyrics start immediately after the cover's visual edge (no extra margin
-                # taken from the cover), filling all space up to the miniqueue separator.
-                _lyr_x = _cover_vis_w
-                _lyr_w = left_w - _lyr_x - 1  # width between rendered cover and miniqueue
-                if _lyr_w >= 20:               # landscape: enough horizontal room for lyrics
+                # Triple mode (cover + lyrics + miniqueue).
+                # Cover is height-based (natural square), same width as lyrics-only mode.
+                # A 1-col gap separates cover from lyrics; miniqueue carves from lyrics width.
+                _cic = self._cover_img_cols(w, h)
+                _lyr_x = _cic + 1                  # 1-col gap between cover and lyrics
+                _lyr_w = left_w - _lyr_x - 1       # space up to miniqueue column
+                if _lyr_w >= 20:
                     self._draw_playback_lyrics_panel(top_h, _lyr_x, usable_h, _lyr_w)
-                else:                          # portrait/narrow: lyrics below the cover
-                    _cover_h = _cic // 2       # square cover height in the narrow left panel
+                else:                              # too narrow: fall back to lyrics below cover
+                    _cover_h = _cic // 2
                     _lyr_y = top_h + _cover_h + 1
                     _lyr_h = usable_h - _cover_h - 1
                     if _lyr_h >= 3:
@@ -7131,9 +7144,10 @@ class App:
                 cover_rows = self._cover_img_rows_portrait(h, w)
                 self._draw_playback_lyrics_panel(top_h + cover_rows, 0,
                                               usable_h - cover_rows - 1, w)
-            else:       # landscape: lyrics on the right
-                lyrics_w = self._lyrics_panel_w(w)
-                self._draw_playback_lyrics_panel(top_h, w - lyrics_w + 2, usable_h, lyrics_w - 2)
+            else:       # landscape: 1-col gap between cover and lyrics
+                _cic = self._cover_img_cols(w, h)
+                _lyr_x = _cic + 1
+                self._draw_playback_lyrics_panel(top_h, _lyr_x, usable_h, w - _lyr_x)
 
         if self.tab == TAB_PLAYBACK and self.cover_path and not _throttle_cover:
             # Prevent ncurses scroll-region optimisation for the content rows.

@@ -3777,7 +3777,7 @@ class App:
         remain.  Any space below the cover is handed to the lyrics panel."""
         usable = h - 2 - 2 - 1  # tab bar, status bar, bottom gap
         min_lyrics_h = 4         # 1 title bar + 3 content lines
-        gap = 1                  # blank row between lyrics panel and status bar
+        gap = 2                  # blank rows between cover and lyrics panel
         ideal = w // 2           # square image assuming ~2:1 cell pixel ratio
         return max(4, min(ideal, usable - min_lyrics_h - gap))
 
@@ -7153,7 +7153,7 @@ class App:
                         self._draw_playback_lyrics_panel(_lyr_y, 0, _lyr_h, left_w)
             elif self._cover_portrait(h, w):  # portrait: lyrics below the cover image
                 cover_rows = self._cover_img_rows_portrait(h, w)
-                self._draw_playback_lyrics_panel(top_h + cover_rows - 1, 0,
+                self._draw_playback_lyrics_panel(top_h + cover_rows, 0,
                                               usable_h - cover_rows, w)
             else:       # landscape: 1-col gap between cover and lyrics
                 _cic = self._cover_img_cols(w, h)

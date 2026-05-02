@@ -59,7 +59,7 @@ class MPV:
             "mpv", "--no-video", "--force-window=no", "--really-quiet",
             "--idle=yes" if gapless else "--idle=no",
             f"--input-ipc-server={self.sock_path}",
-            "--reset-on-next-file=no",
+            "--reset-on-next-file=start",  # reset --start per file; preserves other per-file opts
         ]
         if gapless:
             # --gapless-audio=weak: decoder handoff without gap; falls back to a tiny

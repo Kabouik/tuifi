@@ -7539,6 +7539,7 @@ class App:
             ord("e"): lambda: self.enqueue_key(insert_after_playing=False),
             ord("E"): lambda: self.enqueue_key(insert_after_playing=True),
             ord("r"): lambda: (setattr(self, "repeat_mode", (self.repeat_mode + 1) % 3),
+                               self._apply_mpv_prefs(),
                                self.toast(["Repeat: off", "Repeat: all", "Repeat: one"][self.repeat_mode])),
             ord("R"): lambda: _tog("show_track_duration", "Duration field: on", "Duration field: off"),
             ord("s"): lambda: _tog("shuffle_on", "Shuffle: on", "Shuffle: off"),

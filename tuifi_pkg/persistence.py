@@ -273,7 +273,7 @@ def load_settings() -> Dict[str, Any]:
     s.setdefault("autoextend", AUTOPLAY_OFF)    # off/mix/recommended
     s.setdefault("autoextend_n", 3)             # tracks added per autoextend refill
     s.setdefault("auto_resume_playback", True)  # resume last position on startup
-    s.setdefault("repeat_mode", 0)              # 0=off 1=queue 2=track
+    s.setdefault("repeat_mode", "off")          # off | all | one
     s.setdefault("shuffle_on", False)           # shuffle queue
 
     # -- UI chrome --

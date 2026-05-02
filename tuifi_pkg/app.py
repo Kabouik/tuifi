@@ -217,7 +217,8 @@ class App:
         self.marked_left_idx: set = set(); self.marked_queue_idx: set = set()
         self.priority_queue: List[int] = []
         self._queue_resume_idx: Optional[int] = None  # queue_play_idx to return to after priorities
-        self.repeat_mode = int(self.settings.get("repeat_mode", 0))
+        self.repeat_mode = {"off": 0, "all": 1, "one": 2}.get(
+            str(self.settings.get("repeat_mode", "off")), 0)
         self.shuffle_on = bool(self.settings.get("shuffle_on", False))
         self._next_shuffle_idx: Optional[int] = None  # pre-picked next track index when shuffle is on
         self.current_track: Optional[Track] = None; self.last_error: Optional[str] = None
@@ -800,7 +801,7 @@ class App:
             "include_singles_and_eps_in_artist_tab": self._show_singles_eps,
             "notify_on_track": self._notify_on_track,
             "playback_tab_preview_next": self._preview_next,
-            "repeat_mode": self.repeat_mode,
+            "repeat_mode": ["off", "all", "one"][self.repeat_mode],
             "shuffle_on": self.shuffle_on,
             "sideview": ("both" if (self._cava_pane and self._album_cover_pane)
                          else "spectrum" if self._cava_pane

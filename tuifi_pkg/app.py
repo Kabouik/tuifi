@@ -4662,7 +4662,9 @@ class App:
             h = max(1, y_max - y + 1)
         # Each bar takes 1 col; bars are separated by 1 col gap.
         # bars = (w + 1) // 2  (e.g. w=20 → 10 bars, w=21 → 11 bars)
-        bars = max(1, (w + 1) // 2)
+        # cava requires an even bar count for stereo output; round down to nearest even.
+        bars = max(2, (w + 1) // 2)
+        bars -= bars % 2
         self._cava_ensure_running(bars)
         if not self._cava or not self._cava.running:
             return
@@ -7151,8 +7153,8 @@ class App:
                         self._draw_playback_lyrics_panel(_lyr_y, 0, _lyr_h, left_w)
             elif self._cover_portrait(h, w):  # portrait: lyrics below the cover image
                 cover_rows = self._cover_img_rows_portrait(h, w)
-                self._draw_playback_lyrics_panel(top_h + cover_rows, 0,
-                                              usable_h - cover_rows - 1, w)
+                self._draw_playback_lyrics_panel(top_h + cover_rows - 1, 0,
+                                              usable_h - cover_rows, w)
             else:       # landscape: 1-col gap between cover and lyrics
                 _cic = self._cover_img_cols(w, h)
                 _lyr_x = _cic + 1

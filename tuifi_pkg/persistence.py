@@ -295,7 +295,7 @@ def load_settings() -> Dict[str, Any]:
 
     # -- Miscellaneous user preferences --
     s.setdefault("remember_last_input", False)     # prefill search/filter with last query within a session
-    s.setdefault("playback_tab_layout", "lyrics")  # right-pane layout: "lyrics", "cover", etc.
+    s.setdefault("playback_tab_layout", "lyrics_miniqueue_minicover")  # right-pane layout
     s.setdefault("cover_lyrics_color_pair", "default")  # color name; "default" = terminal default
 
     # -- Confirmation prompts when switching to a tab that already has content --
@@ -354,7 +354,7 @@ def save_settings(s: Dict[str, Any]) -> None:
     _hints: Dict[str, str] = {
         "quality":             "HI_RES_LOSSLESS | LOSSLESS | HIGH | LOW",
         "autoextend":          "off | mix | recommended",
-        "playback_tab_layout": "lyrics | miniqueue | miniqueue_cover",
+        "playback_tab_layout": "lyrics | lyrics_miniqueue | lyrics_miniqueue_minicover | miniqueue | miniqueue_cover",
         "download_structure":  "placeholders: {artist} {album} {year}",
         "download_filename":   "placeholders: {track:02d} {artist} {title} {album} {year}",
         "tsv_max_col_width":   "fallback max width when a column has no specific limit; 0=unlimited",

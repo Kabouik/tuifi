@@ -256,7 +256,7 @@ class App:
         self._last_cava_draw: float = 0.0  # throttle: time of last cava pane draw
         self._cava_only_redraw: bool = False  # fast path: redraw cava bars only
         self._cava_pane_geom: Optional[tuple] = None  # (y,x,h,w) cached from last full draw
-        self._preview_next: bool = bool(self.settings.get("playback_tab_preview_next", False))
+        self._preview_next: bool = bool(self.settings.get("playback_tab_preview_next", True))
         self._album_cover_item_key: str = ""   # "a:{album_id}" or "t:{track_id}"
         self._album_cover_path: Optional[str] = None
         self._album_cover_loading: bool = False
@@ -807,7 +807,7 @@ class App:
             "autoextend_n": self.autoplay_n,
             "history_max": int(self.settings.get("history_max", 0) or 0),
             "auto_resume_playback": bool(self.settings.get("auto_resume_playback", False)),
-            "playback_tab_layout": str(self.settings.get("playback_tab_layout", "lyrics")),
+            "playback_tab_layout": str(self.settings.get("playback_tab_layout", "lyrics_miniqueue_minicover")),
             "cover_lyrics_color_pair": self.settings.get("cover_lyrics_color_pair", "default"),
             "recommended_tab_no_confirm_refetch": bool(self.settings.get("recommended_tab_no_confirm_refetch", False)),
             "mix_tab_no_confirm_refetch": bool(self.settings.get("mix_tab_no_confirm_refetch", False)),
@@ -3789,16 +3789,16 @@ class App:
                     h = 40
             if not self._cover_portrait(h, w):
                 top_h, status_h = 2, 2
-                img_rows = max(1, h - top_h - status_h - 1)
+                img_rows = max(1, h - top_h - status_h)
                 # Natural square: 2 terminal-cols per row (cells are ~0.5 pixel aspect ratio).
                 natural_w = img_rows * 2
-                # When the miniqueue is open (triple mode), cap cover at left_w so it
-                # never overextends into the miniqueue column.
-                max_w = (w - 44) if self.queue_overlay else (w - 1)
+                # When the miniqueue is open, cap cover at (left_w - 2) so there is always
+                # a minimum 2-col visual gap before the miniqueue/minicover panel.
+                max_w = (w - 48) if self.queue_overlay else (w - 1)
                 return max(1, min(max_w, natural_w))
 
         if self.queue_overlay and self.tab != TAB_QUEUE:
-            right_w = 45
+            right_w = 47
         elif self._cover_lyrics:
             right_w = self._lyrics_panel_w(w)
         else:
@@ -3827,7 +3827,7 @@ class App:
             img_rows = self._cover_img_rows_portrait(h, w)
             img_cols = min(w, img_rows * 2)
         else:
-            img_rows = h - top_h - status_h - 1  # -1 matches _render_cover_image gap
+            img_rows = h - top_h - status_h
             img_cols = self._cover_img_cols(w, h)  # pass h so lyrics mode uses height-based sizing
         if img_rows <= 0 or img_cols <= 0: return
         fmt = "kitty" if backend == "chafa-kitty" else ("sixel" if backend == "chafa" else "symbols")
@@ -3869,7 +3869,7 @@ class App:
             img_cols = min(w, img_rows * 2)
             img_x = (w - img_cols) // 2
         else:
-            img_rows = h - top_h - status_h - 1
+            img_rows = h - top_h - status_h
             img_cols = self._cover_img_cols(w, h)  # height-based in lyrics mode
             img_x = 0
         if img_rows <= 0 or img_cols <= 0: return
@@ -6736,9 +6736,9 @@ class App:
             " Playback tab:",
             " sideview: side pane mode on startup: cover (default), both, spectrum (kitty), off (toggle with c)",
             " playback_tab_layout: default layout in tab 0",
-            "   values: \"lyrics\" (default), \"miniqueue\", \"miniqueue_cover\"",
+            "   values: \"lyrics_miniqueue_minicover\" (default), \"lyrics_miniqueue\", \"lyrics\", \"miniqueue\", \"miniqueue_cover\"",
             " playback_tab_preview_next: sideview shows next track cover on tab 0 (toggle with n)",
-            "   (requires miniqueue + minicover pane; default: false)",
+            "   (requires miniqueue + minicover pane; default: true)",
             "",
             " Download file structure:",
             " download_dir (Linux default: /tmp/tuifi/)",
@@ -7009,7 +7009,7 @@ class App:
         # When TAB_QUEUE is active the queue fills the full left panel; don't also
         # draw it as a right-side overlay (that would show the queue twice).
         queue_panel = self.queue_overlay and self.tab != TAB_QUEUE
-        left_w = w if not queue_panel else max(20, w - 44)
+        left_w = w if not queue_panel else max(20, w - 46)
 
         # Side cover/cava pane: works on all tabs.
         # When the miniqueue is also shown, share its right column (cover/cava on top, queue below).
@@ -7337,9 +7337,17 @@ class App:
             self.playlist_view_name = None
             self.playlist_view_tracks = []
         elif t == TAB_PLAYBACK:
-            _layout = self.settings.get("playback_tab_layout", "lyrics")
+            _layout = self.settings.get("playback_tab_layout", "lyrics_miniqueue_minicover")
             if _layout == "lyrics":
                 self._cover_lyrics = True
+            elif _layout == "lyrics_miniqueue":
+                self._cover_lyrics = True
+                self.queue_overlay = True
+            elif _layout in ("lyrics_miniqueue_minicover", "lyrics_miniqueue_cover"):
+                self._cover_lyrics = True
+                self.queue_overlay = True
+                self._album_cover_pane = True
+                self.settings["sideview"] = "cover"
             elif _layout == "miniqueue":
                 self._cover_lyrics = False
                 self.queue_overlay = True

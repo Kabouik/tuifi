@@ -3777,8 +3777,8 @@ class App:
         remain.  Any space below the cover is handed to the lyrics panel."""
         usable = h - 2 - 2 - 1  # tab bar, status bar, bottom gap
         min_lyrics_h = 4         # 1 title bar + 3 content lines
-        gap = 2                  # blank rows between cover and lyrics panel
-        ideal = w // 2           # square image assuming ~2:1 cell pixel ratio
+        gap = 1                  # blank row between cover image and lyrics panel
+        ideal = w // 2 - 1      # 1 row shorter than square so lyrics start 1 row earlier
         return max(4, min(ideal, usable - min_lyrics_h - gap))
 
     def _cover_img_cols(self, w: int, h: int = 0) -> int:

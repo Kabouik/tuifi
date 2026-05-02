@@ -212,7 +212,9 @@ class MPV:
         self.playlist_clear()  # best-effort; don't fail on this
         # Use a generous timeout: mpv may be mid-decode of a large hi_res FLAC
         # segment when it receives the command and can take >0.5 s to respond.
-        ok = self.cmd("loadfile", url, "replace", timeout=1.5)
+        # mpv 0.38+ requires: loadfile <url> <flags> <index> [<options>]
+        # Pass index=0 as placeholder so the per-file "start=0" option is accepted.
+        ok = self.cmd("loadfile", url, "replace", 0, "start=0", timeout=1.5)
         if ok:
             with self._lock:
                 self.time_pos = None  # invalidate so probe loop waits for fresh data
@@ -226,7 +228,10 @@ class MPV:
         Only meaningful when the process was started with ``gapless=True``.
         Returns True iff mpv confirmed the append via IPC.
         """
-        ok = self.cmd("loadfile", url, "append", timeout=0.5)
+        # index=-1 appends to end; per-file "start=0" forces playback from the
+        # beginning regardless of DASH manifest time reference (prevents stale
+        # manifests from starting mid-track when mpv advances gaplessly).
+        ok = self.cmd("loadfile", url, "append", -1, "start=0", timeout=0.5)
         debug_log(f"mpv append: loadfile append {url[:80]!r} ok={ok}")
         return ok
 

@@ -228,10 +228,11 @@ class MPV:
         Only meaningful when the process was started with ``gapless=True``.
         Returns True iff mpv confirmed the append via IPC.
         """
-        # index=-1 appends to end; per-file "start=0" forces playback from the
-        # beginning regardless of DASH manifest time reference (prevents stale
-        # manifests from starting mid-track when mpv advances gaplessly).
-        ok = self.cmd("loadfile", url, "append", -1, "start=0", timeout=0.5)
+        # index=-1 appends to end of playlist.
+        # NOTE: do NOT pass "start=0" here — it causes mpv to seek after the
+        # gapless decoder handoff, discarding pre-buffered audio and breaking
+        # the seamless transition for DASH streams.
+        ok = self.cmd("loadfile", url, "append", -1, timeout=0.5)
         debug_log(f"mpv append: loadfile append {url[:80]!r} ok={ok}")
         return ok
 

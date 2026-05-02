@@ -6141,6 +6141,9 @@ class App:
                         self.meta.want(it.id)
 
         pq_set = {qi: pos+1 for pos, qi in enumerate(self.priority_queue)}
+        _gl_pp = self._mpv_last_pp if self._mpv_last_pp is not None else 0
+        _gl_cached = {self._mpv_qi_map[p] for p in range(_gl_pp + 1, len(self._mpv_qi_map))}
+        _gl_caching = self._prefetch_trigger_id if self._prefetch_in_progress else None
 
         # Playback tab: leave content area blank for image; show status/hint text only
         if typ == "playback_tab":
@@ -6201,6 +6204,12 @@ class App:
                     elif playing and pa2:
                         self.stdscr.addstr(yy, x, " ", base_attr2)
                         self.stdscr.addstr(yy, x + 1, "⏸", base_attr2 | self.C(2))
+                    elif i in _gl_cached:
+                        self.stdscr.addstr(yy, x, " ", base_attr2)
+                        self.stdscr.addstr(yy, x + 1, "●", base_attr2 | self.C(4))
+                    elif _gl_caching is not None and it.id == _gl_caching:
+                        self.stdscr.addstr(yy, x, " ", base_attr2)
+                        self.stdscr.addstr(yy, x + 1, "○", base_attr2 | self.C(4))
                     else:
                         self.stdscr.addstr(yy, x, "  ", base_attr2)
                     self._draw_track_line(yy, x + 2, max(0, w - 2), it, selected=selected,
@@ -6462,6 +6471,9 @@ class App:
         tp, du, pa, vo, mu = self.mp.snapshot()
         alive = self.mp.alive()
         pq_set = {qi: pos+1 for pos, qi in enumerate(self.priority_queue)}
+        _gl_pp_q = self._mpv_last_pp if self._mpv_last_pp is not None else 0
+        _gl_cached_q = {self._mpv_qi_map[p] for p in range(_gl_pp_q + 1, len(self._mpv_qi_map))}
+        _gl_caching_q = self._prefetch_trigger_id if self._prefetch_in_progress else None
 
         for row in range(h):
             i = q_scroll + row
@@ -6473,7 +6485,16 @@ class App:
             base_attr = curses.A_REVERSE if selected else 0
             ct = self.current_track
             playing = alive and ct is not None and ct.id == t.id and i == self.queue_play_idx
-            pfx_sym, pfx_color = ("▶", self.C(1)) if (playing and not pa) else ("⏸", self.C(2)) if (playing and pa) else ("", 0)
+            if playing and not pa:
+                pfx_sym, pfx_color = "▶", self.C(1)
+            elif playing and pa:
+                pfx_sym, pfx_color = "⏸", self.C(2)
+            elif i in _gl_cached_q:
+                pfx_sym, pfx_color = "●", self.C(4)
+            elif _gl_caching_q is not None and t.id == _gl_caching_q:
+                pfx_sym, pfx_color = "○", self.C(4)
+            else:
+                pfx_sym, pfx_color = "", 0
 
             offs = self._draw_line_no(yy, x, i + 1, w) if self.show_line_numbers else 0
             px = x + offs

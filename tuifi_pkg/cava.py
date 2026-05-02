@@ -10,6 +10,8 @@ import tempfile
 import threading
 from typing import Any, Dict, List, Optional
 
+from tuifi_pkg.models import debug_log
+
 
 _CAVA_CFG_TEMPLATE = """\
 [general]
@@ -91,11 +93,12 @@ class CavaReader:
         except OSError:
             return False
 
+        from tuifi_pkg.models import _DEBUG_LOG
         try:
             self._proc = subprocess.Popen(
                 ["cava", "-p", self._cfg_path],
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.PIPE if _DEBUG_LOG else subprocess.DEVNULL,
             )
         except Exception:
             return False
@@ -107,12 +110,17 @@ class CavaReader:
 
     def stop(self) -> None:
         self.running = False
-        if self._proc:
+        proc = self._proc
+        self._proc = None
+        if proc:
             try:
-                self._proc.kill()
+                proc.kill()
             except Exception:
                 pass
-            self._proc = None
+            try:
+                proc.wait(timeout=2.0)
+            except Exception:
+                pass
         # Clean up FIFO so next start() creates a fresh one
         try:
             os.unlink(self._fifo_path)
@@ -140,6 +148,21 @@ class CavaReader:
                     normalised = [v / self._FRAME_MAX for v in vals]
                     with self._lock:
                         self._values = normalised
-        except Exception:
-            pass
+        except Exception as e:
+            debug_log(f"cava _read_loop: exception: {e}")
+        # cava exited or FIFO broke — reap the process and log stderr if available
         self.running = False
+        proc = self._proc
+        if proc is not None:
+            try:
+                rc = proc.wait(timeout=2.0)
+                debug_log(f"cava exited with code {rc}")
+                if proc.stderr:
+                    try:
+                        err = proc.stderr.read().decode("utf-8", "replace").strip()
+                        if err:
+                            debug_log(f"cava stderr: {err[:400]}")
+                    except Exception:
+                        pass
+            except Exception as e:
+                debug_log(f"cava wait error: {e}")

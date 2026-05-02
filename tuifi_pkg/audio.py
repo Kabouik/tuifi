@@ -202,9 +202,8 @@ class MPV:
 
         Only valid when mpv is alive (gapless mode).  Clears any ahead-queued
         playlist entries, then issues ``loadfile url replace`` so mpv switches
-        immediately.  Per-file option ``start=0`` overrides any ``--start``
-        offset that ``--reset-on-next-file=no`` would otherwise carry over.
-        Resets the cached time_pos so callers can wait for a fresh value.
+        immediately.  Resets the cached time_pos so callers can wait for a
+        fresh value.
 
         Returns True if both IPC commands succeeded; False on any failure so
         the caller can fall back to ``start()``.
@@ -213,7 +212,7 @@ class MPV:
         self.playlist_clear()  # best-effort; don't fail on this
         # Use a generous timeout: mpv may be mid-decode of a large hi_res FLAC
         # segment when it receives the command and can take >0.5 s to respond.
-        ok = self.cmd("loadfile", url, "replace", "start=0", timeout=1.5)
+        ok = self.cmd("loadfile", url, "replace", timeout=1.5)
         if ok:
             with self._lock:
                 self.time_pos = None  # invalidate so probe loop waits for fresh data
@@ -223,12 +222,11 @@ class MPV:
         """Append *url* to mpv's internal playlist for gapless continuation.
 
         mpv will start playing it automatically when the current file ends,
-        using the gapless decoder handoff if codecs allow.  Per-file option
-        ``start=0`` prevents any inherited ``--start`` offset.
+        using the gapless decoder handoff if codecs allow.
         Only meaningful when the process was started with ``gapless=True``.
         Returns True iff mpv confirmed the append via IPC.
         """
-        ok = self.cmd("loadfile", url, "append", "start=0", timeout=0.5)
+        ok = self.cmd("loadfile", url, "append", timeout=0.5)
         debug_log(f"mpv append: loadfile append {url[:80]!r} ok={ok}")
         return ok
 

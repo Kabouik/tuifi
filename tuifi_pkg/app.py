@@ -4820,9 +4820,9 @@ class App:
                     self.stdscr.addch(y + row, gap_col, " ")
                 except curses.error:
                     pass
-        # Park the cursor away from the pane so it doesn't appear at the spectrum edge
+        # Park the cursor on the '?' help button so it blends in
         try:
-            self.stdscr.move(curses.LINES - 1, curses.COLS - 1)
+            self.stdscr.move(*(self._help_btn_pos or (curses.LINES - 1, curses.COLS - 1)))
         except curses.error:
             pass
 
@@ -7385,7 +7385,7 @@ class App:
                                 self.stdscr.redrawln(0, top_h)
                                 self.stdscr.redrawln(h - status_h - 1, status_h + 1)
                                 try:
-                                    self.stdscr.move(curses.LINES - 1, curses.COLS - 1)
+                                    self.stdscr.move(*(self._help_btn_pos or (curses.LINES - 1, curses.COLS - 1)))
                                 except curses.error:
                                     pass
                                 self.stdscr.refresh()
@@ -7408,7 +7408,7 @@ class App:
                             except curses.error:
                                 pass
                             try:
-                                self.stdscr.move(curses.LINES - 1, curses.COLS - 1)
+                                self.stdscr.move(*(self._help_btn_pos or (curses.LINES - 1, curses.COLS - 1)))
                             except curses.error:
                                 pass
                             self.stdscr.refresh()

@@ -7052,12 +7052,14 @@ class App:
                     and self._cava and self._cava.running):
                 _cy, _cx, _ch, _cw = self._cava_pane_geom
                 self._draw_cava_pane(_cy, _cx, _ch, _cw)
-                sys.stdout.buffer.write(b"\033[?2026h")
+                # Hide cursor BEFORE the refresh so ncurses cursor-movement
+                # sequences during refresh() don't produce visible flicker.
+                sys.stdout.buffer.write(b"\x1b[?25l\033[?2026h")
                 sys.stdout.buffer.flush()
                 try:
                     self.stdscr.refresh()
                 finally:
-                    sys.stdout.buffer.write(b"\033[?2026l")
+                    sys.stdout.buffer.write(b"\x1b[?25l\033[?2026l")
                     sys.stdout.buffer.flush()
             return
 
@@ -7334,7 +7336,9 @@ class App:
         # Synchronized output (DEC mode 2026): tells the terminal to buffer all
         # output until the ESU marker, presenting the entire frame atomically.
         # Harmless on terminals that don't support it (unknown sequences ignored).
-        sys.stdout.buffer.write(b"\033[?2026h")
+        # Hide cursor first so ncurses cursor-movement sequences emitted during
+        # refresh() don't produce a visible flash on terminals without sync support.
+        sys.stdout.buffer.write(b"\x1b[?25l\033[?2026h")
         sys.stdout.buffer.flush()
         try:
             try:
@@ -7413,7 +7417,7 @@ class App:
                                 pass
                             self.stdscr.refresh()
         finally:
-            sys.stdout.buffer.write(b"\033[?2026l")
+            sys.stdout.buffer.write(b"\x1b[?25l\033[?2026l")
             sys.stdout.buffer.flush()
 
         # Cover rendering was deferred this frame (debounce window still open).

@@ -5849,7 +5849,12 @@ class App:
         if self.queue_overlay and self.tab != TAB_QUEUE:
             items: List[Any] = self.queue_items
         else:
-            _typ, items = self._left_items()
+            _was_loading = self._loading
+            self._loading = False
+            try:
+                _typ, items = self._left_items()
+            finally:
+                self._loading = _was_loading
         for i, it in enumerate(items):
             if isinstance(it, Track):
                 dv = self._track_duration(it)
@@ -6540,6 +6545,29 @@ class App:
             offs = self._draw_line_no(yy, x, i + 1, w) if self.show_line_numbers else 0
             self.stdscr.addstr(yy, x + offs, str(it)[:max(0, w - offs - 1)].ljust(max(0, w - offs - 1)),
                                curses.A_REVERSE if selected else 0)
+
+        # Second pass: apply accent highlight to filter-hit rows (non-selected items).
+        # chgat overwrites the attribute of already-rendered characters, preserving content
+        # but changing their color/style.  Runs only when a filter is active.
+        if self.filter_q.strip() and self.filter_hits:
+            _fh_set = set(self.filter_hits)
+            _hit_attr = self.C(5) | curses.A_BOLD
+            for row in range(h):
+                i = self.left_scroll + row
+                if i >= n:
+                    break
+                if i not in _fh_set:
+                    continue
+                yy = y + row
+                if typ == "queue_tab":
+                    _sel = (i == self.queue_cursor)
+                else:
+                    _sel = (not self._queue_context() and i == self.left_idx)
+                if not _sel:
+                    try:
+                        self.stdscr.chgat(yy, x, w, _hit_attr)
+                    except curses.error:
+                        pass
 
     def _queue_title(self) -> str:
         if not self.queue_items:
@@ -7377,16 +7405,23 @@ class App:
                         if queue_panel:
                             _c_h = _cover_rows_base
                             _s_h = max(1, _spec_rows_stacked - 1)
+                            _gap = 1
                         else:
                             _c_h = max(3, (_render_h - 1) * 2 // 3)
-                            _s_h = max(1, _render_h - _c_h - 1)
-                        _s_y = top_h + _c_h + 1
+                            # Use a 2-row gap (instead of 1) when no miniqueue is shown.
+                            # The extra row absorbs sixel/chafa pixel-band overflow that can
+                            # bleed into the spectrum area and cause the cover to appear shifted.
+                            _gap = 2
+                            _s_h = max(1, _render_h - _c_h - _gap)
+                        _s_y = top_h + _c_h + _gap
                         # Cap spectrum width to the approximate visual width of a square cover
                         # (terminal cells are ~2:1 tall:wide, so a square image at _c_h rows
                         # renders at most _c_h*2 cols; beyond that chafa letterboxes).
                         _spec_w = min(artist_pane_w, max(3, _c_h * 2))
                         if _c_h > 0 and self._album_cover_path:
-                            _pane_wrote = self._render_album_cover_pane(top_h, artist_x, artist_pane_w, _c_h, skip_overflow_blank=True)
+                            # With no miniqueue the gap rows are free space; write the
+                            # overflow blank to clear any sixel/chafa pixel-band bleed.
+                            _pane_wrote = self._render_album_cover_pane(top_h, artist_x, artist_pane_w, _c_h, skip_overflow_blank=queue_panel)
                             if _pane_wrote:
                                 self.stdscr.redrawln(0, top_h)
                                 self.stdscr.redrawln(h - status_h - 1, status_h + 1)
@@ -9230,7 +9265,7 @@ def parse_args(argv: List[str]) -> Dict[str, Any]:
 
         if a in ("-h", "--help"):
             print(
-                f"Usage: {argv[0]} [options]\n"
+                f"Usage: tuifi [options]\n"
                 "\n"
                 "Options:\n"
                 "  --api URL, -a URL        TIDAL HiFi API base URL (can also be set in settings.jsonc)\n"

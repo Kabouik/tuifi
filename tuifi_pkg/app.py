@@ -7301,8 +7301,11 @@ class App:
                         self._draw_playback_lyrics_panel(_lyr_y, 0, _lyr_h, left_w)
             elif self._cover_portrait(h, w):  # portrait: lyrics below the cover image
                 cover_rows = self._cover_img_rows_portrait(h, w)
-                self._draw_playback_lyrics_panel(top_h + cover_rows, 0,
-                                              usable_h - cover_rows, w)
+                # Start 1 row into the gap reserved by _cover_img_rows_portrait
+                # (gap=1 in the cap formula) so there is only 1 blank row between
+                # the cover image and the lyrics title bar instead of 2.
+                self._draw_playback_lyrics_panel(top_h + cover_rows - 1, 0,
+                                              usable_h - cover_rows + 1, w)
             else:       # landscape: 1-col gap between cover and lyrics
                 _cic = self._cover_img_cols(w, h)
                 _lyr_x = _cic + 1

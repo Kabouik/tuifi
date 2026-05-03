@@ -1760,21 +1760,8 @@ class App:
                         debug_log(f"play_track: [TIMING] mp.start() for {t.id} took {(time.time()-_t_start)*1000:.0f}ms")
                         _used_replace = False
                 self._apply_mpv_prefs()
-                if is_dash and not _used_replace:
-                    # New mpv process for DASH: poll up to 3 s for time_pos (playback start).
-                    # If mpv dies or times out, try lower quality.
-                    # When replace() was used, the process stays alive; _current_track_seen_tp
-                    # guards idle detection, so we skip the poll here and trust the main loop.
-                    for _i in range(6):
-                        time.sleep(0.5)
-                        if not self.mp.alive():
-                            debug_log(f"play_track: mpv died on DASH for {quality} after {(_i+1)*0.5:.1f}s — trying lower quality")
-                            raise RuntimeError("dash playback failed")
-                        if self.mp.snapshot()[0] is not None:
-                            break
-                    else:
-                        debug_log(f"play_track: DASH timed out (3s) for {quality} — trying lower quality")
-                        raise RuntimeError("dash playback failed")
+                # The main loop's 10 s _play_start_time failsafe handles the case
+                # where DASH playback never starts (process dies or URL unreachable).
                 # Bail if superseded after start; the newer thread's mp.start() will
                 # have already called stop() on our proc via its own start sequence
                 if _my_serial != self._play_serial:
@@ -1813,6 +1800,15 @@ class App:
                 self._last_played_duration = None  # will be updated by _on_mpv_tick
                 self.last_error = None
                 self._play_start_time = time.time()
+                debug_log(
+                    f"play_track: [START] track={t.id!r} title={t.title!r}"
+                    f" method={'replace' if _replace_ok else 'start'}"
+                    f" precached={_pf_url is not None}"
+                    f" is_dash={is_dash}"
+                    f" quality={quality}"
+                    f" start_pos={start_pos:.2f}"
+                    f" qi_map_before={self._mpv_qi_map}"
+                )
                 # Set up gapless playlist map: this track is at mpv playlist position 0
                 # (replace() resets to a single-entry playlist; start() kills+restarts).
                 self._mpv_qi_map = [self.queue_play_idx]
@@ -2026,8 +2022,7 @@ class App:
         except Exception as e:
             debug_log(f"prefetch: failed for {t.id}: {e}")
             self._prefetch_next = None
-        finally:
-            self._prefetch_in_progress = False
+        # _prefetch_in_progress stays True; cleared by _prefetch_and_gapless_append's finally.
 
     def _on_gapless_advance(self, t: "Track", queue_idx: int) -> None:
         """Called when mpv's internal playlist has advanced to a preloaded track.
@@ -2072,9 +2067,29 @@ class App:
         self._last_played_track = t
         self._last_played_duration = None
         self.last_error = None
-        self._prefetch_trigger_id = None   # allow prefetch for the new current track
+        # Allow prefetch for the new current track — but only if the next track is
+        # NOT already queued in mpv's playlist, AND no prefetch worker is currently
+        # in flight.  If a worker is running, leave _prefetch_trigger_id alone: the
+        # worker will either complete (keeping trigger set → no duplicate) or bail via
+        # the stale guard (which resets trigger to None → main loop fires a fresh one).
+        if self._prefetch_in_progress:
+            # Worker in flight — don't touch _prefetch_trigger_id.
+            pass
+        else:
+            # (_mpv_last_pp was already updated to the new pp by the main loop before
+            # calling us, so _next_mpv_pp is the slot right after the current track.)
+            _next_mpv_pp = self._mpv_last_pp + 1 if self._mpv_last_pp is not None else 1
+            if _next_mpv_pp < len(self._mpv_qi_map):
+                _ahead_qi = self._mpv_qi_map[_next_mpv_pp]
+                if 0 <= _ahead_qi < len(self.queue_items):
+                    self._prefetch_trigger_id = self.queue_items[_ahead_qi].id
+                    debug_log(f"gapless: [ADVANCE] next track already queued at mpv_pp={_next_mpv_pp} qi={_ahead_qi}, keeping trigger_id")
+                else:
+                    self._prefetch_trigger_id = None
+            else:
+                self._prefetch_trigger_id = None  # nothing ahead yet; allow fresh prefetch
         self._gapless_idle_since = None
-        self._current_track_seen_tp = True  # gapless advance: track was already playing
+        self._current_track_seen_tp = False  # DASH tracks need buffering; wait for first time_pos
         self._play_start_time = time.time()
 
         self._record_history(t)
@@ -2082,7 +2097,16 @@ class App:
         if self._notify_on_track:
             self._bg(lambda _t=t: self._send_track_notification(_t), on_error="")
         self._autoplay_maybe_enqueue()
-        debug_log(f"gapless: [TIMING] advanced to track {t.id} '{t.title}' qi={queue_idx} at t={time.time():.3f}")
+        _snap_tp, _snap_du, *_ = self.mp.snapshot()
+        debug_log(
+            f"gapless: [ADVANCE] track={t.id!r} title={t.title!r}"
+            f" qi={queue_idx}"
+            f" qi_map={self._mpv_qi_map}"
+            f" mpv_pp={self.mp.playlist_pos}"
+            f" time_pos={_snap_tp}"
+            f" duration={_snap_du}"
+            f" t={time.time():.3f}"
+        )
 
     def _prefetch_and_gapless_append(self, t: "Track", start_qi: int,
                                      nxt_queue_idx: int) -> None:
@@ -2091,26 +2115,41 @@ class App:
 
         This allows mpv to use --prefetch-playlist to buffer the next file while
         the current one is still playing, achieving truly gapless transitions.
+        _prefetch_in_progress stays True for the entire lifetime of this function
+        so the main loop cannot launch a second concurrent worker.
         """
-        self._prefetch_next_url(t, start_qi)  # sets _prefetch_next, clears _prefetch_in_progress
-        pf = self._prefetch_next
-        if not pf:
-            debug_log("gapless append: no prefetch result, skipping")
-            return
-        url = pf["url"]
-        # Local .mpd files need per-file lavf options that loadfile append cannot
-        # pass portably; skip them. Remote HTTPS DASH manifest URLs work fine.
-        if url.endswith(".mpd") and os.path.isfile(url):
-            debug_log(f"gapless append: local .mpd for {t.id}, skipping (no per-file lavf opts)")
-            return
-        if not self.mp.alive():
-            debug_log("gapless append: mpv not alive, skipping")
-            return
-        if self.mp.append(url):
-            self._mpv_qi_map.append(nxt_queue_idx)
-            debug_log(f"gapless append: track {t.id} → mpv pos {len(self._mpv_qi_map)-1} qi={nxt_queue_idx}")
-        else:
-            debug_log(f"gapless append: IPC failed for track {t.id}, skipping qi-map extension")
+        # Capture queue position at launch; bail if the user skipped elsewhere
+        # before the URL was fetched and the append issued.
+        _expected_play_idx = self.queue_play_idx
+        try:
+            self._prefetch_next_url(t, start_qi)  # sets _prefetch_next
+            pf = self._prefetch_next
+            if not pf:
+                debug_log("gapless append: no prefetch result, skipping")
+                return
+            url = pf["url"]
+            # Local .mpd files need per-file lavf options that loadfile append cannot
+            # pass portably; skip them. Remote HTTPS DASH manifest URLs work fine.
+            if url.endswith(".mpd") and os.path.isfile(url):
+                debug_log(f"gapless append: local .mpd for {t.id}, skipping (no per-file lavf opts)")
+                return
+            if not self.mp.alive():
+                debug_log("gapless append: mpv not alive, skipping")
+                return
+            # Stale-guard: if the user skipped to a different track while we were
+            # fetching the URL, our result belongs to the old context — discard it.
+            if self.queue_play_idx != _expected_play_idx:
+                debug_log(f"gapless append: stale (play_idx {_expected_play_idx}→{self.queue_play_idx}), skipping")
+                # Reset so the main loop can fire a fresh worker for the new current track.
+                self._prefetch_trigger_id = None
+                return
+            if self.mp.append(url):
+                self._mpv_qi_map.append(nxt_queue_idx)
+                debug_log(f"gapless append: track {t.id} → mpv pos {len(self._mpv_qi_map)-1} qi={nxt_queue_idx}")
+            else:
+                debug_log(f"gapless append: IPC failed for track {t.id}, skipping qi-map extension")
+        finally:
+            self._prefetch_in_progress = False
 
     def _gapless_invalidate_ahead(self) -> None:
         """Called when the queue changes in a way that affects what comes next.
@@ -2124,6 +2163,7 @@ class App:
         pp = self._mpv_last_pp or 0
         self._mpv_qi_map = self._mpv_qi_map[:pp + 1]  # keep only up to current pos
         self._prefetch_trigger_id = None
+        self._prefetch_next = None
 
     def next_track(self) -> None:
         if not self.queue_items: return
@@ -6144,6 +6184,8 @@ class App:
         _gl_pp = self._mpv_last_pp if self._mpv_last_pp is not None else 0
         _gl_cached = {self._mpv_qi_map[p] for p in range(_gl_pp + 1, len(self._mpv_qi_map))}
         _gl_caching = self._prefetch_trigger_id if self._prefetch_in_progress else None
+        _pf_n = self._prefetch_next
+        _gl_prefetched_id = _pf_n["track_id"] if _pf_n else None  # URL resolved, not yet in mpv
 
         # Playback tab: leave content area blank for image; show status/hint text only
         if typ == "playback_tab":
@@ -6206,10 +6248,13 @@ class App:
                         self.stdscr.addstr(yy, x + 1, "⏸", base_attr2 | self.C(2))
                     elif i in _gl_cached:
                         self.stdscr.addstr(yy, x, " ", base_attr2)
-                        self.stdscr.addstr(yy, x + 1, "●", base_attr2 | self.C(4))
+                        self.stdscr.addstr(yy, x + 1, "●", base_attr2)
+                    elif _gl_prefetched_id is not None and it.id == _gl_prefetched_id:
+                        self.stdscr.addstr(yy, x, " ", base_attr2)
+                        self.stdscr.addstr(yy, x + 1, "◑", base_attr2)
                     elif _gl_caching is not None and it.id == _gl_caching:
                         self.stdscr.addstr(yy, x, " ", base_attr2)
-                        self.stdscr.addstr(yy, x + 1, "○", base_attr2 | self.C(4))
+                        self.stdscr.addstr(yy, x + 1, "○", base_attr2)
                     else:
                         self.stdscr.addstr(yy, x, "  ", base_attr2)
                     self._draw_track_line(yy, x + 2, max(0, w - 2), it, selected=selected,
@@ -6474,6 +6519,8 @@ class App:
         _gl_pp_q = self._mpv_last_pp if self._mpv_last_pp is not None else 0
         _gl_cached_q = {self._mpv_qi_map[p] for p in range(_gl_pp_q + 1, len(self._mpv_qi_map))}
         _gl_caching_q = self._prefetch_trigger_id if self._prefetch_in_progress else None
+        _pf_n_q = self._prefetch_next
+        _gl_prefetched_id_q = _pf_n_q["track_id"] if _pf_n_q else None
 
         for row in range(h):
             i = q_scroll + row
@@ -6490,9 +6537,11 @@ class App:
             elif playing and pa:
                 pfx_sym, pfx_color = "⏸", self.C(2)
             elif i in _gl_cached_q:
-                pfx_sym, pfx_color = "●", self.C(4)
+                pfx_sym, pfx_color = "●", 0
+            elif _gl_prefetched_id_q is not None and t.id == _gl_prefetched_id_q:
+                pfx_sym, pfx_color = "◑", 0
             elif _gl_caching_q is not None and t.id == _gl_caching_q:
-                pfx_sym, pfx_color = "○", self.C(4)
+                pfx_sym, pfx_color = "○", 0
             else:
                 pfx_sym, pfx_color = "", 0
 
@@ -7126,14 +7175,18 @@ class App:
         _order = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
         _short_tabs_w = len("  ".join(TAB_SHORT_NAMES[i] for i in _order))
         _label_w = artist_pane_w + 1   # separator + pane width
-        _next_label = (
+        # _next_label_stable: whether the "Next in queue:" right-side label *could*
+        # appear based on layout (pane size, tab, preview mode) — cursor-independent.
+        # Used for the tab-width passed to _draw_tabs so the abbreviation level never
+        # flashes when the cursor moves on/off the preview-next row during a skip.
+        _next_label_stable = (
             _cover_pane_active and self._preview_next and self.tab == TAB_PLAYBACK
             and queue_panel and artist_pane_w >= 15
             and _short_tabs_w < w - _label_w
             and self.queue_items
-            and self.queue_cursor == self._preview_next_idx()
         )
-        self._draw_tabs(0, 0, w - _label_w if _next_label else w)
+        _next_label = _next_label_stable and self.queue_cursor == self._preview_next_idx()
+        self._draw_tabs(0, 0, w - _label_w if _next_label_stable else w)
         if _next_label:
             try:
                 self.stdscr.addch(0, w - artist_pane_w, "│", self.C(4))
@@ -7600,7 +7653,9 @@ class App:
             ord("R"): lambda: _tog("show_track_duration", "Duration field: on", "Duration field: off"),
             ord("s"): lambda: _tog("shuffle_on", "Shuffle: on", "Shuffle: off"),
             ord("F"): lambda: (setattr(self, "quality_idx", (self.quality_idx + 1) % len(QUALITY_ORDER)),
-                               self.toast(f"Quality: {QUALITY_ORDER[self.quality_idx]}")),
+                               self.toast(f"Quality: {QUALITY_ORDER[self.quality_idx]}"),
+                               self._gapless_invalidate_ahead(),
+                               self._persist_settings()),
             ord("t"): lambda: _tog("show_toggles", "Toggles: on", "Toggles: off"),
             ord("C"): lambda: _tog("color_mode", "Color", "B/W"),
             ord("W"): lambda: _tog("show_track_album", "Album field: on", "Album field: off"),
@@ -7645,25 +7700,21 @@ class App:
                 self.next_track()
                 self._full_redraw()
 
-            # Pre-fetch the next track's DASH URL early and, when gapless is on, append
-            # it to mpv's internal playlist so --prefetch-playlist can buffer it ahead.
-            # Trigger as soon as 5 s into the track, when <=5 s remain, or when the
-            # demuxer cache reports >=10 s buffered (reliable on slow connections).
+            # Pre-fetch the next track's URL and append it to mpv's playlist as
+            # soon as we know what it is.  Fires immediately when the next track
+            # changes (skip, priority-queue, prev, gapless advance) rather than
+            # waiting for a time threshold — the _prefetch_trigger_id guard prevents
+            # duplicate workers, and _prefetch_in_progress stays True for the entire
+            # worker lifetime so the main loop cannot launch a second concurrent one.
             if self.current_track and self.mp.alive() and not self._prefetch_in_progress:
-                _tp, _du, *_ = self.mp.snapshot()
-                _cd = self.mp.demuxer_cache_duration
-                _playing_5s    = _tp is not None and _tp >= 5.0
-                _near_end      = _tp is not None and _du is not None and _du > 0 and _du - _tp <= 5.0
-                _buffered_enough = isinstance(_cd, (int, float)) and _cd >= 10.0
-                if _playing_5s or _near_end or _buffered_enough:
-                    _nxt_t = self._next_queued_track()
-                    if _nxt_t and self._prefetch_trigger_id != _nxt_t.id:
-                        self._prefetch_trigger_id = _nxt_t.id
-                        self._prefetch_in_progress = True
-                        _qi = self.quality_idx
-                        _nxt_qi = self._preview_next_idx()
-                        self._bg(lambda _t=_nxt_t, _qi=_qi, _nxt_qi=_nxt_qi:
-                                 self._prefetch_and_gapless_append(_t, _qi, _nxt_qi))
+                _nxt_t = self._next_queued_track()
+                if _nxt_t and self._prefetch_trigger_id != _nxt_t.id:
+                    self._prefetch_trigger_id = _nxt_t.id
+                    self._prefetch_in_progress = True
+                    _qi = self.quality_idx
+                    _nxt_qi = self._preview_next_idx()
+                    self._bg(lambda _t=_nxt_t, _qi=_qi, _nxt_qi=_nxt_qi:
+                             self._prefetch_and_gapless_append(_t, _qi, _nxt_qi))
 
             # Gapless: detect auto-advance by watching for playlist-pos changes.
             # When mpv gaplessly transitions to the preloaded next track, playlist-pos
@@ -7674,6 +7725,16 @@ class App:
                 if _pp is not None and _pp > self._mpv_last_pp:
                     _prev_pp = self._mpv_last_pp
                     self._mpv_last_pp = _pp
+                    _jump = _pp - _prev_pp
+                    _snap_pp_tp, *_ = self.mp.snapshot()
+                    debug_log(
+                        f"gapless: [PP_CHANGE] pp {_prev_pp}→{_pp} (jump={_jump})"
+                        f" qi_map={self._mpv_qi_map}"
+                        f" time_pos={_snap_pp_tp}"
+                        f" map_len={len(self._mpv_qi_map)}"
+                    )
+                    if _jump > 1:
+                        debug_log(f"gapless: [WARNING] pp jumped by {_jump} — possible duplicate append or missed advance")
                     if _pp < len(self._mpv_qi_map):
                         _gl_qi = self._mpv_qi_map[_pp]
                         if 0 <= _gl_qi < len(self.queue_items):
@@ -7686,7 +7747,15 @@ class App:
             if self.current_track and self.mp.alive() and self._mpv_last_pp is not None:
                 _tp3, _du3, *_ = self.mp.snapshot()
                 # Mark that this track has produced at least one valid time_pos reading.
-                if _tp3 is not None:
+                if _tp3 is not None and not self._current_track_seen_tp:
+                    _elapsed = (now - self._play_start_time) if self._play_start_time else -1.0
+                    debug_log(
+                        f"play: [FIRST_TP] track={self.current_track.id!r}"
+                        f" first_time_pos={_tp3:.3f}"
+                        f" elapsed_since_start={_elapsed:.3f}s"
+                    )
+                    self._current_track_seen_tp = True
+                elif _tp3 is not None:
                     self._current_track_seen_tp = True
                 _has_ahead = len(self._mpv_qi_map) > (self._mpv_last_pp or 0) + 1
                 if _tp3 is None and _du3 is None and not _has_ahead and not self._prefetch_in_progress:

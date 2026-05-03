@@ -62,12 +62,15 @@ class MPV:
             "--reset-on-next-file=start",  # reset --start per file; preserves other per-file opts
         ]
         if gapless:
-            # --gapless-audio=weak: decoder handoff without gap; falls back to a tiny
-            # gap only when codec/samplerate differs between adjacent tracks.
+            # --gapless-audio=yes: force the decoder handoff even when audio params differ
+            # between adjacent entries (e.g. DASH reinitialization or codec changes).
+            # "weak" falls back to a gap whenever mpv sees different audio params at the
+            # demuxer boundary, which happens for every DASH playlist entry even when the
+            # actual codec is identical FLAC — "yes" overrides that fallback.
             # --prefetch-playlist=yes: mpv proactively downloads the next playlist entry
             # while the current track plays — essential for zero-gap DASH streaming.
             args += [
-                "--gapless-audio=weak",
+                "--gapless-audio=yes",
                 "--prefetch-playlist=yes",
             ]
         if not resume:
@@ -217,7 +220,9 @@ class MPV:
         ok = self.cmd("loadfile", url, "replace", 0, "start=0", timeout=1.5)
         if ok:
             with self._lock:
-                self.time_pos = None  # invalidate so probe loop waits for fresh data
+                self.time_pos = None      # invalidate so probe loop waits for fresh data
+                self.playlist_pos = None  # prevent stale MPVPoller value from triggering
+                                          # a false PP_CHANGE advance in the main loop
         return ok
 
     def append(self, url: str) -> bool:
@@ -229,10 +234,13 @@ class MPV:
         Returns True iff mpv confirmed the append via IPC.
         """
         # index=-1 appends to end of playlist.
-        # NOTE: do NOT pass "start=0" here — it causes mpv to seek after the
-        # gapless decoder handoff, discarding pre-buffered audio and breaking
-        # the seamless transition for DASH streams.
-        ok = self.cmd("loadfile", url, "append", -1, timeout=0.5)
+        # start=0: TIDAL DASH manifests encode a non-zero presentation timestamp
+        # (~20 s) for the first segment; without start=0 mpv reports time-pos
+        # starting at that offset.  Passing start=0 as a per-file option tells
+        # mpv to seek to position 0 when it begins playing this entry, keeping
+        # the time display correct.  mpv processes per-file options at playback
+        # start, not during pre-buffering, so --prefetch-playlist is unaffected.
+        ok = self.cmd("loadfile", url, "append", -1, "start=0", timeout=0.5)
         debug_log(f"mpv append: loadfile append {url[:80]!r} ok={ok}")
         return ok
 

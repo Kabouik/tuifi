@@ -2165,6 +2165,73 @@ class App:
         self._prefetch_trigger_id = None
         self._prefetch_next = None
 
+    def _tick_autoadvance(self) -> bool:
+        """Run track-end / gapless-advance / idle checks that normally live in the main loop.
+
+        Called by dialog inner-loops on their timeout so playback continues
+        while a popup is blocking.  Returns True if a track change fired.
+        """
+        now = time.time()
+        did_advance = False
+
+        # Track-end: mpv process died (non-gapless or crashed).
+        if self.current_track and not self.mp.alive() and self._play_serial == self._current_track_serial:
+            self.current_track = None
+            self._last_stream_quality = None
+            self._mpv_qi_map = []
+            self._mpv_last_pp = None
+            self._gapless_idle_since = None
+            self.next_track()
+            did_advance = True
+
+        # Gapless: detect playlist-pos increment (PP_CHANGE).
+        if not did_advance and self.mp.alive() and self._mpv_last_pp is not None:
+            _pp = self.mp.playlist_pos
+            if _pp is not None and _pp > self._mpv_last_pp:
+                _prev_pp = self._mpv_last_pp
+                self._mpv_last_pp = _pp
+                if _pp < len(self._mpv_qi_map):
+                    _gl_qi = self._mpv_qi_map[_pp]
+                    if 0 <= _gl_qi < len(self.queue_items):
+                        self._on_gapless_advance(self.queue_items[_gl_qi], _gl_qi)
+                        did_advance = True
+
+        # Idle detection: mpv alive with --idle=yes but finished playback.
+        if not did_advance and self.current_track and self.mp.alive() and self._mpv_last_pp is not None:
+            _tp3, _du3, *_ = self.mp.snapshot()
+            _has_ahead = len(self._mpv_qi_map) > (self._mpv_last_pp or 0) + 1
+            if _tp3 is None and _du3 is None and not _has_ahead and not self._prefetch_in_progress:
+                if self._current_track_seen_tp:
+                    if self._gapless_idle_since is None:
+                        self._gapless_idle_since = now
+                    elif now - self._gapless_idle_since > 0.5:
+                        self._gapless_idle_since = None
+                        self.current_track = None
+                        self._last_stream_quality = None
+                        self.next_track()
+                        did_advance = True
+                elif self._play_start_time is not None and now - self._play_start_time > 10.0:
+                    self._play_start_time = None
+                    self.current_track = None
+                    self._last_stream_quality = None
+                    self.next_track()
+                    did_advance = True
+            else:
+                self._gapless_idle_since = None
+
+        # Prefetch next track URL and append to mpv playlist.
+        if self.current_track and self.mp.alive() and not self._prefetch_in_progress:
+            _nxt_t = self._next_queued_track()
+            if _nxt_t and self._prefetch_trigger_id != _nxt_t.id:
+                self._prefetch_trigger_id = _nxt_t.id
+                self._prefetch_in_progress = True
+                _qi = self.quality_idx
+                _nxt_qi = self._preview_next_idx()
+                self._bg(lambda _t=_nxt_t, _qi=_qi, _nxt_qi=_nxt_qi:
+                         self._prefetch_and_gapless_append(_t, _qi, _nxt_qi))
+
+        return did_advance
+
     def next_track(self) -> None:
         if not self.queue_items: return
         if self.priority_queue:
@@ -3272,13 +3339,8 @@ class App:
                     break
                 ch = win.getch()
                 if ch == -1:
-                    if self.current_track and not self.mp.alive() and self._play_serial == self._current_track_serial:
-                        tp, du, pa, vo, mu = self.mp.snapshot()
-                        if tp is None and du is None:
-                            self.current_track = None
-                            self._last_stream_quality = None
-                            self.next_track()
-                            self._need_redraw = True
+                    if self._tick_autoadvance():
+                        self._need_redraw = True
                     continue
                 elif ch == curses.KEY_MOUSE:
                     try:
@@ -3353,10 +3415,18 @@ class App:
         body = t.album or ""
         if t.year and t.year != "????":
             body += f" ({t.year})"
-        # Use the cached cover image if available, otherwise skip the icon.
+        # Use the cached cover image as the notification icon.
+        # If the cover hasn't landed on disk yet (new track), wait up to 5 s
+        # for the background cover-fetch thread to finish before giving up.
         icon_arg = []
         if t.album_id:
             cover = self._cover_cache_path(t.album_id)
+            if not os.path.exists(cover):
+                _deadline = time.time() + 5.0
+                while time.time() < _deadline:
+                    time.sleep(0.1)
+                    if os.path.exists(cover):
+                        break
             if os.path.exists(cover):
                 icon_arg = ["--icon", cover]
         try:
@@ -6888,6 +6958,8 @@ class App:
 
                 ch = self._get_wch_int()
                 if ch == -1:
+                    if self._tick_autoadvance():
+                        self._need_redraw = True
                     continue
                 if ch == curses.KEY_MOUSE:
                     try:

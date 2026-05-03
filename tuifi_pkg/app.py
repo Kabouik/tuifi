@@ -5846,7 +5846,8 @@ class App:
         self.filter_pos = -1
         if not q: return
         # When the miniqueue overlay is visible on a non-queue tab, filter the queue.
-        if self.queue_overlay and self.tab != TAB_QUEUE:
+        _miniqueue_ctx = self.queue_overlay and self.tab != TAB_QUEUE
+        if _miniqueue_ctx:
             items: List[Any] = self.queue_items
         else:
             _was_loading = self._loading
@@ -5857,10 +5858,14 @@ class App:
                 self._loading = _was_loading
         for i, it in enumerate(items):
             if isinstance(it, Track):
-                dv = self._track_duration(it)
-                dur_s = fmt_dur(dv) if dv else ""
-                yv = self._track_year(it) if it.year else ""
-                haystack = f"{it.artist} {it.title} {it.album} {yv} {dur_s}".lower()
+                if _miniqueue_ctx:
+                    # Miniqueue only shows artist and title — don't match on album.
+                    haystack = f"{it.artist} {it.title}".lower()
+                else:
+                    dv = self._track_duration(it)
+                    dur_s = fmt_dur(dv) if dv else ""
+                    yv = self._track_year(it) if it.year else ""
+                    haystack = f"{it.artist} {it.title} {it.album} {yv} {dur_s}".lower()
                 if q in haystack:
                     self.filter_hits.append(i)
             elif isinstance(it, Album):
@@ -6549,14 +6554,26 @@ class App:
         # Second pass: apply accent highlight to filter-hit rows (non-selected items).
         # chgat overwrites the attribute of already-rendered characters, preserving content
         # but changing their color/style.  Runs only when a filter is active.
-        if self.filter_q.strip() and self.filter_hits:
-            _fh_set = set(self.filter_hits)
+        # Match is evaluated per-item at draw time to avoid stale pre-computed indices.
+        _fq = self.filter_q.strip().lower()
+        if _fq:
             _hit_attr = self.C(5) | curses.A_BOLD
             for row in range(h):
                 i = self.left_scroll + row
                 if i >= n:
                     break
-                if i not in _fh_set:
+                it = items[i]
+                if isinstance(it, Track):
+                    _match = _fq in f"{it.artist} {it.title} {it.album}".lower()
+                elif isinstance(it, Album):
+                    _match = _fq in f"{it.artist} {it.title}".lower()
+                elif isinstance(it, Artist):
+                    _match = _fq in it.name.lower()
+                elif isinstance(it, str):
+                    _match = _fq in it.lower()
+                else:
+                    _match = False
+                if not _match:
                     continue
                 yy = y + row
                 if typ == "queue_tab":
@@ -6656,6 +6673,25 @@ class App:
             self._draw_track_line(yy, px + 2, max(0, pw - 2), t, selected=selected,
                                   marked=marked, idx1=None, priority_pos=ppos,
                                   force_no_tsv=True, simple_format=True)
+
+        # Second pass: highlight filter matches in the miniqueue.
+        # Miniqueue only shows artist and title, so match on those fields only.
+        _fq = self.filter_q.strip().lower()
+        if _fq:
+            _hit_attr = self.C(5) | curses.A_BOLD
+            for row in range(h):
+                i = q_scroll + row
+                if i >= len(self.queue_items):
+                    break
+                t = self.queue_items[i]
+                if _fq not in f"{t.artist} {t.title}".lower():
+                    continue
+                selected = (self._queue_context() and i == self.queue_cursor)
+                if not selected:
+                    try:
+                        self.stdscr.chgat(y + row, x, w, _hit_attr)
+                    except curses.error:
+                        pass
 
     def _draw_status(self, y: int, x: int, w: int) -> None:
         tp, du, pa, vo, mu = self.mp.snapshot()
@@ -7355,7 +7391,11 @@ class App:
         # as the TAB_PLAYBACK block above).  Skip during throttle/debounce: those rows
         # must NOT be repainted with spaces when the cover write is also being skipped.
         if _pane_active and artist_pane_w > 0 and not _throttle_cover and not hide_cover:
-            if _cover_pane_active and self._album_cover_path:
+            # redrawln prevents ncurses scroll-region optimisation (ESC[S/T) in the
+            # right-pane rows.  Must fire whenever a sixel/chafa image OR the cava
+            # spectrum occupies those rows — otherwise ncurses may emit scroll sequences
+            # that physically shift the image or spectrum bars on the terminal.
+            if (_cover_pane_active and self._album_cover_path) or _cava_pane_active:
                 _ar_rows = artist_cover_rows if queue_panel else usable_h
                 if _ar_rows > 0:
                     try:

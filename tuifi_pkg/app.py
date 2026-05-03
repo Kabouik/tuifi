@@ -7462,7 +7462,13 @@ class App:
                             _avail_spec_nq = max(0, _render_h - _c_h - _gap)
                             _spec_rows_stacked_nq = min(max(3, _c_h // 3), _avail_spec_nq) if _avail_spec_nq >= 3 else max(1, _avail_spec_nq)
                             _s_h = max(1, _spec_rows_stacked_nq - 1)
-                        _s_y = top_h + _c_h + _gap
+                        # With miniqueue: spectrum sits immediately below the cover.
+                        # Without miniqueue: anchor spectrum to the bottom of the pane
+                        # so it doesn't float in the middle of empty space.
+                        if queue_panel:
+                            _s_y = top_h + _c_h + _gap
+                        else:
+                            _s_y = top_h + _render_h - _s_h
                         # Cap spectrum width to the approximate visual width of a square cover
                         # (terminal cells are ~2:1 tall:wide, so a square image at _c_h rows
                         # renders at most _c_h*2 cols; beyond that chafa letterboxes).
@@ -7531,6 +7537,9 @@ class App:
         self._tab_positions[self.tab] = (self.left_idx, self.left_scroll)
         if t != self.tab:
             self._prev_tab = self.tab
+            self.filter_q = ""
+            self.filter_hits = []
+            self.filter_pos = -1
             if self.tab == TAB_PLAYBACK:
                 self._cover_clear_image()
                 # If preview_next auto-positioned the cursor, reset it to the playing

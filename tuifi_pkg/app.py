@@ -4820,9 +4820,9 @@ class App:
                     self.stdscr.addch(y + row, gap_col, " ")
                 except curses.error:
                     pass
-        # Park the cursor on the '?' help button so it blends in
+        # Park cursor at bottom-right to keep it out of the visible area
         try:
-            self.stdscr.move(*(self._help_btn_pos or (curses.LINES - 1, curses.COLS - 1)))
+            self.stdscr.move(curses.LINES - 1, curses.COLS - 1)
         except curses.error:
             pass
 
@@ -6655,7 +6655,7 @@ class App:
         row1_w = max(0, w - 1)
         dim = curses.A_DIM if self.color_mode else 0
         if self.show_toggles:
-            self._help_btn_pos = (y, x)  # col of first space in " ? help "
+            self._help_btn_pos = (y, x + 1)  # col of '?' in " ? help "
             try:
                 self.stdscr.addstr(y, x, _HELP_BTN, curses.A_REVERSE)
                 self.stdscr.addstr(y, x + len(_HELP_BTN), _HELP_BTN_SEP, dim)
@@ -7338,7 +7338,7 @@ class App:
         sys.stdout.buffer.flush()
         try:
             try:
-                self.stdscr.move(*(self._help_btn_pos or (curses.LINES - 1, curses.COLS - 1)))  # park cursor
+                self.stdscr.move(curses.LINES - 1, curses.COLS - 1)  # park cursor
             except curses.error:
                 pass
             self.stdscr.refresh()
@@ -7356,7 +7356,7 @@ class App:
                     self.stdscr.redrawln(0, top_h)
                     self.stdscr.redrawln(h - status_h - 1, status_h + 1)
                     try:
-                        self.stdscr.move(*(self._help_btn_pos or (curses.LINES - 1, curses.COLS - 1)))
+                        self.stdscr.move(curses.LINES - 1, curses.COLS - 1)
                     except curses.error:
                         pass
                     self.stdscr.refresh()
@@ -7385,7 +7385,7 @@ class App:
                                 self.stdscr.redrawln(0, top_h)
                                 self.stdscr.redrawln(h - status_h - 1, status_h + 1)
                                 try:
-                                    self.stdscr.move(*(self._help_btn_pos or (curses.LINES - 1, curses.COLS - 1)))
+                                    self.stdscr.move(curses.LINES - 1, curses.COLS - 1)
                                 except curses.error:
                                     pass
                                 self.stdscr.refresh()
@@ -7408,7 +7408,7 @@ class App:
                             except curses.error:
                                 pass
                             try:
-                                self.stdscr.move(*(self._help_btn_pos or (curses.LINES - 1, curses.COLS - 1)))
+                                self.stdscr.move(curses.LINES - 1, curses.COLS - 1)
                             except curses.error:
                                 pass
                             self.stdscr.refresh()

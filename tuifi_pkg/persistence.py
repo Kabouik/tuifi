@@ -273,7 +273,7 @@ def load_settings() -> Dict[str, Any]:
     s.setdefault("autoextend", AUTOPLAY_OFF)    # off/mix/recommended
     s.setdefault("autoextend_n", 3)             # tracks added per autoextend refill
     s.setdefault("auto_resume_playback", True)  # resume last position on startup
-    s.setdefault("repeat_mode", "off")          # off | all | one
+    s.setdefault("repeat_mode", "off")          # off/all/one
     s.setdefault("shuffle_on", False)           # shuffle queue
 
     # -- UI chrome --
@@ -286,7 +286,7 @@ def load_settings() -> Dict[str, Any]:
     s.setdefault("show_line_numbers", False)
     s.setdefault("show_album_track_count", True)
     s.setdefault("tab_align", True)
-    s.setdefault("sideview", _detect_sideview_default())  # cover|both|spectrum|off; auto-detected on first run
+    s.setdefault("sideview", _detect_sideview_default())  # cover/both/spectrum/off; auto-detected on first run
 
     # -- History --
     s.setdefault("history_max", 0)              # 0 = unlimited
@@ -296,9 +296,9 @@ def load_settings() -> Dict[str, Any]:
     s.setdefault("max_all_tracks_number", 0)                      # 0 = unlimited
 
     # -- Miscellaneous user preferences --
-    s.setdefault("remember_last_input", False)     # prefill search/filter with last query within a session
+    s.setdefault("remember_last_search_input", False)     # prefill search/filter with last query within a session
     s.setdefault("playback_tab_layout", "lyrics_miniqueue_minicover")  # right-pane layout
-    s.setdefault("cover_lyrics_color_pair", "default")  # color name; "default" = terminal default
+    s.setdefault("color_cover_lyrics", "default")  # color name; "default" = terminal default
 
     # -- Confirmation prompts when switching to a tab that already has content --
     # Set to true to skip the "press again to confirm" step and fetch immediately.
@@ -367,10 +367,10 @@ def save_settings(s: Dict[str, Any]) -> None:
         "tsv_max_duration_width": "0=unlimited",
         "history_max":         "0=unlimited",
         "max_all_tracks_number": "0=unlimited",
-        "cover_lyrics_color_pair": "color name for lyrics panel text; \"default\" = terminal default",
+        "color_cover_lyrics": "color name for lyrics panel text; \"default\" = terminal default",
         "color_spectrum":  "spectrum bar color; empty = inherit color_chrome; click spectrum to cycle",
-        "spectrum_method": "cava input method: pulse | pipewire | alsa | fifo | ...",
-        "spectrum_source": "cava input source (device/path); empty = cava default",
+        "spectrum_method": "audio method: pulse | pipewire | alsa | fifo | ...",
+        "spectrum_source": "audio source; empty = default (for pulse, use e.g. 'pactl list sources' and check source #number)",
         "initial_tab":         "last active tab, restored on startup",
     }
 
@@ -392,7 +392,7 @@ def save_settings(s: Dict[str, Any]) -> None:
     _keys(
         "api",
         "auto_resume_playback",
-        "remember_last_input",
+        "remember_last_search_input",
         "history_max",
         "playback_tab_layout",
         "max_all_tracks_number",
@@ -408,7 +408,7 @@ def save_settings(s: Dict[str, Any]) -> None:
         "color_accent", "color_artist", "color_album", "color_year",
         "color_duration", "color_line_numbers", "color_album_track_count", "color_title",
         "color_separator", "color_liked", "color_mark",
-        "cover_lyrics_color_pair",
+        "color_cover_lyrics",
         "color_spectrum",
     )
 
@@ -428,11 +428,14 @@ def save_settings(s: Dict[str, Any]) -> None:
     _keys(
         "volume", "mute", "quality",
         "autoextend", "autoextend_n",
+        "repeat_mode", "shuffle_on",
+        "sideview",
         "color_mode", "queue_overlay",
         "show_toggles", "show_track_album", "show_track_year",
         "show_track_duration", "show_line_numbers", "show_album_track_count", "tab_align",
         "include_singles_and_eps_in_artist_tab",
         "playback_tab_preview_next",
+        "notify_on_track",
         "cover_pane",
     )
 

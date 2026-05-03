@@ -756,12 +756,12 @@ class App:
             curses.init_pair(15, _cp("color_mark",      "red"),    -1)
             curses.init_pair(16, curses.COLOR_WHITE, curses.COLOR_BLACK)
             curses.init_pair(17, _cp("color_album_track_count", "white"), -1)
-            # pair 18: cover_lyrics_color_pair — accepts color name; migrate old numeric 0 → "default"
-            _lyric_color_raw = s.get("cover_lyrics_color_pair", "default")
+            # pair 18: color_cover_lyrics — accepts color name; migrate old numeric 0 → "default"
+            _lyric_color_raw = s.get("color_cover_lyrics", "default")
             if isinstance(_lyric_color_raw, (int, float)) or (
                     isinstance(_lyric_color_raw, str) and _lyric_color_raw.strip().lstrip("-").isdigit()):
                 _lyric_color_raw = "default"
-                s["cover_lyrics_color_pair"] = "default"
+                s["color_cover_lyrics"] = "default"
             curses.init_pair(18, self._name_to_curses_color(_lyric_color_raw), -1)
             _spectrum_raw = s.get("color_spectrum") or s.get("color_chrome", "blue")
             curses.init_pair(19, self._name_to_curses_color(_spectrum_raw), -1)
@@ -813,7 +813,7 @@ class App:
             "history_max": int(self.settings.get("history_max", 0) or 0),
             "auto_resume_playback": bool(self.settings.get("auto_resume_playback", False)),
             "playback_tab_layout": str(self.settings.get("playback_tab_layout", "lyrics_miniqueue_minicover")),
-            "cover_lyrics_color_pair": self.settings.get("cover_lyrics_color_pair", "default"),
+            "color_cover_lyrics": self.settings.get("color_cover_lyrics", "default"),
             "recommended_tab_no_confirm_refetch": bool(self.settings.get("recommended_tab_no_confirm_refetch", False)),
             "mix_tab_no_confirm_refetch": bool(self.settings.get("mix_tab_no_confirm_refetch", False)),
             "artist_tab_no_confirm_refetch": bool(self.settings.get("artist_tab_no_confirm_refetch", False)),
@@ -6275,7 +6275,7 @@ class App:
                 TAB_ALBUM:       " Press 6 on a track in any tab to show its album",
                 TAB_LIKED:       "\n Nothing liked here — press l on items to like them\n Cycle sub-categories with 7/[/] or ^←/^→, or jump directly with Alt+1-5",
                 TAB_HISTORY:     " Play tracks to build history",
-                TAB_PLAYLISTS:   (" Empty playlist — press a on a track to add it" if self.playlist_view_name is not None else " Press n to create a new playlist"),
+                TAB_PLAYLISTS:   (" Empty playlist — press a on a track to add it" if self.playlist_view_name is not None else " Press N to create a new playlist"),
             }
             _hint = _hints.get(self.tab)
             if _hint:
@@ -6811,7 +6811,7 @@ class App:
             " @         retry failed downloads",
             " Space     (un)mark selected and advance",
             " u/U       (un)mark all",
-            " l         (un)like selected or marked: track, album, artist,  playlist",
+            " l         (un)like selected or marked: track, album, artist, playlist",
             " L         (un)like playing track",
             " *         contextual like/unlike menu for selected track: artist/album/playlist",
             " J/K       move track or marked tracks down/up",
@@ -6859,8 +6859,8 @@ class App:
             " c/n       sideview modes (see also VIEW section)",
             "",
             "\x01 AUTOEXTEND MODES",
-            " off:         no automatic queue extension",
-            " mix:         refill queue from track mix",
+            " off: no automatic queue extension",
+            " mix: refill queue from track mix",
             " recommended: refill queue from track recommendations",
             " Refill candidates are picked haphazardly based on suggestions (mix or recommended)",
             " pooled from recent play history + upcoming queue tracks",
@@ -6882,12 +6882,13 @@ class App:
             " Artist tab:",
             " include_singles_and_eps_in_artist_tab: show singles/EPs (default: false, toggle with &)",
             " notify_on_track: desktop notification on each track change (default: false, toggle with |)",
-            " max_all_tracks_number: max total tracks in All tracks section (default: 0 = unlimited)",
+            " max_all_tracks_number: max total tracks in 'All tracks' section (default: 0 = unlimited)",
             "",
             " Playback tab:",
             " sideview: side pane mode on startup: cover (default), both, spectrum (kitty), off (toggle with c)",
             " playback_tab_layout: default layout in tab 0",
-            "   values: \"lyrics_miniqueue_minicover\" (default), \"lyrics_miniqueue\", \"lyrics\", \"miniqueue\", \"miniqueue_cover\"",
+            "   values: lyrics_miniqueue_minicover (default), lyrics_miniqueue, lyrics, miniqueue,",
+            "           miniqueue_cover",
             " playback_tab_preview_next: sideview shows next track cover on tab 0 (toggle with n)",
             "   (requires miniqueue + minicover pane; default: true)",
             "",
@@ -6898,19 +6899,20 @@ class App:
             " Playlists can also be downloaded with a flat structure",
             "",
             " Colors:",
-            " color_playing  color_paused  color_error  color_chrome  color_accent",
-            " color_artist   color_title   color_album  color_year    color_separator",
-            " color_duration color_line_numbers color_album_track_count color_liked  color_mark",
-            " color_spectrum: spectrum bar color (empty = color_accent; click spectrum to cycle)",
-            " spectrum_method: cava input method (pulse, pipewire, alsa, …; default: pulse)",
-            " spectrum_source: cava input source/device (empty = cava default)",
-            " cover_lyrics_color_pair: lyrics panel text color (e.g. white, cyan; default: terminal default)",
-            " values: black red green yellow blue magenta cyan white (or 0-255)",
+            " color_playing, color_paused, color_error, color_chrome, color_accent,",
+            " color_artist, color_title, color_album, color_year, color_separator,",
+            " color_duration, color_line_numbers, color_album_track_count, color_liked,",
+            " color_mark, color_spectrum (click spectrum to cycle), color_cover_lyrics",
+            " values: black, red, green, yellow, blue, magenta, cyan, white, or any 0-255 value",
             "",
-            " TSV fields (general or per field overrides):",
-            " tsv_max_col_width: default max column width in TSV mode (default 32, 0=unlimited)",
-            " tsv_max_artist_width       tsv_max_title_width       tsv_max_album_width",
-            " tsv_max_year_width         tsv_max_duration_width",
+            " Spectrum (requires cava):",
+            " spectrum_method: cava input method (pulse, pipewire, alsa, etc.; default: pulse)",
+            " spectrum_source: cava input source (empty: default; use e.g. 'pactl list sources' for pulse)",
+            "",
+            " TSV fields width (general or per field):",
+            " tsv_max_col_width: default: 32, 0: unlimited",
+            " tsv_max_artist_width, tsv_max_title_width, tsv_max_album_width, tsv_max_year_width,",
+            " tsv_max_duration_width",
             "",
             f"\x01 tuifi v{VERSION}",
             "",

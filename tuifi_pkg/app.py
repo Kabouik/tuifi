@@ -5897,13 +5897,13 @@ class App:
             return
         self.filter_pos = 0
         self._set_filter_cursor(self.filter_hits[0])
-        self.toast(f"1/{len(self.filter_hits)}")
+        self.toast(f"filter match: 1/{len(self.filter_hits)} (Esc to cancel)")
 
     def filter_next(self, delta: int) -> None:
         if not self.filter_hits: return
         self.filter_pos = (self.filter_pos + delta) % len(self.filter_hits)
         self._set_filter_cursor(self.filter_hits[self.filter_pos])
-        self.toast(f"{self.filter_pos+1}/{len(self.filter_hits)}")
+        self.toast(f"filter match: {self.filter_pos+1}/{len(self.filter_hits)} (Esc to cancel)")
 
     def _compute_lyrics_filter_hits(self) -> None:
         q = self._lyrics_filter_q.strip().lower()
@@ -7447,12 +7447,16 @@ class App:
                             _s_h = max(1, _spec_rows_stacked - 1)
                             _gap = 1
                         else:
-                            _c_h = max(3, (_render_h - 1) * 2 // 3)
-                            # Use a 2-row gap (instead of 1) when no miniqueue is shown.
-                            # The extra row absorbs sixel/chafa pixel-band overflow that can
-                            # bleed into the spectrum area and cause the cover to appear shifted.
+                            # Mirror the stacked-miniqueue constraints: cap the cover at
+                            # artist_pane_w//2 rows (approximately square at 2-cols-per-row
+                            # chafa rendering) and limit the spectrum to ~1/3 of cover height.
+                            # This matches the proven-stable geometry from the miniqueue stacked
+                            # layout and prevents the minicover from drifting when the spectrum
+                            # is drawn below it.
+                            _c_h = min(artist_pane_w // 2, max(6, _render_h - 1))
                             _gap = 2
-                            _s_h = max(1, _render_h - _c_h - _gap)
+                            _avail_spec_nq = max(0, _render_h - _c_h - _gap)
+                            _s_h = max(1, min(max(3, _c_h // 3), _avail_spec_nq))
                         _s_y = top_h + _c_h + _gap
                         # Cap spectrum width to the approximate visual width of a square cover
                         # (terminal cells are ~2:1 tall:wide, so a square image at _c_h rows

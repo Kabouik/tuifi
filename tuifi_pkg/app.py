@@ -5883,8 +5883,11 @@ class App:
     def _set_filter_cursor(self, idx: int) -> None:
         if self.tab == TAB_QUEUE or (self.queue_overlay and self.tab != TAB_QUEUE):
             self.queue_cursor = clamp(idx, 0, max(0, len(self.queue_items) - 1))
+            if self.queue_overlay and self.tab != TAB_QUEUE:
+                self.focus = "queue"
         else:
             self.left_idx = idx
+            self.focus = "left"
 
     def filter_prompt(self) -> None:
         _remember = self.settings.get("remember_last_input", False)
@@ -7388,9 +7391,12 @@ class App:
         self._album_cover_rows_offset = artist_cover_rows if queue_panel else 0
 
         # Prevent ncurses scroll-region optimisation for the pane rows (same reason
-        # as the TAB_PLAYBACK block above).  Skip during throttle/debounce: those rows
-        # must NOT be repainted with spaces when the cover write is also being skipped.
-        if _pane_active and artist_pane_w > 0 and not _throttle_cover and not hide_cover:
+        # as the TAB_PLAYBACK block above).  Always fire redrawln — even during
+        # throttle/debounce — because without it ncurses can emit ESC[S/T scroll
+        # sequences that physically shift the sixel/chafa cover image in the terminal,
+        # causing the visible drift.  When throttled on non-kitty backends we also
+        # clear the write_key so the cover re-renders after refresh() writes spaces.
+        if _pane_active and artist_pane_w > 0 and not hide_cover:
             # redrawln prevents ncurses scroll-region optimisation (ESC[S/T) in the
             # right-pane rows.  Must fire whenever a sixel/chafa image OR the cava
             # spectrum occupies those rows — otherwise ncurses may emit scroll sequences
@@ -7402,6 +7408,8 @@ class App:
                         self.stdscr.redrawln(top_h, _ar_rows)
                     except curses.error:
                         pass
+                    if _throttle_cover and _backend != "chafa-kitty":
+                        self._album_cover_pane_write_key = ""
 
         # Synchronized output (DEC mode 2026): tells the terminal to buffer all
         # output until the ESU marker, presenting the entire frame atomically.
@@ -7447,16 +7455,13 @@ class App:
                             _s_h = max(1, _spec_rows_stacked - 1)
                             _gap = 1
                         else:
-                            # Mirror the stacked-miniqueue constraints: cap the cover at
-                            # artist_pane_w//2 rows (approximately square at 2-cols-per-row
-                            # chafa rendering) and limit the spectrum to ~1/3 of cover height.
-                            # This matches the proven-stable geometry from the miniqueue stacked
-                            # layout and prevents the minicover from drifting when the spectrum
-                            # is drawn below it.
-                            _c_h = min(artist_pane_w // 2, max(6, _render_h - 1))
-                            _gap = 2
+                            # Use identical formulas to the miniqueue stacked path so
+                            # geometry is stable when toggling the miniqueue on/off.
+                            _c_h = min(artist_pane_w // 2, max(6, usable_h - 5))
+                            _gap = 1
                             _avail_spec_nq = max(0, _render_h - _c_h - _gap)
-                            _s_h = max(1, min(max(3, _c_h // 3), _avail_spec_nq))
+                            _spec_rows_stacked_nq = min(max(3, _c_h // 3), _avail_spec_nq) if _avail_spec_nq >= 3 else max(1, _avail_spec_nq)
+                            _s_h = max(1, _spec_rows_stacked_nq - 1)
                         _s_y = top_h + _c_h + _gap
                         # Cap spectrum width to the approximate visual width of a square cover
                         # (terminal cells are ~2:1 tall:wide, so a square image at _c_h rows

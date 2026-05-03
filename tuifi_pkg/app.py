@@ -6655,7 +6655,7 @@ class App:
         row1_w = max(0, w - 1)
         dim = curses.A_DIM if self.color_mode else 0
         if self.show_toggles:
-            self._help_btn_pos = (y, x + 1)  # col of '?' in " ? help "
+            self._help_btn_pos = (y, x)  # col of first space in " ? help "
             try:
                 self.stdscr.addstr(y, x, _HELP_BTN, curses.A_REVERSE)
                 self.stdscr.addstr(y, x + len(_HELP_BTN), _HELP_BTN_SEP, dim)

@@ -142,3 +142,7 @@ I don't know if related, but I might have been running out of disk storage while
 ** DONE [#A] Make sure the spectrum never overextends and alters the minicover. It should have reserved space and not expand beyond (maybe it is the case already, but do make sure). The reason I asked is because sometimes in tabs 1 to 9, when both minicover and spectrum are shown, I can see that sometimes the spectrum extends to the minicover and this results in the minicover being redrawn on the wrong row.
    :DONE: geometry leaves 1-row gap between cover and spectrum in both-stacked layout; terminal-bounds clamp in _draw_cava_pane (y_max=scr_h-3) prevents overextension; bars individually bounded to [y,y+h) range (app.py ~4696, ~4730; commit c5a4169)
 ** heart symbol prefix color: not sure yet if I want to change it, but written here to remember to think about it.
+** Sometimes when starting tuifi, it doesn't resume playback from the last trackor last position, but sometimes it works. I haven't found how to reproduce it yet.
+** Liked playlists should be removed when the corresponding playlist has been deleted.
+** Year mismatch between tracks and album.
+** It should be possible to move tracks inside playlists with the same keybinds as in the queue and miniqueue.

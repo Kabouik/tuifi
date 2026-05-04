@@ -25,7 +25,7 @@ While [HiFi API instances with unrestricted access](https://github.com/monochrom
 [![Click to play the demo](demo/screenshot03.png)](https://github.com/Kabouik/tuifi/raw/refs/heads/main/demo/tuifi_2.8.0_demo.mp4)
 [![Click to play the demo](demo/screenshot04.png)](https://github.com/Kabouik/tuifi/raw/refs/heads/main/demo/tuifi_2.8.0_demo.mp4)
 
-*Click any screenshot to play the demo video. Other video from older versions but showing extra figures are available in the [demo/](demo/) folder.*
+*Click on screenshots to play the demo video. Other videos from older versions but showing extra features can be found in the [demo/](demo/) folder.*
 
 # Features
 

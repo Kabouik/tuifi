@@ -24,7 +24,7 @@ While [[https://github.com/monochrome-music/monochrome/blob/main/INSTANCES.md#of
 </a>
 #+END_EXPORT
 
-/Click any screenshot to play the demo video. Other video from older versions but showing extra figures are available in the [[demo/][demo/]] folder./ 
+/Click on screenshots to play the demo video. Other videos from older versions but showing extra features can be found in the [[demo/][demo/]] folder./ 
 
 * Features
 

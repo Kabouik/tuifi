@@ -807,7 +807,7 @@ class App:
                          else "spectrum" if self._cava_pane
                          else "cover" if self._album_cover_pane
                          else "off"),
-            "remember_last_input": bool(self.settings.get("remember_last_input", False)),
+            "remember_last_search_input": bool(self.settings.get("remember_last_search_input", False)),
             "tsv_max_col_width": int(self.settings.get("tsv_max_col_width", 32) or 32),
             "autoextend_n": self.autoplay_n,
             "history_max": int(self.settings.get("history_max", 0) or 0),
@@ -5817,7 +5817,7 @@ class App:
     # ---------------------------------------------------------------------------
     def do_search_prompt_anywhere(self) -> None:
         self.playlist_view_name = None
-        _remember = self.settings.get("remember_last_input", False)
+        _remember = self.settings.get("remember_last_search_input", False)
         q = self.prompt_text("Search:", self.search_q if _remember else "")
         if q is None: return
         self.search_q = q
@@ -5890,7 +5890,7 @@ class App:
             self.focus = "left"
 
     def filter_prompt(self) -> None:
-        _remember = self.settings.get("remember_last_input", False)
+        _remember = self.settings.get("remember_last_search_input", False)
         q = self.prompt_text("Filter:", self.filter_q if _remember else "")
         if q is None: return
         self.filter_q = q
@@ -5920,7 +5920,7 @@ class App:
             self._lyrics_filter_pos = 0
 
     def lyrics_filter_prompt(self) -> None:
-        _remember = self.settings.get("remember_last_input", False)
+        _remember = self.settings.get("remember_last_search_input", False)
         q = self.prompt_text("Lyrics filter:", self._lyrics_filter_q if _remember else "")
         if q is None: return
         self._lyrics_filter_q = q
@@ -8885,7 +8885,7 @@ class App:
 
             # In the playback tab with the inline lyrics panel (no queue overlay, no
             # full-screen overlay), intercept navigation keys to scroll the panel.
-            if (self.tab == TAB_PLAYBACK and self._cover_lyrics and not self.queue_overlay):
+            if (self.tab == TAB_PLAYBACK and self._cover_lyrics and not self._queue_context()):
                 _lmax = self._cover_lyrics_max_scroll; _p = self._page_step()
                 _nv = (min(self.lyrics_scroll + 1, _lmax) if ch in (curses.KEY_DOWN, ord("j"), 14) else
                        max(0, self.lyrics_scroll - 1) if ch in (curses.KEY_UP, ord("k"), 16) else

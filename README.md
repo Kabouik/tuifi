@@ -20,12 +20,12 @@ A feature-rich TUI music player built on top of TDAL API and [HiFi API](https://
 
 While [HiFi API instances with unrestricted access](https://github.com/monochrome-music/monochrome/blob/main/INSTANCES.md#official--community-apis) used to exist, this may be considered as music piracy in many countries and does not give artists the love they deserve. This project is intended for TIDAL subscribers who also self-host their own [HiFi](https://github.com/binimum/hifi-api) instance for convenience, and favor a keyboard-driven terminal workflow over a web player. TIDAL offers a free trial on their main plan if you want to give it a go for free.
 
-[![Click to play the demo](demo/ss20260312-191917.png)](https://github.com/Kabouik/tuifi/raw/refs/heads/main/demo/tuifi-demo.mp4)
-[![Click to play the demo](demo/ss20260312-191954.png)](https://github.com/Kabouik/tuifi/raw/refs/heads/main/demo/tuifi-demo.mp4)
-[![Click to play the demo](demo/ss20260312-192026.png)](https://github.com/Kabouik/tuifi/raw/refs/heads/main/demo/tuifi-demo.mp4)
-[![Click to play the demo](demo/ss20260312-192044.png)](https://github.com/Kabouik/tuifi/raw/refs/heads/main/demo/tuifi-demo.mp4)
+[![Click to play the demo](demo/screenshot01.png)](https://github.com/Kabouik/tuifi/raw/refs/heads/main/demo/tuifi_2.8.0_demo.mp4)
+[![Click to play the demo](demo/screenshot02.png)](https://github.com/Kabouik/tuifi/raw/refs/heads/main/demo/tuifi_2.8.0_demo.mp4)
+[![Click to play the demo](demo/screenshot03.png)](https://github.com/Kabouik/tuifi/raw/refs/heads/main/demo/tuifi_2.8.0_demo.mp4)
+[![Click to play the demo](demo/screenshot04.png)](https://github.com/Kabouik/tuifi/raw/refs/heads/main/demo/tuifi_2.8.0_demo.mp4)
 
-*Click any screenshot to play the demo video. Another video from an older version is available [here](demo/tuifi-demo_old.mp4), showing some other features.*
+*Click any screenshot to play the demo video. Other video from older versions but showing extra figures are available in the [demo/](demo/) folder.*
 
 # Features
 
@@ -33,22 +33,25 @@ While [HiFi API instances with unrestricted access](https://github.com/monochrom
 
 - Playback control (play, pause, (auto)resume, seek, volume, repeat, shuffle)
 - Autoextend queue with mix or recommendations (infinite queue)
-- Queue management with reordering and priority flags
+- Queue management: selection, reordering, priority flags
 - Playback history
-- Lyrics display
-- Cover art (requires a compatible terminal emulator)
+- Lyrics
+- Sixel or kitty-graphics cover art (requires a compatible terminal emulator)
+- Audio spectrum
 
 ## Library management & discovery
 
 - Search, browse artists/albums, recommendations, mixes
+- Ignore or include EPs and singles
 - Find similar artists
 - Playlists (create, delete, add/remove tracks)
 - Like tracks, albums, artists, mixes and playlists
-- Accountless library: playlists, history, liked songs and queue are kept in standard json files that some web services can import
+- Accountless (local) library files: playlists, history, liked songs and queue are kept in standard json files that some web services can import
   
 ## Downloads
 
-- If you are choosing a TUI, then there likely is no official TIDAL application packaged for your platform or distribution, and you have no way to use the service offline (_e.g._, during flights), so `tuifi` can prefetch individual or multiple tracks (_e.g._, marked, albums, playlists, artists) for offline playback in other music players
+- If you are choosing a TUI, then there likely is no official TIDAL application packaged for your platform or distribution, and you have no way to use the service offline (_e.g._, during flights), so `tuifi` can cache individual or multiple tracks locally (_e.g._, marked, albums, playlists, artists) for offline playback in other music players
+- Select any quality, pause, resume, edit queue in corresponding dialog
 
 > [!WARNING]
 > Beware that offline fetching is intended for ephemeral listening since your TIDAL subscription does not grant you permanent access to the catalog, only to their service while you are a subscriber, and owning a physical copy of the media is likely required even with a valid TIDAL subscription to legitimately keep a local file. Consequently, `tuifi` defaults to the `/tmp` folder due to its ephemeral nature to discourage permanent copies, by lack of a proper method to date to play TIDAL DRM material directly from the CLI and in a multiplatform way (where ephemeral storage would otherwise no longer be advised).
@@ -56,7 +59,8 @@ While [HiFi API instances with unrestricted access](https://github.com/monochrom
 ## Interface & interaction
 
 - Contextual menus on tracks, albums & artists
-- Keyboard-oriented control
+- Filter current view with search strings
+- Keyboard-oriented control and mouse support
 - Customizable (colors, optional TSV mode, show/hide metadata fields, file hierarchy for local files, autoextend buffer, autoresume playback on launch, _etc._)
 
 # Usage
@@ -97,7 +101,7 @@ You can also create a symbolic link between the script and a directory in your `
 
 ## Windows peculiarities
 
-NOTE: Windows support may be partly broken in the latest commit, I will investigate it but have no machine to test it, hence why it is not done already.
+NOTE: Windows support was partly broken in a recent commit, I will investigate it and it is mostly due to a missing dependency to add in the instructions, but have no machine to test it at the monment.
 
 The `ncurses` library does not exist officially for Windows, but `windows-curses` can be used. It is available via `pip` up to Python 3.13. The easiest way to install a specific Python version on Windows as well as the other dependency, `mpv`, is probably using [Chocolatey](https://chocolatey.org/install):
 

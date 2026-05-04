@@ -1,0 +1,30 @@
+* =tuifi=
+<2026-05-04 Mon>
+
+** Features
+
+*** Library management & discovery
+Accountless (local) library files
+Search, browse artists/albums, recommendations, mixes
+Ignore or include EPs and singles
+Find similar artists
+Playlists
+Like tracks, albums, artists, mixes and playlists
+
+*** Playback & queue
+Queue management: selection, reordering, priority flags
+Playback history
+Lyrics
+Sixel or kitty-graphics cover art (cached)
+Audio spectrum
+
+*** Downloads
+Download, pause, resume, restart
+Keeping audio files without a hard copy and outside the TIDAL ecosystem may be illegal where you leave, make sure to delete them after your trip
+
+*** Interface & interaction
+Contextual menus
+Keyboard-oriented control
+Mouse support
+Filter current view with search strings
+Customizable (view modes, colors, TSV, metadata fields, /etc./)

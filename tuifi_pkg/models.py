@@ -237,8 +237,7 @@ def mono_to_track(d: Dict[str, Any]) -> Optional["Track"]:
         album_title = str(album_d.get("title", "") or "") if isinstance(album_d, dict) else str(album_d)
         album_id    = album_d.get("id") if isinstance(album_d, dict) else None
         cover_raw   = album_d.get("cover") if isinstance(album_d, dict) else None
-        rd = (album_d.get("releaseDate") or "") if isinstance(album_d, dict) else ""
-        year = rd[:4] if rd and len(rd) >= 4 else "????"
+        year = album_year_from_obj(album_d) if isinstance(album_d, dict) else "????"
         def _int(x: Any) -> Optional[int]:
             try: return int(x) if x is not None else None
             except Exception: return None

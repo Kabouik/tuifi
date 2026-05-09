@@ -1894,6 +1894,31 @@ class App:
         if self.queue_play_idx == i: self.queue_play_idx = j
         elif self.queue_play_idx == j: self.queue_play_idx = i
 
+    def _swap_playlist_items(self, i: int, j: int) -> None:
+        self.playlist_view_tracks[i], self.playlist_view_tracks[j] = self.playlist_view_tracks[j], self.playlist_view_tracks[i]
+        pl = self.playlists.get(self.playlist_view_name or "")
+        if pl and 0 <= i < len(pl) and 0 <= j < len(pl):
+            pl[i], pl[j] = pl[j], pl[i]
+
+    def _move_items(self, items, marked, cursor, delta, swap_fn):
+        """Generic move for a list. Returns (new_cursor, new_marked_set)."""
+        idxs = sorted([i for i in marked if 0 <= i < len(items)])
+        if not idxs:
+            i = clamp(cursor, 0, len(items) - 1)
+            j = i + delta
+            if 0 <= j < len(items):
+                swap_fn(i, j)
+                return j, marked
+            return cursor, marked
+        s = set(idxs)
+        for i in (idxs if delta < 0 else reversed(idxs)):
+            j = i + delta
+            if 0 <= j < len(items) and j not in s:
+                swap_fn(i, j)
+                s.discard(i); s.add(j)
+        m = sorted(s)
+        return (m[0] if delta < 0 else m[-1]) if m else cursor, s
+
     def toggle_priority(self, queue_idx: int) -> None:
         if queue_idx in self.priority_queue:
             self.priority_queue.remove(queue_idx)
@@ -5964,8 +5989,11 @@ class App:
                 for name in marked:
                     self.playlists.pop(name, None)
                     self.playlists_meta.pop(name, None)
+                    self.liked_playlist_ids.discard(name)
+                    self.liked_playlists = [d for d in self.liked_playlists if d.get("name") != name]
                 self.marked_left_idx.clear()
                 self._save_playlists()
+                self._commit_liked()
                 self.left_idx = clamp(self.left_idx, 0, max(0, len(self.playlist_names) - 1))
                 self._toast_redraw(f"Deleted {len(marked)}")
                 return
@@ -5978,7 +6006,10 @@ class App:
             return
         self.playlists.pop(name, None)
         self.playlists_meta.pop(name, None)
+        self.liked_playlist_ids.discard(name)
+        self.liked_playlists = [d for d in self.liked_playlists if d.get("name") != name]
         self._save_playlists()
+        self._commit_liked()
         self.playlist_view_name = None
         self.playlist_view_tracks = []
         self._reset_left_cursor()
@@ -8740,28 +8771,20 @@ class App:
 
             if ch in (ord("J"), ord("K"),
                       getattr(curses, "KEY_SR", -998), getattr(curses, "KEY_SF", -997)):
+                delta = +1 if ch in (ord("J"), getattr(curses, "KEY_SF", -997)) else -1
+                if self.tab == TAB_PLAYLISTS and self.playlist_view_name is not None:
+                    if self.playlist_view_tracks:
+                        self.left_idx, self.marked_left_idx = self._move_items(
+                            self.playlist_view_tracks, self.marked_left_idx,
+                            self.left_idx, delta, self._swap_playlist_items)
+                        save_playlists(self.playlists, self.playlists_meta)
+                        self._need_redraw = True
+                    continue
                 if not self._queue_context(): continue
                 if not self.queue_items: continue
-                delta = +1 if ch in (ord("J"), getattr(curses, "KEY_SF", -997)) else -1
-                idxs = sorted([i for i in self.marked_queue_idx if 0 <= i < len(self.queue_items)])
-                if not idxs:
-                    i = clamp(self.queue_cursor, 0, len(self.queue_items) - 1)
-                    j = i + delta
-                    if 0 <= j < len(self.queue_items):
-                        self._swap_queue_items(i, j)
-                        self.queue_cursor = j
-                    continue
-
-                s = set(idxs)
-                for i in (idxs if delta < 0 else reversed(idxs)):
-                    j = i + delta
-                    if 0 <= j < len(self.queue_items) and j not in s:
-                        self._swap_queue_items(i, j)
-                        s.discard(i); s.add(j)
-                self.marked_queue_idx = s
-                m = sorted(s)
-                if m:
-                    self.queue_cursor = m[0] if delta < 0 else m[-1]
+                self.queue_cursor, self.marked_queue_idx = self._move_items(
+                    self.queue_items, self.marked_queue_idx,
+                    self.queue_cursor, delta, self._swap_queue_items)
                 continue
 
             if ch == ord("d"):

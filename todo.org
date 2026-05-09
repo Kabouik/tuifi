@@ -142,7 +142,13 @@ I don't know if related, but I might have been running out of disk storage while
 ** DONE [#A] Make sure the spectrum never overextends and alters the minicover. It should have reserved space and not expand beyond (maybe it is the case already, but do make sure). The reason I asked is because sometimes in tabs 1 to 9, when both minicover and spectrum are shown, I can see that sometimes the spectrum extends to the minicover and this results in the minicover being redrawn on the wrong row.
    :DONE: geometry leaves 1-row gap between cover and spectrum in both-stacked layout; terminal-bounds clamp in _draw_cava_pane (y_max=scr_h-3) prevents overextension; bars individually bounded to [y,y+h) range (app.py ~4696, ~4730; commit c5a4169)
 ** heart symbol prefix color: not sure yet if I want to change it, but written here to remember to think about it.
-** Sometimes when starting tuifi, it doesn't resume playback from the last trackor last position, but sometimes it works. I haven't found how to reproduce it yet.
-** Liked playlists should be removed when the corresponding playlist has been deleted.
-** Year mismatch between tracks and album.
-** It should be possible to move tracks inside playlists with the same keybinds as in the queue and miniqueue.
+** DONE Sometimes when starting tuifi, it doesn't resume playback from the last trackor last position, but sometimes it works. I haven't found how to reproduce it yet.
+   :DONE: _resume_track_id saved alongside _resume_queue_idx on exit; on restore, if the track at the saved index doesn't match the ID, queue is scanned for the right track; if missing entirely, resumes from position 0 (app.py ~7719, ~8999)
+** DONE Liked playlists should be removed when the corresponding playlist has been deleted.
+   :DONE: playlists_delete_current() now discards name from liked_playlist_ids and filters liked_playlists before saving, for both single and multi-select deletion paths; calls _commit_liked() (app.py ~5964)
+** DONE Year mismatch between tracks and album.
+   :DONE: mono_to_track() was extracting year as releaseDate[:4] with no fallback; now calls album_year_from_obj() which tries six fields (releaseDate, streamStartDate, date, copyright, year, releaseYear), same as Album objects (models.py ~240)
+** DONE It should be possible to move tracks inside playlists with the same keybinds as in the queue and miniqueue.
+   :DONE: _swap_playlist_items() swaps in both playlist_view_tracks and playlists[name]; _move_items() generic helper shared by queue and playlist J/K handler; Shift+Up/Down also work (app.py ~1896, ~8778)
+** DONE Pressing c to cycle the side pane doesn't affect the playback tab default set in settings.jsonc.
+   :DONE: switch_tab() was unconditionally resetting sideview='cover' for minicover layouts; now reads settings['sideview'] instead; c handler calls _persist_settings() immediately (app.py ~7642, ~8583)

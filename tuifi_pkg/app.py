@@ -7642,16 +7642,18 @@ class App:
             elif _layout in ("lyrics_miniqueue_minicover", "lyrics_miniqueue_cover"):
                 self._cover_lyrics = True
                 self.queue_overlay = True
-                self._album_cover_pane = True
-                self.settings["sideview"] = "cover"
+                _sv = self.settings.get("sideview", "cover")
+                self._album_cover_pane = _sv in ("cover", "both")
+                self._cava_pane = _sv in ("spectrum", "both")
             elif _layout == "miniqueue":
                 self._cover_lyrics = False
                 self.queue_overlay = True
             elif _layout == "miniqueue_cover":
                 self._cover_lyrics = False
                 self.queue_overlay = True
-                self._album_cover_pane = True
-                self.settings["sideview"] = "cover"
+                _sv = self.settings.get("sideview", "cover")
+                self._album_cover_pane = _sv in ("cover", "both")
+                self._cava_pane = _sv in ("spectrum", "both")
             self.fetch_cover_async(self.current_track)
             if self.queue_overlay:
                 self.jump_to_playing_in_queue()
@@ -8584,6 +8586,7 @@ class App:
                                               else "spectrum" if self._cava_pane
                                               else "cover" if self._album_cover_pane
                                               else "off")
+                self._persist_settings()
                 self._full_redraw()
                 continue
             if ch == ord("n"):

@@ -7719,7 +7719,14 @@ class App:
         if self.settings.get("auto_resume_playback") and self.queue_items and not self.mp.alive():
             _resume_idx = int(self.settings.get("_resume_queue_idx", self.queue_play_idx))
             _resume_pos = float(self.settings.get("_resume_position", 0.0))
+            _resume_tid = self.settings.get("_resume_track_id")
             _resume_idx = clamp(_resume_idx, 0, len(self.queue_items) - 1)
+            if _resume_tid is not None and self.queue_items[_resume_idx].id != _resume_tid:
+                _found = next((i for i, t in enumerate(self.queue_items) if t.id == _resume_tid), None)
+                if _found is not None:
+                    _resume_idx = _found
+                else:
+                    _resume_pos = 0.0
             self.play_queue_index(_resume_idx, start_pos=_resume_pos)
             if _resume_pos > 1.0:
                 self.toast(f"Resumed from {fmt_time(_resume_pos)}")
@@ -8992,6 +8999,7 @@ class App:
                 if _tp is not None and _tp > 1.0:
                     self.settings["_resume_queue_idx"] = self.queue_play_idx
                     self.settings["_resume_position"] = float(_tp)
+                    self.settings["_resume_track_id"] = self.current_track.id
         except Exception:
             pass
         self._persist_settings()

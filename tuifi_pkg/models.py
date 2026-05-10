@@ -102,19 +102,22 @@ def year_norm(y: str) -> str:
 def album_year_from_obj(obj: Any) -> str:
     if not isinstance(obj, dict):
         return "????"
-    # copyright ("℗ 1999 Label") is the most reliable original-release-year source;
-    # releaseDate on catalog titles is sometimes the streaming availability date.
+    # Collect every year value we can find across all fields, then return the
+    # minimum. The original release year can never be newer than any year
+    # associated with the album (copyright, releaseDate, streamStartDate, etc.).
+    years = []
     for k in ("copyright", "releaseDate", "streamStartDate", "date"):
         v = obj.get(k)
         if isinstance(v, str):
             m = re.search(r"(19\d{2}|20\d{2})", v)
             if m:
-                return m.group(1)
+                years.append(m.group(1))
     for k in ("year", "releaseYear"):
         v = obj.get(k)
-        if isinstance(v, (int, str)) and str(v).isdigit():
-            return str(v)
-    return "????"
+        s = str(v) if isinstance(v, (int, str)) else ""
+        if re.match(r"(19|20)\d{2}$", s):
+            years.append(s)
+    return min(years) if years else "????"
 
 
 def fmt_time(sec: Optional[float]) -> str:

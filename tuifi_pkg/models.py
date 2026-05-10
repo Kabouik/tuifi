@@ -102,7 +102,9 @@ def year_norm(y: str) -> str:
 def album_year_from_obj(obj: Any) -> str:
     if not isinstance(obj, dict):
         return "????"
-    for k in ("releaseDate", "streamStartDate", "date", "copyright"):
+    # copyright ("℗ 1999 Label") is the most reliable original-release-year source;
+    # releaseDate on catalog titles is sometimes the streaming availability date.
+    for k in ("copyright", "releaseDate", "streamStartDate", "date"):
         v = obj.get(k)
         if isinstance(v, str):
             m = re.search(r"(19\d{2}|20\d{2})", v)

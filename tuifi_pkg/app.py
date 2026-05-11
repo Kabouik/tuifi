@@ -1075,6 +1075,16 @@ class App:
         if not tracks:
             tracks.extend(self._scan_parse_tracks(payload))
 
+        # The album-level object in the payload has fuller year data (releaseDate)
+        # than each track's nested album dict (which often only has streamStartDate).
+        # Apply the album's year to any tracks that resolved to "????".
+        album_data = get_path(payload, ("data",)) or payload
+        album_year = album_year_from_obj(album_data) if isinstance(album_data, dict) else "????"
+        if album_year != "????":
+            for t in tracks:
+                if t.year == "????":
+                    t.year = album_year
+
         out = list({t.id: t for t in tracks}.values())
         out.sort(key=lambda t: (t.track_no if t.track_no > 0 else 10_000, t.title.lower()))
         return out
@@ -4936,7 +4946,10 @@ class App:
             aid = self._resolve_album_id_for_album(album)
             if aid:
                 tracks = self._fetch_album_tracks_by_album_id(aid)
-                self.album_header = Album(id=aid, title=album.title, artist=album.artist, year=album.year, n_tracks=album.n_tracks if album.n_tracks is not None else len(tracks))
+                header_year = album.year
+                if header_year == "????" and tracks:
+                    header_year = next((t.year for t in tracks if t.year != "????"), "????")
+                self.album_header = Album(id=aid, title=album.title, artist=album.artist, year=header_year, n_tracks=album.n_tracks if album.n_tracks is not None else len(tracks))
             else:
                 payload = self.client.search_tracks(album.title, limit=280)
                 al0 = album.title.strip().lower()
@@ -4948,7 +4961,7 @@ class App:
             self.album_tracks = tracks[:1500]
             for t in self.album_tracks[:40]:
                 if (self.show_track_year and year_norm(t.year) == "????") or (self.show_track_duration and not t.duration):
-                    self.meta.want(t.id)
+                    self.meta.want(t.id, t.album_id or 0)
             self._album_tab_has_content = True
             self.toast(f"Album {len(self.album_tracks)}")
 
@@ -6292,7 +6305,7 @@ class App:
                 it = items[i]
                 if isinstance(it, Track):
                     if (self.show_track_year and year_norm(it.year) == "????") or (self.show_track_duration and not it.duration):
-                        self.meta.want(it.id)
+                        self.meta.want(it.id, it.album_id or 0)
 
         pq_set = {qi: pos+1 for pos, qi in enumerate(self.priority_queue)}
         _gl_pp = self._mpv_last_pp if self._mpv_last_pp is not None else 0
@@ -6660,7 +6673,7 @@ class App:
         for i in range(q_scroll, min(len(self.queue_items), q_scroll + min(h, 14))):
             t = self.queue_items[i]
             if not t.duration:
-                self.meta.want(t.id)
+                self.meta.want(t.id, t.album_id or 0)
 
         tp, du, pa, vo, mu = self.mp.snapshot()
         alive = self.mp.alive()

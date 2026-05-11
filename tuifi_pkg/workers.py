@@ -28,10 +28,12 @@ class MetaFetcher:
     def stop(self) -> None:
         self._stop = True
 
-    def want(self, tid: int) -> None:
+    def want(self, tid: int, album_id: int = 0) -> None:
         if tid <= 0:
             return
         with self.lock:
+            if album_id > 0 and tid not in self.album_id:
+                self.album_id[tid] = album_id
             if tid in self.pending:
                 return
             self.pending.add(tid)
@@ -64,6 +66,19 @@ class MetaFetcher:
                     dv = data.get("duration")
                     if isinstance(dv, (int, float)) and dv > 0:
                         self.duration[tid] = int(dv)
+                # /info/ gave no year — fall back to /album/ which has releaseDate
+                if tid not in self.year:
+                    aid = self.album_id.get(tid)
+                    if aid:
+                        try:
+                            alb_payload = self.client.album(aid)
+                            alb_data = alb_payload.get("data") if isinstance(alb_payload, dict) else None
+                            if isinstance(alb_data, dict):
+                                y3 = album_year_from_obj(alb_data)
+                                if y3 != "????":
+                                    self.year[tid] = y3
+                        except Exception:
+                            pass
             except Exception:
                 pass
             finally:

@@ -106,7 +106,7 @@ def album_year_from_obj(obj: Any) -> str:
     # minimum. The original release year can never be newer than any year
     # associated with the album (copyright, releaseDate, streamStartDate, etc.).
     years = []
-    for k in ("copyright", "releaseDate", "streamStartDate", "date"):
+    for k in ("copyright", "releaseDate", "date"):
         v = obj.get(k)
         if isinstance(v, str):
             m = re.search(r"(19\d{2}|20\d{2})", v)
@@ -242,18 +242,7 @@ def mono_to_track(d: Dict[str, Any]) -> Optional["Track"]:
         album_title = str(album_d.get("title", "") or "") if isinstance(album_d, dict) else str(album_d)
         album_id    = album_d.get("id") if isinstance(album_d, dict) else None
         cover_raw   = album_d.get("cover") if isinstance(album_d, dict) else None
-        # Only trust releaseDate and copyright from the nested album dict;
-        # streamStartDate is the TIDAL streaming-availability date, not the
-        # original release year, and it's the only date field present for many
-        # catalog albums — picking it up would block the MetaFetcher fallback.
-        if isinstance(album_d, dict):
-            _rd = str(album_d.get("releaseDate") or "")
-            _cr = str(album_d.get("copyright") or "")
-            _ys = [m.group(1) for s in (_rd, _cr)
-                   if s for m in (re.search(r"(19\d{2}|20\d{2})", s),) if m]
-            year = min(_ys) if _ys else "????"
-        else:
-            year = "????"
+        year = album_year_from_obj(album_d) if isinstance(album_d, dict) else "????"
         def _int(x: Any) -> Optional[int]:
             try: return int(x) if x is not None else None
             except Exception: return None

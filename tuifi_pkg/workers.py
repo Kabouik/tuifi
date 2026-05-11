@@ -21,6 +21,7 @@ class MetaFetcher:
         self.album_id: Dict[int, int] = {}
         self.artist_id: Dict[int, int] = {}
         self.duration: Dict[int, int] = {}
+        self._album_year_cache: Dict[int, str] = {}
         self._stop = False
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
@@ -71,12 +72,15 @@ class MetaFetcher:
                     aid = self.album_id.get(tid)
                     if aid:
                         try:
-                            alb_payload = self.client.album(aid)
-                            alb_data = alb_payload.get("data") if isinstance(alb_payload, dict) else None
-                            if isinstance(alb_data, dict):
-                                y3 = album_year_from_obj(alb_data)
-                                if y3 != "????":
-                                    self.year[tid] = y3
+                            if aid in self._album_year_cache:
+                                y3 = self._album_year_cache[aid]
+                            else:
+                                alb_payload = self.client.album(aid)
+                                alb_data = alb_payload.get("data") if isinstance(alb_payload, dict) else None
+                                y3 = album_year_from_obj(alb_data) if isinstance(alb_data, dict) else "????"
+                                self._album_year_cache[aid] = y3
+                            if y3 != "????":
+                                self.year[tid] = y3
                         except Exception:
                             pass
             except Exception:

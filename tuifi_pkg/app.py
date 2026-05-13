@@ -6304,7 +6304,7 @@ class App:
             for i in range(self.left_scroll, min(n, self.left_scroll + min(h, 14))):
                 it = items[i]
                 if isinstance(it, Track):
-                    if (self.show_track_year and year_norm(it.year) == "????") or (self.show_track_duration and not it.duration):
+                    if (self.show_track_year and self._track_year(it) == "????") or (self.show_track_duration and not self._track_duration(it)):
                         self.meta.want(it.id, it.album_id or 0)
 
         pq_set = {qi: pos+1 for pos, qi in enumerate(self.priority_queue)}

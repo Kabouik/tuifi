@@ -103,7 +103,6 @@ class App:
         self.api_base = api_base.rstrip("/")
         self.client = HiFiClient(self.api_base)
         self.meta = MetaFetcher(self.client)
-        self.meta.on_fetch = self._full_redraw
         self.mp = MPV()
         self.mp_poller = MPVPoller(self.mp, self._on_mpv_tick)
         self.dl = DownloadManager()
@@ -1219,6 +1218,10 @@ class App:
             self.meta.want(t.id, t.album_id or 0)
         self.toast(f"Refreshing metadata for {len(tracks)} tracks…")
         self._full_redraw()
+        def _wait_done():
+            self.meta.q.join()
+            self._full_redraw()
+        self._bg(_wait_done)
 
     # ---------------------------------------------------------------------------
     # formatting

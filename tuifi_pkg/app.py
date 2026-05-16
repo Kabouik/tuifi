@@ -1197,6 +1197,28 @@ class App:
     def _track_duration(self, t: Track) -> Optional[int]:
         return t.duration or self.meta.duration.get(t.id)
 
+    def _force_meta_refresh_view(self) -> None:
+        """Clear cached year/duration for all tracks in the current view and re-fetch."""
+        _typ, items = self._left_items()
+        tracks: List[Track] = [it for it in items if isinstance(it, Track)]
+        if self._queue_context():
+            tracks = list(self.queue_items)
+        if not tracks:
+            self.toast("No tracks to refresh")
+            return
+        if not self.prompt_yes_no(f"Re-fetch metadata for {len(tracks)} track(s)? (y/n)"):
+            return
+        with self.meta.lock:
+            for t in tracks:
+                t.year = ""
+                self.meta.year.pop(t.id, None)
+                self.meta.duration.pop(t.id, None)
+                self.meta.pending.discard(t.id)
+        for t in tracks:
+            self.meta.want(t.id, t.album_id or 0)
+        self.toast(f"Refreshing metadata for {len(tracks)} tracks…")
+        self._full_redraw()
+
     # ---------------------------------------------------------------------------
     # formatting
     # ---------------------------------------------------------------------------
@@ -6931,6 +6953,7 @@ class App:
             " i/I       show selected/playing info",
             " v/V       show lyrics of selected/playing (in tab 0, V cycles display modes)",
             " o/O       open selected/playing in browser",
+            " _         re-fetch metadata for all tracks in current view",
             "",
             "\x01 GENERAL",
             " /         search TIDAL",
@@ -7899,6 +7922,7 @@ class App:
             ord("$"): lambda: self.toast("Download paused" if self.dl.toggle_pause() else "Download resumed"),
             ord("%"): lambda: (self.dl.cancel(), self.toast("Download queue cancelled")),
             ord("#"): self.show_download_queue_dialog,
+            ord("_"): self._force_meta_refresh_view,
         }
 
         while True:

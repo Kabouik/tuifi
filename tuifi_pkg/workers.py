@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 import time
 from queue import Queue, Empty
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from tuifi_pkg.models import Track, album_year_from_obj, debug_log
 from tuifi_pkg.client import HiFiClient
@@ -22,6 +22,7 @@ class MetaFetcher:
         self.artist_id: Dict[int, int] = {}
         self.duration: Dict[int, int] = {}
         self._album_year_cache: Dict[int, str] = {}
+        self.on_fetch: Optional[Callable[[], None]] = None
         self._stop = False
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
@@ -89,6 +90,8 @@ class MetaFetcher:
                 with self.lock:
                     self.pending.discard(tid)
                 self.q.task_done()
+            if self.on_fetch:
+                self.on_fetch()
 
 
 class DownloadManager:

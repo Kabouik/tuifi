@@ -103,6 +103,7 @@ class App:
         self.api_base = api_base.rstrip("/")
         self.client = HiFiClient(self.api_base)
         self.meta = MetaFetcher(self.client)
+        self.meta.on_fetch = self._full_redraw
         self.mp = MPV()
         self.mp_poller = MPVPoller(self.mp, self._on_mpv_tick)
         self.dl = DownloadManager()

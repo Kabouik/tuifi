@@ -64,6 +64,9 @@ class HiFiClient:
     def search_tracks(self, q: str, limit: int = 160) -> Dict[str, Any]:
         return http_get_json(self._u("/search/", {"s": q, "limit": limit}))
 
+    def search_albums(self, q: str, limit: int = 25) -> Dict[str, Any]:
+        return http_get_json(self._u("/search/", {"al": q, "limit": limit}))
+
     def recommendations(self, track_id: int, limit: int = 50) -> Dict[str, Any]:
         return http_get_json(self._u("/recommendations/", {"id": int(track_id), "limit": limit}))
 

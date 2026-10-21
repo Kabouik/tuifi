@@ -181,6 +181,7 @@ class App:
 
         self.search_q = ""
         self.search_results: List[Track] = []
+        self.search_albums: List[Album] = []
         self.recommended_results: List[Track] = []
         # Mix tab state
         self.mix_tracks: List[Track] = []
@@ -987,6 +988,9 @@ class App:
                 return None
             artist = "Unknown"
             a = obj.get("artist")
+            if not isinstance(a, dict):                    # search results carry "artists": [...]
+                al = obj.get("artists")
+                a = al[0] if isinstance(al, list) and al and isinstance(al[0], dict) else None
             if isinstance(a, dict):
                 artist = str(a.get("name") or artist).strip() or artist
             cover = obj.get("cover") or obj.get("coverArt") or None
@@ -1020,6 +1024,22 @@ class App:
             if isinstance(payload.get("items"), list):
                 return list({t.id: t for t in self._parse_items_list(payload["items"])}.values())
         return []
+
+    def _extract_albums_from_search(self, payload: Dict[str, Any]) -> List[Album]:
+        """Albums from an album search (/search/?al=...); TIDAL returns them under data.albums.items."""
+        items: Any = None
+        if isinstance(payload, dict):
+            data = payload.get("data")
+            for root in (data, payload):
+                if isinstance(root, dict):
+                    alb = root.get("albums")
+                    if isinstance(alb, dict) and isinstance(alb.get("items"), list):
+                        items = alb["items"]
+                        break
+        albums = [a for o in (items or []) if isinstance(o, dict) and (a := self._parse_album_obj(o))]
+        # Keep TIDAL's relevance order (_dedupe_albums would re-sort by year); drop repeat ids only.
+        seen: Set[int] = set()
+        return [a for a in albums if not (a.id in seen or seen.add(a.id))]
 
     def _looks_like_track_dict(self, d: Dict[str, Any]) -> bool:
         if "id" not in d or not (("title" in d) or ("name" in d)):
@@ -1287,6 +1307,13 @@ class App:
         _simple_tabs = {TAB_QUEUE: ("queue_tab", self.queue_items), TAB_SEARCH: ("tracks", self.search_results),
                         TAB_RECOMMENDED: ("tracks", self.recommended_results), TAB_MIX: ("tracks", self.mix_tracks),
                         TAB_HISTORY: ("tracks", self.history_tracks), TAB_PLAYBACK: ("playback_tab", [])}
+        if self.tab == TAB_SEARCH and self.search_albums:
+            items = [("sep", f"Albums ({len(self.search_albums)})")]
+            items.extend(self.search_albums)
+            if self.search_results:
+                items.append(("sep", f"Tracks ({len(self.search_results)})"))
+                items.extend(self.search_results)
+            return ("artist_mixed", items)
         if self.tab in _simple_tabs:
             return _simple_tabs[self.tab]
         if self.tab == TAB_ARTIST:
@@ -1362,7 +1389,7 @@ class App:
         return it if isinstance(it, Track) else None
 
     def _selected_left_album(self) -> Optional[Album]:
-        if self.tab not in (TAB_ARTIST, TAB_LIKED):
+        if self.tab not in (TAB_ARTIST, TAB_LIKED, TAB_SEARCH):
             return None
         it = self._selected_left_item()
         return it if isinstance(it, Album) else None
@@ -2693,7 +2720,7 @@ class App:
                 if isinstance(it, str):
                     self._enqueue_playlist_async(it, insert_after_playing)
                     return
-            if self.tab == TAB_ARTIST:
+            if self.tab in (TAB_ARTIST, TAB_SEARCH):
                 alb = self._selected_left_album()
                 if alb:
                     self.enqueue_album_async(alb, insert_after_playing)
@@ -5435,7 +5462,7 @@ class App:
             if self.tab == TAB_ALBUM and self._selected_album_title_line() and self.album_header:
                 self.open_info_album(self.album_header)
                 return
-            if self.tab == TAB_ARTIST:
+            if self.tab in (TAB_ARTIST, TAB_SEARCH):
                 alb = self._selected_left_album()
                 if alb:
                     self.open_info_album(alb)
@@ -5887,19 +5914,46 @@ class App:
         self.search_q = q
         self.last_error = None
         try:
-            payload = self.client.search_tracks(self.search_q, limit=260)
-            results = self._extract_tracks_from_search(payload)
-            if results:
+            results, albums = self._search_tracks_and_albums(self.search_q)
+            if results or albums:
                 self.search_results = results
+                self.search_albums = albums
                 self.switch_tab(TAB_SEARCH, refresh=False)
                 self._reset_left_cursor()
-                self.toast(f"{len(self.search_results)} results")
+                if albums:
+                    self.left_idx = 1          # skip the "Albums" separator
+                    self.toast(f"{len(albums)} albums, {len(results)} tracks")
+                else:
+                    self.toast(f"{len(self.search_results)} results")
             else:
                 self.search_results = []
+                self.search_albums = []
                 self.toast("0 results")
         except Exception as e:
             self.last_error = str(e)
             self._toast_redraw("Error")
+
+    def _search_tracks_and_albums(self, q: str) -> Tuple[List[Track], List[Album]]:
+        """Run the track and album searches side by side.  Albums are best effort: if that
+        request fails (older hifi-api, network blip) the track results are still returned."""
+        out: Dict[str, Any] = {}
+
+        def run(key, fn):
+            try:
+                out[key] = fn()
+            except Exception as e:
+                out[key] = e
+        th = threading.Thread(target=run, args=("albums", lambda: self.client.search_albums(q, limit=25)), daemon=True)
+        th.start()
+        run("tracks", lambda: self.client.search_tracks(q, limit=260))
+        th.join(timeout=30)
+        if isinstance(out.get("tracks"), Exception):
+            raise out["tracks"]
+        tracks = self._extract_tracks_from_search(out["tracks"])
+        alb_payload = out.get("albums")
+        albums = [] if (alb_payload is None or isinstance(alb_payload, Exception)) \
+            else self._extract_albums_from_search(alb_payload)
+        return tracks, albums
 
     # ---------------------------------------------------------------------------
     # filter / find
@@ -6470,7 +6524,7 @@ class App:
                         _is_si_ep = self._show_singles_eps and it.type in ("SINGLE", "EP")
                         _title = re.sub(r'\s*-\s*(single|ep)\s*$', '', it.title, flags=re.IGNORECASE) if _is_si_ep else it.title
                         # Segments: main title, "[" (album), type (purple), sep (album), count (C17), "]" (album)
-                        _main = f"{_title}{ys}"
+                        _main = f"{it.artist} — {_title}{ys}" if self.tab == TAB_SEARCH else f"{_title}{ys}"
                         _show_cnt = self.show_album_track_count
                         if _is_si_ep:
                             _seg_open   = " ["
@@ -8865,7 +8919,7 @@ class App:
                 if self.tab == TAB_ALBUM and self._selected_album_title_line():
                     self.start_download_tracks(list(self.album_tracks))
                     continue
-                if self.tab == TAB_ARTIST:
+                if self.tab in (TAB_ARTIST, TAB_SEARCH):
                     _dit = self._selected_left_item()
                     if isinstance(_dit, tuple) and _dit[0] == "artist_header":
                         if self.artist_albums:
@@ -8926,7 +8980,7 @@ class App:
                 if self.tab == TAB_ALBUM and self._selected_album_title_line():
                     self.start_download_tracks(list(self.album_tracks))
                     continue
-                if self.tab == TAB_ARTIST:
+                if self.tab in (TAB_ARTIST, TAB_SEARCH):
                     _dit = self._selected_left_item()
                     if isinstance(_dit, tuple) and _dit[0] == "artist_header":
                         if self.artist_albums:
@@ -9019,7 +9073,7 @@ class App:
                     if isinstance(it_liked, str):
                         self.playlists_open_by_name(it_liked)
                         continue
-                if self.tab == TAB_ARTIST:
+                if self.tab in (TAB_ARTIST, TAB_SEARCH):
                     alb = self._selected_left_album()
                     if alb:
                         self.open_album_from_album_obj(alb)
